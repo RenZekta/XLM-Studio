@@ -1,11 +1,19 @@
 import React, { useState, useEffect } from 'react'
-import { ExternalLink, Copy, Check, RefreshCw, X, SquareArrowUpRight, Lock, Pin } from 'lucide-react'
+import { ExternalLink, Copy, RefreshCw, X, SquareArrowUpRight, Lock, Pin } from 'lucide-react'
+
+// Allow the Electron-specific `-webkit-app-region` CSS property in inline styles.
+declare module 'react' {
+  interface CSSProperties {
+    [key: `Webkit${string}`]: string | number | undefined
+  }
+}
 
 const IS_MACOS = typeof navigator !== 'undefined' && /Mac|iPhone|iPad/.test(navigator.userAgent)
 
 interface Tab {
   url: string
   name: string
+  ctxSize?: number  // Fix 10: context size for display in the address bar
 }
 
 export default function ChatWindow({ url }: { url: string }) {
@@ -13,9 +21,10 @@ export default function ChatWindow({ url }: { url: string }) {
   const searchParams = new URLSearchParams(window.location.search)
   const isDetached = searchParams.get('detached') === 'true'
   const initialName = searchParams.get('name') || getPortLabel(url)
+  const initialCtx = searchParams.get('ctx') ? parseInt(searchParams.get('ctx')!, 10) : undefined
 
-  // Manage tabs: { url, name }
-  const [tabs, setTabs] = useState<Tab[]>([{ url, name: initialName }])
+  // Manage tabs: { url, name, ctxSize }
+  const [tabs, setTabs] = useState<Tab[]>([{ url, name: initialName, ctxSize: initialCtx }])
   const [activeTab, setActiveTab] = useState<string>(url)
   const [loadedTabs, setLoadedTabs] = useState<Set<string>>(new Set([url]))
   
@@ -46,13 +55,13 @@ export default function ChatWindow({ url }: { url: string }) {
   useEffect(() => {
     if (isDetached) return
 
-    window.api.onAddChatTab((data: { url: string; name: string }) => {
+    window.api.onAddChatTab((data: { url: string; name: string; ctxSize?: number }) => {
       setTabs((prev) => {
         if (prev.some(t => t.url === data.url)) {
           setActiveTab(data.url)
           return prev
         }
-        const next = [...prev, data]
+        const next = [...prev, { url: data.url, name: data.name, ctxSize: data.ctxSize }]
         setActiveTab(data.url)
         
         // Add to glowing tabs to flash it!
@@ -397,7 +406,7 @@ export default function ChatWindow({ url }: { url: string }) {
                   {!isDetached && !isPinned && (
                     <button
                       onClick={(e) => handleTogglePinTab(tab.url, e)}
-                      title="Fixar aba"
+                      title="Pin Tab"
                       style={{
                         background: 'none',
                         border: 'none',
@@ -449,7 +458,7 @@ export default function ChatWindow({ url }: { url: string }) {
                   {!isDetached && !isPinned && (
                     <button
                       onClick={(e) => handleDetachTab(tab.url, tab.name, e)}
-                      title="Abrir em Nova Janela"
+                      title="Open in New Window"
                       style={{
                         background: 'none',
                         border: 'none',
@@ -479,7 +488,7 @@ export default function ChatWindow({ url }: { url: string }) {
                   {!isPinned && (
                     <button
                       onClick={(e) => handleCloseTab(tab.url, e)}
-                      title="Fechar aba"
+                      title="Close Tab"
                       style={{
                         background: 'none',
                         border: 'none',
@@ -583,6 +592,19 @@ export default function ChatWindow({ url }: { url: string }) {
           <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', flex: 1 }}>
             {getCleanAddress(activeTab)}
           </span>
+          {/* Fix 10: Context size badge — shows the template's ctx-size */}
+          {(() => {
+            const activeTabObj = tabs.find(t => t.url === activeTab)
+            return activeTabObj?.ctxSize ? (
+              <span style={{
+                fontSize: 11, fontWeight: 600, color: 'var(--text-secondary)',
+                background: 'var(--bg)', border: '1px solid var(--border)',
+                borderRadius: 4, padding: '1px 6px', flexShrink: 0
+              }} title="Context size">
+                ctx: {activeTabObj.ctxSize.toLocaleString()}
+              </span>
+            ) : null
+          })()}
           <span style={{ fontSize: 10, color: 'var(--text-muted)', display: 'flex', alignItems: 'center', gap: 4 }}>
             {copied ? (
               <span style={{ color: 'var(--success)', fontWeight: 600 }}>Link Copied!</span>

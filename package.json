@@ -1,9 +1,11 @@
 {
-  "name": "hexllama",
-  "version": "1.1.0",
-  "description": "hexllama — a GUI for llama.cpp",
+  "name": "xlm-studio",
+  "version": "2.0.0",
+  "description": "XLM Studio — a GUI for llama.cpp (fork of Hexllama)",
   "main": "out/main/index.js",
   "homepage": "./",
+  "author": "Ren Zekta",
+  "license": "MPL-2.0",
   "scripts": {
     "dev": "electron-vite dev",
     "build": "electron-vite build",

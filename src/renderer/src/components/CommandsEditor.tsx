@@ -84,11 +84,10 @@ function CmdForm({ cmd, onChange, onDelete }: CmdFormProps) {
 }
 interface CategorySectionProps {
   cat: CommandCategory
-  catIndex: number
   onChange: (c: CommandCategory) => void
   onDelete: () => void
 }
-function CategorySection({ cat, catIndex, onChange, onDelete }: CategorySectionProps) {
+function CategorySection({ cat, onChange, onDelete }: CategorySectionProps) {
   const [open, setOpen] = useState(false)
   const [editingName, setEditingName] = useState(false)
   const [pickingIcon, setPickingIcon] = useState(false)
@@ -190,34 +189,34 @@ function CategorySection({ cat, catIndex, onChange, onDelete }: CategorySectionP
     </div>
   )
 }
-export default function CommandsEditor({ backendName }: { backendName: string }) {
-  const { setCommandsSchema, backends } = useStore()
+export default function CommandsEditor({ backendKey }: { backendKey: string }) {
+  const { setCommandsSchema } = useStore()
   const [schema, setSchema] = useState<CommandsSchema | null>(null)
   const [loading, setLoading] = useState(false)
   const [saving, setSaving] = useState(false)
   const [saved, setSaved] = useState(false)
   useEffect(() => {
     setLoading(true)
-    window.api.getCommands(backendName).then(s => {
+    window.api.getCommands(backendKey).then(s => {
       setSchema(s ? JSON.parse(JSON.stringify(s)) : { version: '1.0', categories: [] })
       setLoading(false)
     })
-  }, [backendName])
+  }, [backendKey])
   async function handleSave() {
     if (!schema) return
     setSaving(true)
-    const res = await window.api.saveBackendCommands(backendName, schema)
+    const res = await window.api.saveBackendCommands(backendKey, schema)
     setSaving(false)
     if (res.success) {
       setSaved(true); setTimeout(() => setSaved(false), 2000)
-      const updated = await window.api.getCommands(backendName)
+      const updated = await window.api.getCommands(backendKey)
       if (updated) setCommandsSchema(updated)
     } else { alert('Save failed: ' + res.error) }
   }
   async function handleReset() {
     if (!confirm('Reset to current saved schema?')) return
     setLoading(true)
-    const s = await window.api.getCommands(backendName)
+    const s = await window.api.getCommands(backendKey)
     setSchema(s ? JSON.parse(JSON.stringify(s)) : null)
     setLoading(false)
   }
@@ -252,7 +251,7 @@ export default function CommandsEditor({ backendName }: { backendName: string })
       </div>
       {schema.categories.map((cat, i) => (
         <CategorySection
-          key={i} cat={cat} catIndex={i}
+          key={i} cat={cat}
           onChange={c => updateCategory(i, c)}
           onDelete={() => deleteCategory(i)}
         />

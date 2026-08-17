@@ -1,15 +1,21 @@
-import { ipcMain, dialog, shell, BrowserWindow } from 'electron'
+import { ipcMain, dialog, shell, BrowserWindow, nativeTheme } from 'electron'
 import {
   existsSync, readdirSync, readFileSync, writeFileSync, mkdirSync,
   unlinkSync, createWriteStream, statSync, rmdirSync, renameSync, promises as fsPromises
 } from 'fs'
 import { join, extname, basename, dirname, resolve } from 'path'
-import { spawn, ChildProcess } from 'child_process'
+import { spawn, ChildProcess, exec } from 'child_process'
 import https from 'https'
 import http from 'http'
 import { app } from 'electron'
 import extract from 'extract-zip'
 import net from 'net'
+import type {
+  ModelGroup, ModelEntry, MmprojFile, BackendVersion,
+  CommandsSchema, TrackedBackend, TrackedBackendRelease,
+  ThemePref, ReleaseInfo, BaseUrlOverride
+} from '../shared/types'
+
 const APP_ROOT = app.isPackaged ? join(app.getPath('userData')) : join(process.cwd())
 const MODELS_DIR    = join(APP_ROOT, 'models')
 const TEMPLATES_DIR = join(APP_ROOT, 'templates')
@@ -18,40 +24,576 @@ const SETTINGS_PATH = join(APP_ROOT, 'settings.json')
 for (const dir of [MODELS_DIR, TEMPLATES_DIR, BACKEND_DIR]) {
   if (!existsSync(dir)) mkdirSync(dir, { recursive: true })
 }
-function isSafePath(base: string, target: string): boolean {
-  return resolve(target).startsWith(resolve(base))
+
+// --------------------------------------------------------------------------
+// Tracked backends — built-in defaults
+// --------------------------------------------------------------------------
+const DEFAULT_TRACKED: TrackedBackend[] = [
+  {
+    id: 'llama-cpp',
+    repo: 'ggml-org/llama.cpp',
+    name: 'llama.cpp',
+    folderName: 'llama.cpp',
+    isDefault: true
+  },
+  {
+    id: 'atomic-llama-cpp-turboquant',
+    repo: 'AtomicBot-ai/atomic-llama-cpp-turboquant',
+    name: 'atomic-llama-cpp-turboquant',
+    folderName: 'atomic-llama-cpp-turboquant',
+    isDefault: true,
+    // TurboQuant fork exposes additional KV cache quantization types.
+    defaultOptions: {
+      '--cache-type-k': ['f32', 'f16', 'bf16', 'q8_0', 'q4_0', 'q4_1', 'iq4_nl', 'q5_0', 'q5_1', 'turbo2', 'turbo3', 'turbo4'],
+      '--cache-type-v': ['f32', 'f16', 'bf16', 'q8_0', 'q4_0', 'q4_1', 'iq4_nl', 'q5_0', 'q5_1', 'turbo2', 'turbo3', 'turbo4']
+    }
+  }
+]
+
+// --------------------------------------------------------------------------
+// Settings persistence
+// --------------------------------------------------------------------------
+interface AppSettings {
+  externalModelFolders: string[]
+  externalBackendFolders: string[]
+  mainModelFolder: string | null
+  mainBackendFolder: string | null
+  theme: ThemePref
+  trackedBackends: TrackedBackend[]
+  modelDefaults?: { autoFitEnabled: boolean; autoFitContextLength: number; guardrailMode: string; customMaxSizeGB: number }
+  baseUrlOverride?: BaseUrlOverride
+  samplingPresets?: any[]
+  starredPresetId?: string
 }
-interface AppSettings { externalModelFolders: string[] }
+
+// Default Base URL Override: enabled by default, port 1234, no LAN, no API key.
+// The override URL is always http://localhost:<port>/v1.
+const DEFAULT_BASE_URL_OVERRIDE: BaseUrlOverride = {
+  enabled: true,
+  port: 1234,
+  serveOnLocalNetwork: false,
+  apiKeyEnabled: false,
+  apiKey: ''
+}
+
+// Migrate a (possibly legacy) baseUrlOverride object to the new schema.
+// Legacy format: { enabled: boolean, url: string }
+// New format:     { enabled, port, serveOnLocalNetwork, apiKeyEnabled, apiKey }
+//
+// The override is now ON by default (the user requested this). Legacy users
+// who had the old default (enabled=false) are migrated to enabled=true so they
+// pick up the new default behaviour. Users on the new format keep their
+// explicit enabled choice.
+function migrateBaseUrlOverride(raw: any): BaseUrlOverride {
+  if (!raw || typeof raw !== 'object') return { ...DEFAULT_BASE_URL_OVERRIDE }
+  // Legacy: had a `url` field instead of `port`.
+  if (raw.port === undefined && raw.url !== undefined) {
+    let port = DEFAULT_BASE_URL_OVERRIDE.port
+    try {
+      const u = new URL(raw.url)
+      if (u.port) {
+        const p = parseInt(u.port, 10)
+        if (p > 0 && p < 65536) port = p
+      }
+    } catch {}
+    return {
+      enabled: true,  // new default: ON for legacy migrations
+      port,
+      serveOnLocalNetwork: raw.serveOnLocalNetwork ?? false,
+      apiKeyEnabled: raw.apiKeyEnabled ?? false,
+      apiKey: raw.apiKey ?? ''
+    }
+  }
+  return {
+    enabled: raw.enabled ?? DEFAULT_BASE_URL_OVERRIDE.enabled,
+    port: Math.max(1, Math.min(65535, Number(raw.port) || DEFAULT_BASE_URL_OVERRIDE.port)),
+    serveOnLocalNetwork: !!raw.serveOnLocalNetwork,
+    apiKeyEnabled: !!raw.apiKeyEnabled,
+    apiKey: typeof raw.apiKey === 'string' ? raw.apiKey : ''
+  }
+}
+
+const DEFAULT_SETTINGS: AppSettings = {
+  externalModelFolders: [],
+  externalBackendFolders: [],
+  mainModelFolder: null,
+  mainBackendFolder: null,
+  theme: 'system',
+  trackedBackends: DEFAULT_TRACKED,
+  modelDefaults: { autoFitEnabled: true, autoFitContextLength: 60000, guardrailMode: 'strict', customMaxSizeGB: 0 },
+  baseUrlOverride: { ...DEFAULT_BASE_URL_OVERRIDE },
+  samplingPresets: [],
+  starredPresetId: 'lm-studio'
+}
+
 async function loadSettings(): Promise<AppSettings> {
   try {
-    if (!existsSync(SETTINGS_PATH)) return { externalModelFolders: [] }
+    if (!existsSync(SETTINGS_PATH)) return { ...DEFAULT_SETTINGS }
     const data = JSON.parse(await fsPromises.readFile(SETTINGS_PATH, 'utf-8'))
-    return { externalModelFolders: Array.isArray(data.externalModelFolders) ? data.externalModelFolders : [] }
-  } catch { return { externalModelFolders: [] } }
+    // Merge with defaults so new fields are always present.
+    const tracked = Array.isArray(data.trackedBackends) && data.trackedBackends.length > 0
+      ? data.trackedBackends
+      : DEFAULT_TRACKED
+    // Ensure the two built-in tracked backends always exist (even if user removed others).
+    for (const def of DEFAULT_TRACKED) {
+      if (!tracked.find((t: TrackedBackend) => t.id === def.id)) tracked.push(def)
+    }
+    return {
+      externalModelFolders: Array.isArray(data.externalModelFolders) ? data.externalModelFolders : [],
+      externalBackendFolders: Array.isArray(data.externalBackendFolders) ? data.externalBackendFolders : [],
+      mainModelFolder: typeof data.mainModelFolder === 'string' ? data.mainModelFolder : null,
+      mainBackendFolder: typeof data.mainBackendFolder === 'string' ? data.mainBackendFolder : null,
+      theme: (['system', 'dark', 'light'].includes(data.theme) ? data.theme : 'system') as ThemePref,
+      trackedBackends: tracked,
+      modelDefaults: data.modelDefaults || DEFAULT_SETTINGS.modelDefaults,
+      baseUrlOverride: migrateBaseUrlOverride(data.baseUrlOverride),
+      samplingPresets: Array.isArray(data.samplingPresets) ? data.samplingPresets : [],
+      starredPresetId: typeof data.starredPresetId === 'string' ? data.starredPresetId : 'lm-studio'
+    }
+  } catch {
+    return { ...DEFAULT_SETTINGS }
+  }
 }
 async function saveSettings(s: AppSettings): Promise<void> {
   await fsPromises.writeFile(SETTINGS_PATH, JSON.stringify(s, null, 2))
 }
+
+function isSafePath(base: string, target: string): boolean {
+  return resolve(target).startsWith(resolve(base))
+}
+
+// Resolve the effective "main" model folder (starred external folder, else default).
+async function resolveMainModelFolder(): Promise<string> {
+  const s = await loadSettings()
+  if (s.mainModelFolder && existsSync(s.mainModelFolder)) return s.mainModelFolder
+  return MODELS_DIR
+}
+async function resolveMainBackendFolder(): Promise<string> {
+  const s = await loadSettings()
+  if (s.mainBackendFolder && existsSync(s.mainBackendFolder)) return s.mainBackendFolder
+  return BACKEND_DIR
+}
+
+// All backend roots to scan: default BACKEND_DIR + external backend folders.
+async function backendRoots(): Promise<{ dir: string; external: boolean }[]> {
+  const s = await loadSettings()
+  const roots: { dir: string; external: boolean }[] = [{ dir: BACKEND_DIR, external: false }]
+  for (const f of s.externalBackendFolders) {
+    if (existsSync(f)) roots.push({ dir: f, external: true })
+  }
+  return roots
+}
+
 const runningProcesses = new Map<string, ChildProcess>()
 let sharedChatWindow: BrowserWindow | null = null
+
 function isPortAvailable(port: number): Promise<boolean> {
   return new Promise((resolve) => {
     const server = net.createServer()
     server.once('error', (err: any) => {
-      if (err.code === 'EADDRINUSE') {
-        resolve(false)
-      } else {
-        resolve(true)
-      }
+      if (err.code === 'EADDRINUSE') resolve(false)
+      else resolve(true)
     })
     server.once('listening', () => {
-      server.close(() => {
-        resolve(true)
-      })
+      server.close(() => resolve(true))
     })
     server.listen(port, '127.0.0.1')
   })
 }
+
+// --------------------------------------------------------------------------
+// Model helpers — smart grouping (LM Studio style)
+// --------------------------------------------------------------------------
+const MODEL_EXTS = ['.gguf', '.bin', '.ggml']
+const MMPROJ_REGEX = /mmproj/i
+
+// Feature 22: substring-based scan — detect "mmproj" ANYWHERE in the filename,
+// not just at the beginning. Allows files like "modelname-mmproj-BF16.gguf".
+function isMmprojFile(name: string): boolean {
+  const lower = name.toLowerCase()
+  return MMPROJ_REGEX.test(name) && MODEL_EXTS.includes(extname(lower))
+}
+
+function isModelFile(name: string): boolean {
+  const lower = name.toLowerCase()
+  if (lower.endsWith('.tmp')) return false
+  return MODEL_EXTS.includes(extname(lower)) && !isMmprojFile(lower)
+}
+
+// Scan a single folder (non-recursive): collect model files + mmproj file.
+async function scanModelFolder(folderPath: string, external: boolean): Promise<ModelGroup | null> {
+  let entries: import('fs').Dirent[]
+  try {
+    entries = await fsPromises.readdir(folderPath, { withFileTypes: true })
+  } catch {
+    return null
+  }
+  const models: ModelEntry[] = []
+  let mmproj: MmprojFile | null = null
+  for (const e of entries) {
+    if (!e.isFile()) continue
+    if (isModelFile(e.name)) {
+      try {
+        const st = await fsPromises.stat(join(folderPath, e.name))
+        models.push({ name: e.name, path: join(folderPath, e.name), size: st.size })
+      } catch {}
+    } else if (isMmprojFile(e.name)) {
+      try {
+        const st = await fsPromises.stat(join(folderPath, e.name))
+        // If multiple mmproj files exist, keep the first one.
+        if (!mmproj) mmproj = { name: e.name, path: join(folderPath, e.name), size: st.size }
+      } catch {}
+    }
+  }
+  if (models.length === 0 && !mmproj) return null
+  const modelSize = models.reduce((a, m) => a + m.size, 0)
+  const mmprojSize = mmproj ? mmproj.size : 0
+  return {
+    folder: basename(folderPath),
+    folderPath,
+    external,
+    models,
+    mmproj,
+    totalSize: modelSize + mmprojSize,
+    modelSize
+  }
+}
+
+// Scan a model root recursively: a root contains model folders, each folder is a group.
+// Mirrors the LM-Studio layout described in the spec:
+//   StorageFolder / ModelFolder / model.gguf (+ mmproj.gguf)
+async function scanModelRoot(rootDir: string, rootExternal: boolean): Promise<ModelGroup[]> {
+  const groups: ModelGroup[] = []
+  let topEntries: import('fs').Dirent[]
+  try {
+    topEntries = await fsPromises.readdir(rootDir, { withFileTypes: true })
+  } catch {
+    return groups
+  }
+  for (const e of topEntries) {
+    if (e.isDirectory()) {
+      const subPath = join(rootDir, e.name)
+      const g = await scanModelFolder(subPath, rootExternal)
+      if (g) groups.push(g)
+    } else if (isModelFile(e.name)) {
+      // Loose model file at the root of the storage folder — wrap it as its own group
+      // using the storage folder name, so it still appears in the list.
+      try {
+        const st = await fsPromises.stat(join(rootDir, e.name))
+        groups.push({
+          folder: basename(rootDir),
+          folderPath: rootDir,
+          external: rootExternal,
+          models: [{ name: e.name, path: join(rootDir, e.name), size: st.size }],
+          mmproj: null,
+          totalSize: st.size,
+          modelSize: st.size
+        })
+      } catch {}
+    }
+  }
+  return groups
+}
+
+// --------------------------------------------------------------------------
+// Backend discovery — resilient deep `build/bin/` search
+// --------------------------------------------------------------------------
+const SERVER_NAMES = process.platform === 'win32'
+  ? ['llama-server.exe', 'llama-server', 'main.exe', 'main', 'server.exe', 'server']
+  : ['llama-server', 'main', 'server']
+
+// Sibling files that indicate a real backend directory (not a stray copy).
+const SIBLING_HINTS = ['ggml.dll', 'llama.dll', 'ggml-metal.dll', 'llama-server.exe', 'llama-server', 'main.exe', 'main']
+
+// llama-gguf binary names (for native metadata extraction).
+const GGUF_TOOL_NAMES = process.platform === 'win32'
+  ? ['llama-gguf.exe', 'llama-gguf', 'gguf.exe', 'gguf']
+  : ['llama-gguf', 'gguf']
+
+interface DiscoveredExe {
+  exeAbs: string   // absolute path to the executable
+  dir: string      // directory containing the exe (cwd)
+  exeName: string  // just the filename
+}
+
+function discoverBackendExe(dir: string, depth = 0, maxDepth = 6): DiscoveredExe | null {
+  if (depth > maxDepth) return null
+  let entries: import('fs').Dirent[]
+  try {
+    entries = readdirSync(dir, { withFileTypes: true })
+  } catch {
+    return null
+  }
+  // 1. Look for a target binary directly in this directory.
+  for (const f of entries) {
+    if (f.isFile() && SERVER_NAMES.includes(f.name.toLowerCase())) {
+      // Validate: require at least one sibling hint (dll or another known binary).
+      const hasSibling = entries.some(s => s.isFile() && s.name !== f.name && SIBLING_HINTS.includes(s.name.toLowerCase()))
+      if (hasSibling || depth > 0) {
+        return { exeAbs: join(dir, f.name), dir, exeName: f.name }
+      }
+      // Root-level lone binary still accepted as last resort.
+      return { exeAbs: join(dir, f.name), dir, exeName: f.name }
+    }
+  }
+  // 2. Depth-first recursion into subdirectories.
+  for (const f of entries) {
+    if (f.isDirectory()) {
+      const sub = discoverBackendExe(join(dir, f.name), depth + 1, maxDepth)
+      if (sub) return sub
+    }
+  }
+  return null
+}
+
+// --------------------------------------------------------------------------
+// Native GGUF metadata extraction via llama-gguf tool
+// --------------------------------------------------------------------------
+// Spawns the `llama-gguf` binary (shipped with llama.cpp backends) to dump
+// model metadata. This uses the native gguf_init_from_file() C implementation,
+// guaranteeing 100% correct parsing for any GGUF file, regardless of version
+// or converter quirks.
+//
+// The tool may be invoked several ways depending on the llama.cpp version:
+//   llama-gguf --model <path>              (bare; prints general info)
+//   llama-gguf --model <path> --help-model (explicit metadata dump)
+//   gguf <path>                             (legacy positional arg)
+// We try each in turn and parse whichever produces useful key/value lines.
+
+// Generic recursive search for a named tool binary inside a backend version dir.
+// The gguf tool is often nested in build/bin/ (same as llama-server), so a
+// flat top-level scan (as used previously) misses it. This walks up to 6 levels.
+function discoverToolByName(dir: string, names: string[], depth = 0, maxDepth = 6): string | null {
+  if (depth > maxDepth) return null
+  let entries: import('fs').Dirent[]
+  try {
+    entries = readdirSync(dir, { withFileTypes: true })
+  } catch {
+    return null
+  }
+  for (const f of entries) {
+    if (f.isFile() && names.includes(f.name.toLowerCase())) {
+      return join(dir, f.name)
+    }
+  }
+  for (const f of entries) {
+    if (f.isDirectory()) {
+      const sub = discoverToolByName(join(dir, f.name), names, depth + 1, maxDepth)
+      if (sub) return sub
+    }
+  }
+  return null
+}
+
+async function findGgufTool(): Promise<string | null> {
+  const roots = await backendRoots()
+  for (const root of roots) {
+    try {
+      const topDirs = readdirSync(root.dir, { withFileTypes: true })
+      for (const forkDir of topDirs) {
+        if (!forkDir.isDirectory()) continue
+        let versions: import('fs').Dirent[]
+        try {
+          versions = readdirSync(join(root.dir, forkDir.name), { withFileTypes: true })
+        } catch { continue }
+        for (const verDir of versions) {
+          if (!verDir.isDirectory()) continue
+          const dir = join(root.dir, forkDir.name, verDir.name)
+          // Recursive search — finds the tool even when nested in build/bin/.
+          const found = discoverToolByName(dir, GGUF_TOOL_NAMES)
+          if (found) return found
+        }
+      }
+    } catch {}
+  }
+  return null
+}
+
+// Run the native gguf tool with a given argument set, returning combined stdout.
+function runToolArgs(toolPath: string, args: string[]): Promise<{ stdout: string; stderr: string; code: number | null }> {
+  return new Promise((resolve) => {
+    const child = spawn(toolPath, args, {
+      stdio: ['pipe', 'pipe', 'pipe'],
+      cwd: dirname(toolPath),
+      windowsHide: true,
+      timeout: 15000
+    })
+    let stdout = ''
+    let stderr = ''
+    child.stdout?.on('data', (d) => { stdout += d.toString() })
+    child.stderr?.on('data', (d) => { stderr += d.toString() })
+    child.on('error', () => resolve({ stdout: '', stderr: String('spawn error'), code: -1 }))
+    child.on('exit', (code) => resolve({ stdout, stderr, code }))
+  })
+}
+
+// Try several known invocations of the native gguf tool and return the first
+// output that looks like metadata (contains a "general.architecture" or
+// "llama." / "general." key). This is resilient across llama.cpp versions.
+async function runGgufTool(ggufToolPath: string, modelPath: string): Promise<string> {
+  const attempts: { label: string; args: string[] }[] = [
+    { label: '--help-model', args: ['--model', modelPath, '--help-model'] },
+    { label: 'bare',        args: ['--model', modelPath] },
+    { label: 'positional',  args: [modelPath] },
+    { label: 'info',        args: ['--model', modelPath, '--info'] }
+  ]
+  for (const a of attempts) {
+    const res = await runToolArgs(ggufToolPath, a.args)
+    if (!res.stdout) {
+      console.log(`[GGUF] llama-gguf (${a.label}) produced no stdout | code=${res.code} stderr=${res.stderr.substring(0, 120)}`)
+      continue
+    }
+    // Accept output if it contains metadata-like keys.
+    const lower = res.stdout.toLowerCase()
+    if (lower.includes('general.architecture') || lower.includes('general.name') ||
+        lower.includes('llama.') || lower.includes('block_count') ||
+        lower.includes('context_length') || lower.includes('chat_template')) {
+      console.log(`[GGUF] llama-gguf (${a.label}) succeeded — ${res.stdout.length} bytes`)
+      return res.stdout
+    }
+    console.log(`[GGUF] llama-gguf (${a.label}) output didn't look like metadata (${res.stdout.length} bytes)`)
+  }
+  return ''
+}
+
+// Parse the output of `llama-gguf` into a key-value map.
+// The tool prints lines in one of these forms (depending on version):
+//   key: value
+//   key = value
+//   * key: value        (bullet prefix)
+//   - key = value       (dash prefix)
+// Some versions also print the value wrapped in quotes; we strip them.
+function parseGgufToolOutput(output: string): Record<string, string> {
+  const map: Record<string, string> = {}
+  for (const line of output.split('\n')) {
+    // Strip leading bullet/dash markers and whitespace.
+    const trimmed = line.trim().replace(/^[-*•·]+\s*/, '')
+    if (!trimmed || trimmed.startsWith('#') || trimmed.startsWith('=')) continue
+    // Try "key: value" or "key = value" (whichever separator appears first).
+    const colonIdx = trimmed.indexOf(':')
+    const eqIdx = trimmed.indexOf('=')
+    let sep = -1
+    if (colonIdx > 0 && (eqIdx < 0 || colonIdx < eqIdx)) sep = colonIdx
+    else if (eqIdx > 0) sep = eqIdx
+    if (sep > 0) {
+      const key = trimmed.substring(0, sep).trim().toLowerCase()
+      let val = trimmed.substring(sep + 1).trim()
+      // Strip surrounding quotes from string values.
+      if ((val.startsWith('"') && val.endsWith('"')) || (val.startsWith("'") && val.endsWith("'"))) {
+        val = val.slice(1, -1)
+      }
+      // Only keep printable, non-empty scalar values (skip array/struct dumps).
+      if (key && val && !val.startsWith('[') && val.length < 100000) map[key] = val
+    }
+  }
+  return map
+}
+
+// Scan a backend root for installed backend versions.
+// A backend root contains <backendKey>/<version>/...exe (fork-aware layout),
+// but we also tolerate the legacy flat layout <version>/...exe.
+//
+// FIX (version display): Previously the legacy check used
+// `discoverBackendExe(forkDir, 0, 1)` (maxDepth=1) which would find an exe
+// INSIDE a version subfolder and falsely treat the fork folder as a version.
+// This produced displayName "llama.cpp (llama.cpp)" for the new layout.
+// Now we scan version subdirectories FIRST (new layout). Only when NO version
+// subdirectory contains an exe do we fall back to the legacy flat layout
+// (exe directly in the fork folder, possibly nested in build/bin/).
+async function scanBackendRoot(rootDir: string, rootExternal: boolean, rootIndex: number): Promise<BackendVersion[]> {
+  const out: BackendVersion[] = []
+  let topEntries: import('fs').Dirent[]
+  try {
+    topEntries = await fsPromises.readdir(rootDir, { withFileTypes: true })
+  } catch {
+    return out
+  }
+  for (const e of topEntries) {
+    if (!e.isDirectory()) continue
+    const forkDir = join(rootDir, e.name)
+    // 1. NEW LAYOUT: forkDir contains version subdirectories, each with an exe.
+    let versionEntries: import('fs').Dirent[]
+    try {
+      versionEntries = await fsPromises.readdir(forkDir, { withFileTypes: true })
+    } catch {
+      versionEntries = []
+    }
+    const versionSubdirs = versionEntries.filter(v => v.isDirectory())
+    let foundNewLayout = false
+    for (const v of versionSubdirs) {
+      const versionDir = join(forkDir, v.name)
+      const found = discoverBackendExe(versionDir)
+      if (!found) continue
+      foundNewLayout = true
+      // Feature 20/21: version folder name IS the release tag (e.g. "b10448" or
+      // "TurboQuant b10269-1.5.1"). Display as "forkName (versionTag)".
+      out.push({
+        id: `${rootIndex}::${e.name}::${v.name}`,
+        name: v.name,
+        displayName: `${e.name} (${v.name})`,
+        backendKey: e.name,
+        version: v.name,
+        path: found.dir,
+        exe: found.exeName,
+        hasCommands: existsSync(join(BACKEND_DIR, e.name, 'commands.json')),
+        rootDir,
+        external: rootExternal
+      })
+    }
+    if (foundNewLayout) continue
+    // 2. LEGACY FLAT LAYOUT: forkDir itself contains the exe (no version subfolders).
+    // The exe may be directly in forkDir or nested in build/bin/.
+    const direct = discoverBackendExe(forkDir)
+    if (direct) {
+      // Legacy: the folder name is the version; assume the default "llama.cpp" fork.
+      const version = e.name
+      out.push({
+        id: `${rootIndex}::llama.cpp::${version}`,
+        name: version,
+        displayName: `llama.cpp (${version})`,
+        backendKey: 'llama.cpp',
+        version,
+        path: direct.dir,
+        exe: direct.exeName,
+        hasCommands: existsSync(join(BACKEND_DIR, 'llama.cpp', 'commands.json')),
+        rootDir,
+        external: rootExternal
+      })
+    }
+  }
+  return out
+}
+
+// --------------------------------------------------------------------------
+// Default commands schema + tracked-backend default overrides
+// --------------------------------------------------------------------------
+function loadDefaultCommandsSchema(): CommandsSchema | null {
+  const defaultPath = app.isPackaged
+    ? join(process.resourcesPath, 'resources', 'commands.json')
+    : join(process.cwd(), 'resources', 'commands.json')
+  if (existsSync(defaultPath)) {
+    try { return JSON.parse(readFileSync(defaultPath, 'utf-8')) as CommandsSchema } catch {}
+  }
+  return null
+}
+
+// Produce a commands.json for a tracked backend, applying defaultOptions overrides.
+function buildTrackedCommandsSchema(tracked: TrackedBackend): CommandsSchema | null {
+  const base = loadDefaultCommandsSchema()
+  if (!base) return null
+  if (!tracked.defaultOptions) return base
+  for (const cat of base.categories) {
+    for (const cmd of cat.commands) {
+      const opts = tracked.defaultOptions[cmd.arg]
+      if (opts) cmd.options = opts
+    }
+  }
+  return base
+}
+
+// --------------------------------------------------------------------------
+// Download infrastructure (shared by model + backend downloads)
+// --------------------------------------------------------------------------
 interface DownloadTask {
   id: string
   url: string
@@ -75,11 +617,12 @@ function canBroadcast(id: string): boolean {
 }
 function fetchJson(url: string): Promise<unknown> {
   return new Promise((resolve, reject) => {
-    const opts = { headers: { 'User-Agent': 'llamabox/1.0.0', Accept: 'application/json' } }
+    const opts = { headers: { 'User-Agent': 'xlm-studio/2.0.0', Accept: 'application/json' } }
     const get = url.startsWith('https') ? https.get : http.get
     get(url, opts, (res) => {
       if ((res.statusCode === 301 || res.statusCode === 302) && res.headers.location) {
-        return fetchJson(res.headers.location).then(resolve).catch(reject)
+        fetchJson(res.headers.location).then(resolve).catch(reject)
+        return
       }
       let data = ''
       res.on('data', (c) => (data += c))
@@ -99,14 +642,12 @@ function startDownload(
   let currentReq: ReturnType<typeof https.get> | null = null
   const flags = startByte > 0 ? 'a' : 'w'
   const file = createWriteStream(destPath, { flags })
-
   let speedBytes = 0
   let lastSpeedCheck = Date.now()
   let currentSpeed = 0
-
   const attempt = (currentUrl: string) => {
     const get = currentUrl.startsWith('https') ? https.get : http.get
-    const headers: Record<string, string> = { 'User-Agent': 'hexllama/1.0' }
+    const headers: Record<string, string> = { 'User-Agent': 'xlm-studio/2.0' }
     if (startByte > 0) headers['Range'] = `bytes=${startByte}-`
     currentReq = get(currentUrl, { headers }, (res) => {
       if (destroyed) { res.destroy(); return }
@@ -120,13 +661,11 @@ function startDownload(
       const contentLength = parseInt(res.headers['content-length'] || '0', 10)
       const totalBytes = contentLength + startByte
       let receivedBytes = startByte
-
       res.on('data', (chunk: Buffer) => {
         if (destroyed) return
         file.write(chunk)
         receivedBytes += chunk.length
         speedBytes += chunk.length
-
         const now = Date.now()
         const elapsed = (now - lastSpeedCheck) / 1000
         if (elapsed >= 0.5) {
@@ -136,60 +675,193 @@ function startDownload(
         }
         onProgress(receivedBytes, totalBytes, currentSpeed)
       })
-
       res.on('end', () => {
         if (destroyed) return
-        file.end(() => {
-          if (!destroyed) onDone()
-        })
+        file.end(() => { if (!destroyed) onDone() })
       })
-
-      res.on('error', (err) => {
-        if (!destroyed) { file.destroy(); onError(err) }
-      })
-    }).on('error', (err) => {
-      if (!destroyed) { file.destroy(); onError(err) }
-    })
+      res.on('error', (err) => { if (!destroyed) { file.destroy(); onError(err) } })
+    }).on('error', (err) => { if (!destroyed) { file.destroy(); onError(err) } })
   }
   attempt(url)
   return () => {
     if (destroyed) return
     destroyed = true
     currentReq?.destroy()
-    
     file.end()
   }
 }
 
-export function registerIpcHandlers(): void {
-  ipcMain.handle('list-models', async () => {
-    const exts = ['.gguf', '.bin', '.ggml']
-    const results: { name: string; path: string; size: number; folder: string; external: boolean }[] = []
-    const seen = new Set<string>()
-    const scan = async (dir: string, external: boolean) => {
-      try {
-        const files = await fsPromises.readdir(dir, { withFileTypes: true })
-        for (const e of files) {
-          if (e.isDirectory()) await scan(join(dir, e.name), external)
-          else if (exts.includes(extname(e.name).toLowerCase()) && !e.name.endsWith('.tmp')) {
-            const fp = join(dir, e.name)
-            const key = resolve(fp)
-            if (seen.has(key)) continue
-            seen.add(key)
-            const st = await fsPromises.stat(fp)
-            results.push({ name: e.name, path: fp, size: st.size, folder: basename(dir), external })
-          }
+// Smart backend extraction: ensures the extracted archive lands as a single
+// version subfolder under <backendKey>/, matching the spec's nested layout.
+// - If the archive contains exactly one top-level directory, that directory
+//   becomes the version subfolder.
+// - Otherwise, a version subfolder named after the asset is created and all
+//   contents are placed inside it.
+async function smartExtractBackend(opts: {
+  archivePath: string
+  backendKey: string
+  versionHint: string
+  isTarGz: boolean
+}): Promise<{ extractPath: string; versionDir: string }> {
+  const mainBackend = await resolveMainBackendFolder()
+  const forkDir = join(mainBackend, opts.backendKey)
+  if (!existsSync(forkDir)) mkdirSync(forkDir, { recursive: true })
+
+  // Extract into a temporary staging folder first so we can normalise structure.
+  const staging = join(forkDir, `.staging-${Date.now()}`)
+  mkdirSync(staging, { recursive: true })
+  try {
+    if (opts.isTarGz) {
+      await new Promise<void>((resolve, reject) => {
+        const p = spawn('tar', ['-xzf', opts.archivePath, '-C', staging], { stdio: 'pipe' })
+        p.on('error', reject)
+        p.on('exit', code => code === 0 ? resolve() : reject(new Error(`tar exited with code ${code}`)))
+      })
+    } else {
+      await extract(opts.archivePath, { dir: staging })
+    }
+  } catch (err) {
+    // Cleanup staging on failure.
+    try { rmrf(staging) } catch {}
+    throw err
+  }
+
+  // Inspect the staging folder's top-level entries.
+  const topEntries = readdirSync(staging, { withFileTypes: true })
+  let versionDir: string
+  // Feature 21: The version folder name MUST match the release tag so the
+  // version scanner can match it against the tracker payload and flip the
+  // UI state to "Up to date". We always use opts.versionHint (the release tag)
+  // as the final folder name, regardless of what the archive's internal
+  // structure named the root folder (e.g. "build", "bin", etc.).
+  const finalVersionName = opts.versionHint || `version-${Date.now()}`
+  const dst = join(forkDir, finalVersionName)
+  if (existsSync(dst)) rmrf(dst)
+  mkdirSync(dst, { recursive: true })
+  if (topEntries.length === 1 && topEntries[0].isDirectory()) {
+    // Single top-level folder — move its CONTENTS into the version dir (flattening
+    // the generic "build"/"bin" wrapper into the version-named dir).
+    const src = join(staging, topEntries[0].name)
+    const innerEntries = readdirSync(src, { withFileTypes: true })
+    for (const e of innerEntries) {
+      const s = join(src, e.name)
+      const d = join(dst, e.name)
+      try { renameSync(s, d) } catch {}
+    }
+  } else {
+    // Multiple entries at root — move all into the version dir.
+    for (const e of topEntries) {
+      const src = join(staging, e.name)
+      const d = join(dst, e.name)
+      try { renameSync(src, d) } catch {}
+    }
+  }
+  versionDir = dst
+  try { rmrf(staging) } catch {}
+  return { extractPath: forkDir, versionDir }
+}
+
+function rmrf(dir: string): void {
+  if (!existsSync(dir)) return
+  for (const e of readdirSync(dir, { withFileTypes: true })) {
+    const p = join(dir, e.name)
+    if (e.isDirectory()) rmrf(p)
+    else unlinkSync(p)
+  }
+  rmdirSync(dir)
+}
+
+// Auto-delete outdated backend versions in the same fork folder.
+// After a new version is downloaded & extracted, any OLDER version (by numeric
+// build number) in the same forkDir is removed to save disk space. The newly
+// downloaded version is always kept. Versions without a parseable build number
+// are left untouched (safety). This runs across ALL backend roots that contain
+// the same fork folder name, so an update also cleans up copies in external
+// backend folders.
+async function cleanupOldBackendVersions(backendKey: string, newVersion: string): Promise<{ deleted: string[] }> {
+  const deleted: string[] = []
+  const newNum = parseInt((newVersion.match(/(\d{3,6})/) || ['0', '0'])[1], 10)
+  if (!newNum) return { deleted } // can't compare — skip
+  const roots = await backendRoots()
+  for (const root of roots) {
+    const forkDir = join(root.dir, backendKey)
+    if (!existsSync(forkDir)) continue
+    let entries: import('fs').Dirent[]
+    try { entries = readdirSync(forkDir, { withFileTypes: true }) } catch { continue }
+    for (const e of entries) {
+      if (!e.isDirectory()) continue
+      if (e.name === newVersion) continue
+      // Skip staging folders.
+      if (e.name.startsWith('.staging-')) continue
+      const verNum = parseInt((e.name.match(/(\d{3,6})/) || ['0', '0'])[1], 10)
+      if (verNum && verNum < newNum) {
+        const oldDir = join(forkDir, e.name)
+        try {
+          rmrf(oldDir)
+          deleted.push(e.name)
+          console.log(`[Backend cleanup] Deleted outdated version "${e.name}" (older than "${newVersion}") in ${forkDir}`)
+        } catch (err) {
+          console.error(`[Backend cleanup] Failed to delete "${e.name}":`, String(err))
         }
-      } catch {}
+      }
     }
-    if (existsSync(MODELS_DIR)) await scan(MODELS_DIR, false)
+  }
+  return { deleted }
+}
+
+// ==========================================================================
+// IPC handlers
+// ==========================================================================
+export function registerIpcHandlers(): void {
+
+  // ----- Models: smart grouped listing -----
+  ipcMain.handle('list-models', async () => {
     const settings = await loadSettings()
-    for (const folder of settings.externalModelFolders) {
-      if (existsSync(folder)) await scan(folder, true)
+    // Build the ordered list of model roots: main (starred) folder first if it
+    // is an external folder, then default MODELS_DIR, then remaining external
+    // folders. Deduplicate by resolved path.
+    const seen = new Set<string>()
+    const roots: { dir: string; external: boolean }[] = []
+    const push = (dir: string, external: boolean) => {
+      const r = resolve(dir)
+      if (seen.has(r)) return
+      seen.add(r)
+      roots.push({ dir, external })
     }
-    return results
+    // Default models dir is always scanned.
+    push(MODELS_DIR, false)
+    // External folders.
+    const sortedExt = sortExternalFolders(settings.externalModelFolders, settings.mainModelFolder)
+    for (const f of sortedExt) if (existsSync(f)) push(f, true)
+
+    const groups: ModelGroup[] = []
+    const seenGroups = new Set<string>()
+    for (const root of roots) {
+      const gs = await scanModelRoot(root.dir, root.external)
+      for (const g of gs) {
+        const key = resolve(g.folderPath)
+        if (seenGroups.has(key)) continue
+        seenGroups.add(key)
+        groups.push(g)
+      }
+    }
+    return groups
   })
-  ipcMain.handle('list-external-model-folders', async () => (await loadSettings()).externalModelFolders)
+
+  ipcMain.handle('list-external-model-folders', async () => {
+    const s = await loadSettings()
+    return sortExternalFolders(s.externalModelFolders, s.mainModelFolder)
+  })
+  ipcMain.handle('get-main-model-folder', async () => {
+    const folder = await resolveMainModelFolder()
+    return { folder, isDefault: folder === MODELS_DIR }
+  })
+  ipcMain.handle('set-main-model-folder', async (_e, folder: string) => {
+    const s = await loadSettings()
+    s.mainModelFolder = s.externalModelFolders.includes(folder) ? folder : null
+    await saveSettings(s)
+    return { success: true, mainModelFolder: s.mainModelFolder }
+  })
   ipcMain.handle('add-external-model-folder', async () => {
     const r = await dialog.showOpenDialog({ title: 'Add External Model Folder', properties: ['openDirectory'] })
     if (r.canceled || !r.filePaths.length) return { success: false }
@@ -199,20 +871,28 @@ export function registerIpcHandlers(): void {
       s.externalModelFolders.push(folder)
       await saveSettings(s)
     }
-    return { success: true, folders: s.externalModelFolders }
+    return { success: true, folders: sortExternalFolders(s.externalModelFolders, s.mainModelFolder) }
   })
   ipcMain.handle('remove-external-model-folder', async (_e, folder: string) => {
     const s = await loadSettings()
     s.externalModelFolders = s.externalModelFolders.filter(f => f !== folder)
+    if (s.mainModelFolder === folder) s.mainModelFolder = null
     await saveSettings(s)
-    return { success: true, folders: s.externalModelFolders }
+    return { success: true, folders: sortExternalFolders(s.externalModelFolders, s.mainModelFolder) }
   })
-  ipcMain.handle('delete-model', (_e, filePath: string) => {
+
+  // ----- Model file operations (operate on individual files) -----
+  ipcMain.handle('delete-model', async (_e, filePath: string) => {
     try {
-      if (!isSafePath(MODELS_DIR, filePath)) return { success: false, error: 'Access denied' }
+      // Allow deletion inside MODELS_DIR or any external model folder.
+      const s = await loadSettings()
+      const allowed = [MODELS_DIR, ...s.externalModelFolders]
+      if (!allowed.some(b => isSafePath(b, filePath))) return { success: false, error: 'Access denied' }
       unlinkSync(filePath)
       const dir = dirname(filePath)
-      if (dir !== MODELS_DIR) {
+      // Remove the now-empty model folder (but never the storage roots themselves).
+      const isRoot = [MODELS_DIR, ...s.externalModelFolders].some(b => resolve(dir) === resolve(b))
+      if (!isRoot) {
         try { if (readdirSync(dir).length === 0) rmdirSync(dir) } catch {}
       }
       return { success: true }
@@ -220,19 +900,23 @@ export function registerIpcHandlers(): void {
       return { success: false, error: String(err) }
     }
   })
-  ipcMain.handle('rename-model', (_e, oldPath: string, newName: string) => {
+  ipcMain.handle('rename-model', async (_e, oldPath: string, newName: string) => {
     try {
-      if (!isSafePath(MODELS_DIR, oldPath)) return { success: false, error: 'Access denied' }
+      const s = await loadSettings()
+      const allowed = [MODELS_DIR, ...s.externalModelFolders]
+      if (!allowed.some(b => isSafePath(b, oldPath))) return { success: false, error: 'Access denied' }
       const dir = dirname(oldPath)
       const newPath = join(dir, newName + extname(oldPath))
-      if (!isSafePath(MODELS_DIR, newPath)) return { success: false, error: 'Access denied' }
+      if (!allowed.some(b => isSafePath(b, newPath))) return { success: false, error: 'Access denied' }
       renameSync(oldPath, newPath)
       return { success: true, newPath }
     } catch (err) {
       return { success: false, error: String(err) }
     }
   })
-  ipcMain.handle('start-model-download', (event, opts: {
+
+  // ----- Model downloads (route to main folder, LM-Studio style) -----
+  ipcMain.handle('start-model-download', async (_event, opts: {
     url: string
     filename: string
     repoId?: string
@@ -243,11 +927,12 @@ export function registerIpcHandlers(): void {
       const t = downloadTasks.get(id)!
       if (t.phase === 'downloading') return { success: false, error: 'Already downloading' }
     }
-    const folder = opts.modelFolder || opts.repoId?.split('/').pop() || 'downloads'
-    const destDir = join(MODELS_DIR, folder)
-    if (!isSafePath(MODELS_DIR, destDir)) return { success: false, error: 'Access denied' }
-    if (!existsSync(destDir)) mkdirSync(destDir, { recursive: true })
-    const finalPath = join(destDir, opts.filename)
+    // Determine destination subfolder: explicit override > repo page name > "downloads".
+    const sub = (opts.modelFolder || opts.repoId?.split('/').pop() || 'downloads').trim() || 'downloads'
+    const mainFolder = await resolveMainModelFolder()
+    const targetDir = join(mainFolder, sub)
+    if (!existsSync(targetDir)) mkdirSync(targetDir, { recursive: true })
+    const finalPath = join(targetDir, opts.filename)
     const tmpPath = finalPath + '.tmp'
     const task: DownloadTask = {
       id, url: opts.url, filename: opts.filename,
@@ -287,7 +972,6 @@ export function registerIpcHandlers(): void {
     task.cancelFn?.()
     task.phase = 'paused'
     task.speed = 0
-    
     broadcastTimes.delete(id)
     const payload = {
       id, filename: task.filename, phase: 'paused', speed: 0,
@@ -295,7 +979,7 @@ export function registerIpcHandlers(): void {
       receivedBytes: task.receivedBytes, totalBytes: task.totalBytes,
       destPath: task.destPath, repoId: task.repoId
     }
-    BrowserWindow.getAllWindows().forEach(win => { 
+    BrowserWindow.getAllWindows().forEach(win => {
       if (!win.isDestroyed()) {
         win.webContents.send('model-download-progress', payload)
         if (task.repoId) win.webContents.send('hf-download-progress', payload)
@@ -308,7 +992,6 @@ export function registerIpcHandlers(): void {
     if (!task || task.phase !== 'paused') return { success: false, error: 'Not paused' }
     task.phase = 'downloading'
     const tmpPath = task.destPath + '.tmp'
-    
     try { task.receivedBytes = statSync(tmpPath).size } catch {}
     const broadcastProgress = (t: DownloadTask, force = false) => {
       if (!force && !canBroadcast(t.id)) return
@@ -318,7 +1001,7 @@ export function registerIpcHandlers(): void {
         receivedBytes: t.receivedBytes, totalBytes: t.totalBytes, destPath: t.destPath,
         repoId: t.repoId
       }
-      BrowserWindow.getAllWindows().forEach(win => { 
+      BrowserWindow.getAllWindows().forEach(win => {
         if (!win.isDestroyed()) {
           win.webContents.send('model-download-progress', payload)
           if (t.repoId) win.webContents.send('hf-download-progress', payload)
@@ -339,12 +1022,11 @@ export function registerIpcHandlers(): void {
     broadcastProgress(task, true)
     return { success: true }
   })
-  ipcMain.handle('cancel-model-download', (event, id: string) => {
+  ipcMain.handle('cancel-model-download', (_e, id: string) => {
     const task = downloadTasks.get(id)
     if (!task) return { success: false, error: 'Not found' }
     task.cancelFn?.()
     task.phase = 'cancelled'
-    
     try { unlinkSync(task.destPath + '.tmp') } catch {}
     try { unlinkSync(task.destPath) } catch {}
     const payload = { id, filename: task.filename, phase: 'cancelled', percent: 0, receivedBytes: 0, totalBytes: 0, speed: 0 }
@@ -364,78 +1046,146 @@ export function registerIpcHandlers(): void {
       percent: t.totalBytes > 0 ? Math.round((t.receivedBytes / t.totalBytes) * 100) : 0
     }))
   })
-  ipcMain.handle('list-backends', () => {
-    if (!existsSync(BACKEND_DIR)) return []
-    const findExecutable = (dir: string, depth = 0): string | null => {
-      if (depth > 3) return null
-      try {
-        const files = readdirSync(dir, { withFileTypes: true })
-        const names = process.platform === 'win32'
-          ? ['llama-server.exe', 'llama-server', 'main.exe', 'main', 'server.exe', 'server']
-          : ['llama-server', 'main', 'server']
-        for (const f of files) {
-          if (!f.isDirectory() && names.includes(f.name.toLowerCase())) return f.name
-        }
-        for (const f of files) {
-          if (f.isDirectory()) {
-            const sub = findExecutable(join(dir, f.name), depth + 1)
-            if (sub) return join(f.name, sub)
-          }
-        }
-      } catch {}
-      return null
+
+  // ----- Backends: smart fork-aware listing -----
+  ipcMain.handle('list-backends', async () => {
+    const roots = await backendRoots()
+    const all: BackendVersion[] = []
+    for (let i = 0; i < roots.length; i++) {
+      const versions = await scanBackendRoot(roots[i].dir, roots[i].external, i)
+      all.push(...versions)
     }
-    const backends = readdirSync(BACKEND_DIR, { withFileTypes: true })
-      .filter(d => d.isDirectory())
-      .map(d => {
-        const commandsPath = join(BACKEND_DIR, d.name, 'commands.json')
-        const basePath = join(BACKEND_DIR, d.name)
-        return { name: d.name, path: basePath, hasCommands: existsSync(commandsPath), exe: findExecutable(basePath) }
-      })
-    backends.sort((a, b) => {
+    // Sort: by backendKey then version desc (numeric prefix if present).
+    all.sort((a, b) => {
+      if (a.backendKey !== b.backendKey) return a.backendKey.localeCompare(b.backendKey)
       const n = (s: string) => parseInt((s.match(/(\d{3,6})/) || ['0', '0'])[1], 10)
-      return n(b.name) - n(a.name)
+      return n(b.version) - n(a.version)
     })
-    return backends
+    return all
   })
-  ipcMain.handle('delete-backend', (_e, backendName: string) => {
+  ipcMain.handle('delete-backend', async (_e, backendId: string) => {
     try {
-      const backendPath = join(BACKEND_DIR, backendName)
-      if (!isSafePath(BACKEND_DIR, backendPath)) return { success: false, error: 'Access denied' }
-      const rm = (dir: string) => {
-        for (const e of readdirSync(dir, { withFileTypes: true })) {
-          const p = join(dir, e.name)
-          e.isDirectory() ? rm(p) : unlinkSync(p)
-        }
-        rmdirSync(dir)
+      // backendId = `${rootIndex}::${backendKey}::${version}`
+      const parts = backendId.split('::')
+      if (parts.length < 3) return { success: false, error: 'Invalid backend id' }
+      const rootIndex = parseInt(parts[0], 10)
+      const backendKey = parts[1]
+      const version = parts.slice(2).join('::')
+      const roots = await backendRoots()
+      const root = roots[rootIndex]
+      if (!root) return { success: false, error: 'Backend root not found' }
+      const versionDir = join(root.dir, backendKey, version)
+      // Safety: must stay within this root.
+      if (!isSafePath(root.dir, versionDir)) return { success: false, error: 'Access denied' }
+      if (existsSync(versionDir)) rmrf(versionDir)
+      return { success: true }
+    } catch (err) {
+      return { success: false, error: String(err) }
+    }
+  })
+
+  // ----- Backends: external folders (mirrors model folders mechanics) -----
+  ipcMain.handle('list-external-backend-folders', async () => {
+    const s = await loadSettings()
+    return sortExternalFolders(s.externalBackendFolders, s.mainBackendFolder)
+  })
+  ipcMain.handle('get-main-backend-folder', async () => {
+    const folder = await resolveMainBackendFolder()
+    return { folder, isDefault: folder === BACKEND_DIR }
+  })
+  ipcMain.handle('set-main-backend-folder', async (_e, folder: string) => {
+    const s = await loadSettings()
+    s.mainBackendFolder = s.externalBackendFolders.includes(folder) ? folder : null
+    await saveSettings(s)
+    return { success: true, mainBackendFolder: s.mainBackendFolder }
+  })
+  ipcMain.handle('add-external-backend-folder', async () => {
+    const r = await dialog.showOpenDialog({ title: 'Add External Backend Folder', properties: ['openDirectory'] })
+    if (r.canceled || !r.filePaths.length) return { success: false }
+    const folder = r.filePaths[0]
+    const s = await loadSettings()
+    if (!s.externalBackendFolders.includes(folder)) {
+      s.externalBackendFolders.push(folder)
+      await saveSettings(s)
+    }
+    return { success: true, folders: sortExternalFolders(s.externalBackendFolders, s.mainBackendFolder) }
+  })
+  ipcMain.handle('remove-external-backend-folder', async (_e, folder: string) => {
+    const s = await loadSettings()
+    s.externalBackendFolders = s.externalBackendFolders.filter(f => f !== folder)
+    if (s.mainBackendFolder === folder) s.mainBackendFolder = null
+    await saveSettings(s)
+    return { success: true, folders: sortExternalFolders(s.externalBackendFolders, s.mainBackendFolder) }
+  })
+
+  // ----- Backends: tracked repos (Backends Tracker) -----
+  ipcMain.handle('list-tracked-backends', async () => {
+    const s = await loadSettings()
+    return s.trackedBackends
+  })
+  ipcMain.handle('add-tracked-backend', async (_e, link: string) => {
+    const trimmed = (link || '').trim()
+    if (!trimmed) return { success: false, error: 'Empty link' }
+    // Accept either "owner/repo" or a full github URL.
+    let repo: string
+    const m = trimmed.match(/github\.com\/([^/]+\/[^/]+?)(?:\/|$)/)
+    if (m) repo = m[1]
+    else if (/^[^/\s]+\/[^/\s]+$/.test(trimmed)) repo = trimmed
+    else return { success: false, error: 'Unrecognised GitHub link. Use https://github.com/owner/repo or owner/repo.' }
+    const s = await loadSettings()
+    if (s.trackedBackends.find(t => t.repo === repo)) return { success: false, error: 'Already tracked' }
+    const folderName = repo.split('/').pop() || repo
+    const id = folderName.toLowerCase().replace(/[^a-z0-9]+/g, '-') + '-' + Date.now().toString(36)
+    const tracked: TrackedBackend = { id, repo, name: folderName, folderName, isDefault: false }
+    s.trackedBackends.push(tracked)
+    await saveSettings(s)
+    return { success: true, tracked }
+  })
+  ipcMain.handle('remove-tracked-backend', async (_e, trackedId: string) => {
+    const s = await loadSettings()
+    const t = s.trackedBackends.find(x => x.id === trackedId)
+    if (!t) return { success: false, error: 'Not found' }
+    if (t.isDefault) return { success: false, error: 'Built-in backends cannot be removed' }
+    s.trackedBackends = s.trackedBackends.filter(x => x.id !== trackedId)
+    await saveSettings(s)
+    return { success: true }
+  })
+
+  // ----- Backends: commands schema (per fork) -----
+  ipcMain.handle('get-commands', async (_e, backendKey: string) => {
+    if (!backendKey) return loadDefaultCommandsSchema()
+    const s = await loadSettings()
+    const tracked = s.trackedBackends.find(t => t.folderName === backendKey || t.id === backendKey)
+    const commandsPath = join(BACKEND_DIR, backendKey, 'commands.json')
+    if (existsSync(commandsPath)) {
+      try { return JSON.parse(readFileSync(commandsPath, 'utf-8')) } catch {}
+    }
+    // No saved commands: generate from default schema + tracked overrides.
+    if (tracked) {
+      const schema = buildTrackedCommandsSchema(tracked)
+      if (schema) {
+        // Persist the generated schema so the CommandsEditor can edit it later.
+        try {
+          mkdirSync(join(BACKEND_DIR, backendKey), { recursive: true })
+          writeFileSync(commandsPath, JSON.stringify(schema, null, 2))
+        } catch {}
+        return schema
       }
-      rm(backendPath)
-      return { success: true }
-    } catch (err) {
-      return { success: false, error: String(err) }
     }
+    return loadDefaultCommandsSchema()
   })
-  ipcMain.handle('get-commands', (_e, backendName: string) => {
-    const commandsPath = join(BACKEND_DIR, backendName, 'commands.json')
-    if (!isSafePath(BACKEND_DIR, commandsPath)) return null
-    if (existsSync(commandsPath)) return JSON.parse(readFileSync(commandsPath, 'utf-8'))
-    const defaultPath = app.isPackaged
-      ? join(process.resourcesPath, 'resources', 'commands.json')
-      : join(process.cwd(), 'resources', 'commands.json')
-    if (existsSync(defaultPath)) return JSON.parse(readFileSync(defaultPath, 'utf-8'))
-    return null
-  })
-  ipcMain.handle('save-backend-commands', (_e, backendName: string, schema: unknown) => {
+  ipcMain.handle('save-backend-commands', async (_e, backendKey: string, schema: unknown) => {
     try {
-      const backendPath = join(BACKEND_DIR, backendName)
-      if (!isSafePath(BACKEND_DIR, backendPath)) return { success: false, error: 'Access denied' }
-      if (!existsSync(backendPath)) mkdirSync(backendPath, { recursive: true })
-      writeFileSync(join(backendPath, 'commands.json'), JSON.stringify(schema, null, 2))
+      const dir = join(BACKEND_DIR, backendKey)
+      if (!existsSync(dir)) mkdirSync(dir, { recursive: true })
+      writeFileSync(join(dir, 'commands.json'), JSON.stringify(schema, null, 2))
       return { success: true }
     } catch (err) {
       return { success: false, error: String(err) }
     }
   })
+
+  // ----- Templates -----
   ipcMain.handle('list-templates', () => {
     if (!existsSync(TEMPLATES_DIR)) return []
     return readdirSync(TEMPLATES_DIR)
@@ -470,6 +1220,8 @@ export function registerIpcHandlers(): void {
     if (r.canceled || !r.filePath) return { success: false }
     writeFileSync(r.filePath, JSON.stringify(template, null, 2)); return { success: true }
   })
+
+  // ----- File pickers -----
   ipcMain.handle('pick-model-file', async () => {
     const r = await dialog.showOpenDialog({ title: 'Select Model File', filters: [{ name: 'GGUF / GGML Models', extensions: ['gguf', 'bin', 'ggml'] }], properties: ['openFile'] })
     if (r.canceled || !r.filePaths.length) return null
@@ -480,13 +1232,37 @@ export function registerIpcHandlers(): void {
     if (r.canceled || !r.filePaths.length) return null
     return r.filePaths[0]
   })
+
+  // ----- Run model -----
   ipcMain.handle('run-model', async (_e, opts: { id: string; name: string; backendPath: string; exe: string; args: string[]; openBrowser: boolean; port: number }) => {
     if (runningProcesses.has(opts.id)) return { success: false, error: 'Already running' }
-    const port = opts.port || 8080
+    // Fix 4: If base URL override is enabled, use the override port, ignoring
+    // the template's original Server Port completely.
+    let port = opts.port || 8080
+    const overridePort = await getOverridePort()
+    if (overridePort !== null) {
+      port = overridePort
+    }
     let available = await isPortAvailable(port)
     let finalPort = port
     let finalArgs = [...opts.args]
-
+    // Fix 4: ALWAYS update the --port argument in finalArgs to match the
+    // resolved port (which may be the override port). Previously this only
+    // happened inside the port-conflict block, so when the override port was
+    // available, the server still started on the ORIGINAL port from the args.
+    {
+      const portIdx = finalArgs.indexOf('--port')
+      if (portIdx !== -1 && portIdx + 1 < finalArgs.length) {
+        finalArgs[portIdx + 1] = String(finalPort)
+      } else {
+        const shortPortIdx = finalArgs.indexOf('-p')
+        if (shortPortIdx !== -1 && shortPortIdx + 1 < finalArgs.length) {
+          finalArgs[shortPortIdx + 1] = String(finalPort)
+        } else {
+          finalArgs.push('--port', String(finalPort))
+        }
+      }
+    }
     if (!available) {
       const response = await dialog.showMessageBox({
         type: 'question',
@@ -500,13 +1276,10 @@ export function registerIpcHandlers(): void {
       if (response.response === 0) {
         let tempPort = port + 1
         while (tempPort < 65535) {
-          if (await isPortAvailable(tempPort)) {
-            break
-          }
+          if (await isPortAvailable(tempPort)) break
           tempPort++
         }
         finalPort = tempPort
-        // Update the --port parameter in finalArgs
         const portIdx = finalArgs.indexOf('--port')
         if (portIdx !== -1 && portIdx + 1 < finalArgs.length) {
           finalArgs[portIdx + 1] = String(finalPort)
@@ -524,13 +1297,69 @@ export function registerIpcHandlers(): void {
       }
     }
 
+    // Fix (context): ALWAYS ensure --ctx-size is passed. When omitted, llama-server
+    // defaults to 4096 (NOT the model's native context length). Passing
+    // --ctx-size 0 tells llama-server to use the model's full context from the
+    // GGUF file, which fixes "context_exceeded" errors and makes the built-in
+    // web UI show the real available context (via the /props endpoint).
+    {
+      const ctxIdx = finalArgs.indexOf('--ctx-size')
+      const shortCtxIdx = finalArgs.indexOf('-c')
+      if (ctxIdx === -1 && shortCtxIdx === -1) {
+        finalArgs.push('--ctx-size', '0')
+      }
+    }
+    // Fix (override): Apply "Serve on local network" (--host 0.0.0.0) and
+    // "API Key" (--api-key <key>) from the Base URL Override settings.
+    {
+      const s2 = await loadSettings()
+      const ovr = s2.baseUrlOverride
+      if (ovr?.enabled && ovr.serveOnLocalNetwork) {
+        const hostIdx = finalArgs.indexOf('--host')
+        if (hostIdx !== -1 && hostIdx + 1 < finalArgs.length) {
+          finalArgs[hostIdx + 1] = '0.0.0.0'
+        } else {
+          const shortHostIdx = finalArgs.indexOf('-h')
+          if (shortHostIdx !== -1 && shortHostIdx + 1 < finalArgs.length) {
+            finalArgs[shortHostIdx + 1] = '0.0.0.0'
+          } else {
+            finalArgs.push('--host', '0.0.0.0')
+          }
+        }
+      }
+      if (ovr?.enabled && ovr.apiKeyEnabled && ovr.apiKey) {
+        const keyIdx = finalArgs.indexOf('--api-key')
+        if (keyIdx !== -1 && keyIdx + 1 < finalArgs.length) {
+          finalArgs[keyIdx + 1] = ovr.apiKey
+        } else {
+          finalArgs.push('--api-key', ovr.apiKey)
+        }
+      }
+    }
+
     const exePath = join(opts.backendPath, opts.exe)
-    if (!isSafePath(BACKEND_DIR, exePath)) return { success: false, error: 'Access denied' }
+    // Safety: exe must live inside BACKEND_DIR or an external backend folder.
+    const s = await loadSettings()
+    const allowedRoots = [BACKEND_DIR, ...s.externalBackendFolders]
+    if (!allowedRoots.some(b => isSafePath(b, exePath))) return { success: false, error: 'Access denied' }
     if (!existsSync(exePath)) return { success: false, error: `Executable not found: ${exePath}` }
     try {
       const proc = spawn(exePath, finalArgs, { detached: false, stdio: 'pipe', cwd: dirname(exePath), windowsHide: false })
-      proc.stderr?.on('data', (d) => console.error('[llama-server]', d.toString()))
-      proc.stdout?.on('data', (d) => console.log('[llama-server]', d.toString()))
+      // Fix 4: Stream server logs to all renderer windows for the Logs tab.
+      proc.stderr?.on('data', (d) => {
+        const line = d.toString()
+        console.error('[llama-server]', line)
+        BrowserWindow.getAllWindows().forEach(win => {
+          if (!win.isDestroyed()) win.webContents.send('server-log', { id: opts.id, name: opts.name, stream: 'stderr', line, ts: Date.now() })
+        })
+      })
+      proc.stdout?.on('data', (d) => {
+        const line = d.toString()
+        console.log('[llama-server]', line)
+        BrowserWindow.getAllWindows().forEach(win => {
+          if (!win.isDestroyed()) win.webContents.send('server-log', { id: opts.id, name: opts.name, stream: 'stdout', line, ts: Date.now() })
+        })
+      })
       proc.on('error', (err: any) => {
         let msg = String(err)
         if (err.code === 'UNKNOWN' && opts.backendPath.toLowerCase().includes('arm64') && process.arch !== 'arm64') {
@@ -548,9 +1377,21 @@ export function registerIpcHandlers(): void {
         })
       })
       if (opts.openBrowser) {
+        // Extract ctx-size from finalArgs (which now always has it) for the
+        // chat window badge. A value of 0 means "native" — pass undefined so
+        // the badge isn't shown with a misleading "0"; the built-in web UI
+        // reads the real n_ctx from the server's /props endpoint.
+        const ctxIdx2 = finalArgs.indexOf('--ctx-size')
+        const shortCtxIdx2 = finalArgs.indexOf('-c')
+        const cidx = ctxIdx2 !== -1 ? ctxIdx2 : shortCtxIdx2
+        let ctxSize: number | undefined
+        if (cidx !== -1 && cidx + 1 < finalArgs.length) {
+          const v = parseInt(finalArgs[cidx + 1], 10)
+          if (!isNaN(v) && v > 0) ctxSize = v
+        }
         setTimeout(() => {
           if (runningProcesses.has(opts.id)) {
-            openChatWindow(finalPort, opts.name)
+            openChatWindow(finalPort, opts.name, ctxSize)
           }
         }, 2500)
       }
@@ -562,49 +1403,67 @@ export function registerIpcHandlers(): void {
       return { success: false, error: String(err) }
     }
   })
-  
-  function openChatWindow(port: number, name?: string) {
-    const chatUrl = `http://127.0.0.1:${port}`
-    const templateName = name || `Port ${port}`
-    if (sharedChatWindow && !sharedChatWindow.isDestroyed()) {
-      if (sharedChatWindow.isMinimized()) {
-        sharedChatWindow.restore()
+
+  // When base URL override is enabled, ALL port values are overridden.
+  // The app ignores the template's original Server Port completely and uses
+  // the override port. This applies to: run-model, open-chat-window, and
+  // open-detached-chat-window.
+  async function getOverridePort(): Promise<number | null> {
+    try {
+      const s = await loadSettings()
+      if (s.baseUrlOverride?.enabled) {
+        const p = s.baseUrlOverride.port || 1234
+        if (p > 0 && p < 65536) return p
       }
+    } catch {}
+    return null
+  }
+
+  async function resolveChatUrl(port: number): Promise<string> {
+    // If override is enabled, ALWAYS use the override port, ignoring
+    // the card's original port completely.
+    const overridePort = await getOverridePort()
+    if (overridePort !== null) {
+      return `http://127.0.0.1:${overridePort}`
+    }
+    return `http://127.0.0.1:${port}`
+  }
+
+  function openChatWindow(port: number, name?: string, ctxSize?: number) {
+    const templateName = name || `Port ${port}`
+    const ctxParam = ctxSize ? `&ctx=${ctxSize}` : ''
+    resolveChatUrl(port).then(chatUrl => {
+    if (sharedChatWindow && !sharedChatWindow.isDestroyed()) {
+      if (sharedChatWindow.isMinimized()) sharedChatWindow.restore()
       sharedChatWindow.show()
       sharedChatWindow.focus()
-      sharedChatWindow.webContents.send('add-chat-tab', { url: chatUrl, name: templateName })
+      sharedChatWindow!.webContents.send('add-chat-tab', { url: chatUrl, name: templateName, ctxSize })
       return
     }
+    {
     const candidates = [
-      join(process.cwd(), 'assets', 'icon.png'),                  
-      join(__dirname, '../../assets/icon.png'),                    
-      join(app.getAppPath(), 'assets', 'icon.png')                 
+      join(process.cwd(), 'assets', 'icon.png'),
+      join(__dirname, '../../assets/icon.png'),
+      join(app.getAppPath(), 'assets', 'icon.png')
     ]
     const icon = candidates.find(existsSync)
-    
     let x: number | undefined
     let y: number | undefined
     const width = 1024
     const height = 768
     const mainWin = BrowserWindow.getAllWindows().find(w => {
-      try {
-        const url = w.webContents.getURL()
-        return !url.includes('chat_url')
-      } catch {
-        return false
-      }
+      try { const url = w.webContents.getURL(); return !url.includes('chat_url') } catch { return false }
     })
     if (mainWin && !mainWin.isDestroyed()) {
       const bounds = mainWin.getBounds()
       x = Math.round(bounds.x + (bounds.width - width) / 2)
       y = Math.round(bounds.y + (bounds.height - height) / 2)
     }
-    
     sharedChatWindow = new BrowserWindow({
       width, height, show: true, autoHideMenuBar: true,
-      title: 'Hexllama - Llama-UI',
+      title: 'XLM Studio - Llama-UI',
       titleBarStyle: 'hiddenInset',
-      backgroundColor: '#ffffff',
+      backgroundColor: appShouldUseDarkBackground() ? '#0a0a0a' : '#ffffff',
       ...(icon ? { icon } : {}),
       ...(x !== undefined && y !== undefined ? { x, y } : {}),
       webPreferences: {
@@ -614,54 +1473,46 @@ export function registerIpcHandlers(): void {
         nodeIntegration: false
       }
     })
-    sharedChatWindow.on('closed', () => {
-      sharedChatWindow = null
-    })
+    sharedChatWindow.on('closed', () => { sharedChatWindow = null })
     const rendererUrl = process.env['ELECTRON_RENDERER_URL']
     if (rendererUrl) {
-      sharedChatWindow.loadURL(`${rendererUrl}?chat_url=${encodeURIComponent(chatUrl)}&name=${encodeURIComponent(templateName)}`)
+      sharedChatWindow.loadURL(`${rendererUrl}?chat_url=${encodeURIComponent(chatUrl)}&name=${encodeURIComponent(templateName)}${ctxParam}`)
     } else {
-      sharedChatWindow.loadFile(join(__dirname, '../renderer/index.html'), { query: { chat_url: chatUrl, name: templateName } })
+      const query: Record<string, string> = { chat_url: chatUrl, name: templateName }
+      if (ctxSize) query.ctx = String(ctxSize)
+      sharedChatWindow.loadFile(join(__dirname, '../renderer/index.html'), { query })
     }
+    }  // close block
+    })  // close resolveChatUrl().then()
   }
 
-  ipcMain.handle('open-chat-window', (_e, port: number, name: string) => {
-    openChatWindow(port, name)
-  })
-
-  ipcMain.handle('open-detached-chat-window', (_e, port: number, name: string) => {
-    const chatUrl = `http://127.0.0.1:${port}`
+  ipcMain.handle('open-chat-window', (_e, port: number, name: string, ctxSize?: number) => openChatWindow(port, name, ctxSize))
+  ipcMain.handle('open-detached-chat-window', async (_e, port: number, name: string) => {
+    const chatUrl = await resolveChatUrl(port)
     const templateName = name || `Port ${port}`
     const candidates = [
-      join(process.cwd(), 'assets', 'icon.png'),                  
-      join(__dirname, '../../assets/icon.png'),                    
-      join(app.getAppPath(), 'assets', 'icon.png')                 
+      join(process.cwd(), 'assets', 'icon.png'),
+      join(__dirname, '../../assets/icon.png'),
+      join(app.getAppPath(), 'assets', 'icon.png')
     ]
     const icon = candidates.find(existsSync)
-    
     let x: number | undefined
     let y: number | undefined
     const width = 1024
     const height = 768
     const mainWin = BrowserWindow.getAllWindows().find(w => {
-      try {
-        const url = w.webContents.getURL()
-        return !url.includes('chat_url')
-      } catch {
-        return false
-      }
+      try { const url = w.webContents.getURL(); return !url.includes('chat_url') } catch { return false }
     })
     if (mainWin && !mainWin.isDestroyed()) {
       const bounds = mainWin.getBounds()
       x = Math.round(bounds.x + (bounds.width - width) / 2)
       y = Math.round(bounds.y + (bounds.height - height) / 2)
     }
-    
     const detachedWin = new BrowserWindow({
       width, height, show: true, autoHideMenuBar: true,
-      title: 'Hexllama - Llama-UI',
+      title: 'XLM Studio - Llama-UI',
       titleBarStyle: 'hiddenInset',
-      backgroundColor: '#ffffff',
+      backgroundColor: appShouldUseDarkBackground() ? '#0a0a0a' : '#ffffff',
       ...(icon ? { icon } : {}),
       ...(x !== undefined && y !== undefined ? { x, y } : {}),
       webPreferences: {
@@ -678,12 +1529,9 @@ export function registerIpcHandlers(): void {
       detachedWin.loadFile(join(__dirname, '../renderer/index.html'), { query: { chat_url: chatUrl, name: templateName, detached: 'true' } })
     }
   })
-
   ipcMain.handle('notify-tab-moved', (_e, url: string) => {
     BrowserWindow.getAllWindows().forEach(win => {
-      if (!win.isDestroyed()) {
-        win.webContents.send('tab-moved-elsewhere', { url })
-      }
+      if (!win.isDestroyed()) win.webContents.send('tab-moved-elsewhere', { url })
     })
   })
   ipcMain.handle('stop-model', (_e, id: string) => {
@@ -692,12 +1540,22 @@ export function registerIpcHandlers(): void {
     proc.kill(); runningProcesses.delete(id)
     return { success: true }
   })
+
+  // ----- Backends: tracker (global check for updates across all tracked repos) -----
   let cancelBackendDl: (() => void) | null = null
 
-  ipcMain.handle('check-updates', async () => {
+  async function fetchTrackedRelease(tracked: TrackedBackend): Promise<TrackedBackendRelease> {
+    const base: TrackedBackendRelease = {
+      trackedId: tracked.id,
+      folderName: tracked.folderName,
+      tagName: '', name: tracked.name, url: '', publishedAt: '',
+      isNewer: undefined, assets: []
+    }
     try {
-      const release = await fetchJson('https://api.github.com/repos/ggml-org/llama.cpp/releases/latest') as any
-      if (!release || !release.assets) return { error: 'Invalid response from GitHub' }
+      const release = await fetchJson(`https://api.github.com/repos/${tracked.repo}/releases/latest`) as any
+      if (!release || !release.assets) {
+        return { ...base, error: 'Invalid response from GitHub' }
+      }
       const isMac = process.platform === 'darwin'
       const isLinux = process.platform === 'linux'
       const arch = process.arch
@@ -722,20 +1580,65 @@ export function registerIpcHandlers(): void {
         if (arch === 'arm64' && n.includes('x64')) return false
         return true
       })
-      const latestNum = parseInt(release.tag_name.replace(/^b/, ''), 10)
+      const latestNum = parseInt((release.tag_name || '').replace(/^b/, ''), 10)
       let isNewer = true
-      if (existsSync(BACKEND_DIR)) {
-        for (const d of readdirSync(BACKEND_DIR, { withFileTypes: true }).filter(d => d.isDirectory())) {
-          const m = d.name.match(/(\d{3,6})/); if (!m) continue
-          if (parseInt(m[1], 10) >= latestNum || d.name.includes(release.tag_name)) { isNewer = false; break }
+      // Feature 20/21: Determine if a version of this tracked backend is already
+      // installed. The version folder name now matches the release tag exactly,
+      // so we check for an exact match OR a numeric build-number match.
+      const roots = await backendRoots()
+      for (const root of roots) {
+        const forkDir = join(root.dir, tracked.folderName)
+        if (!existsSync(forkDir)) continue
+        for (const v of readdirSync(forkDir, { withFileTypes: true }).filter(d => d.isDirectory())) {
+          // Exact tag match (e.g. "b10448" or "TurboQuant b10269-1.5.1").
+          if (v.name === release.tag_name) { isNewer = false; break }
+          // Substring match for fork-specific naming (e.g. "TurboQuant b10269-1.5.1" contains "b10269").
+          if (release.tag_name && v.name.includes(release.tag_name)) { isNewer = false; break }
+          // Numeric build-number match (extract first 3-6 digit group).
+          const m = v.name.match(/(\d{3,6})/)
+          if (m && latestNum && parseInt(m[1], 10) >= latestNum) { isNewer = false; break }
         }
+        if (!isNewer) break
       }
-      return { tagName: release.tag_name, name: release.name, url: release.html_url, publishedAt: release.published_at, isNewer, assets: platformAssets.map((a: any) => ({ name: a.name, downloadUrl: a.browser_download_url, size: a.size })) }
-    } catch (err) { return { error: String(err) } }
+      return {
+        ...base,
+        tagName: release.tag_name,
+        name: release.name || release.tag_name,
+        url: release.html_url,
+        publishedAt: release.published_at,
+        isNewer,
+        assets: platformAssets.map((a: any) => ({ name: a.name, downloadUrl: a.browser_download_url, size: a.size }))
+      }
+    } catch (err) {
+      return { ...base, error: String(err) }
+    }
+  }
+
+  // Legacy single check (kept for backward compat with UpdateBanner / Titlebar).
+  ipcMain.handle('check-updates', async () => {
+    const s = await loadSettings()
+    const llamaCpp = s.trackedBackends.find(t => t.id === 'llama-cpp') || s.trackedBackends[0]
+    if (!llamaCpp) return { error: 'No tracked backends' }
+    const r = await fetchTrackedRelease(llamaCpp)
+    const { trackedId, folderName, ...rest } = r
+    return rest as ReleaseInfo
   })
-  ipcMain.handle('download-release', async (event, opts: { url: string; version: string; assetName: string }) => {
+
+  // Global check across ALL tracked backends.
+  ipcMain.handle('check-all-backends', async () => {
+    const s = await loadSettings()
+    const results = await Promise.all(s.trackedBackends.map(t => fetchTrackedRelease(t)))
+    return { results }
+  })
+
+  // Download a specific tracked backend release into <mainBackendFolder>/<folderName>/<version>/.
+  ipcMain.handle('download-release', async (event, opts: {
+    url: string
+    version: string
+    assetName: string
+    backendKey: string
+  }) => {
     const archivePath = join(app.getPath('temp'), opts.assetName)
-    const extractPath = join(BACKEND_DIR, opts.version)
     const isTarGz = opts.assetName.toLowerCase().endsWith('.tar.gz')
     try {
       event.sender.send('download-progress', { percent: 0, phase: 'downloading' })
@@ -746,18 +1649,25 @@ export function registerIpcHandlers(): void {
       })
       cancelBackendDl = null
       event.sender.send('download-progress', { percent: 100, phase: 'extracting' })
-      if (!existsSync(extractPath)) mkdirSync(extractPath, { recursive: true })
-      if (isTarGz) {
-        await new Promise<void>((resolve, reject) => {
-          const p = spawn('tar', ['-xzf', archivePath, '-C', extractPath], { stdio: 'pipe' })
-          p.on('error', reject)
-          p.on('exit', code => code === 0 ? resolve() : reject(new Error(`tar exited with code ${code}`)))
+      const versionHint = opts.version || opts.assetName.replace(/\.(zip|tar\.gz)$/i, '')
+      const { versionDir } = await smartExtractBackend({
+        archivePath,
+        backendKey: opts.backendKey,
+        versionHint,
+        isTarGz
+      })
+      // Auto-delete outdated backend versions in the same fork folder.
+      // Runs immediately after extraction so old versions are cleaned up
+      // before the frontend re-reads the installed backends list.
+      const cleanup = await cleanupOldBackendVersions(opts.backendKey, versionHint)
+      if (cleanup.deleted.length > 0) {
+        // Broadcast so any open windows refresh their backend list.
+        BrowserWindow.getAllWindows().forEach(win => {
+          if (!win.isDestroyed()) win.webContents.send('backends-changed', { deleted: cleanup.deleted })
         })
-      } else {
-        await extract(archivePath, { dir: extractPath })
       }
       try { unlinkSync(archivePath) } catch (e) { console.error('Failed to cleanup temp file', e) }
-      return { success: true, path: extractPath }
+      return { success: true, path: versionDir, deletedOld: cleanup.deleted }
     } catch (err) {
       cancelBackendDl = null
       try { unlinkSync(archivePath) } catch (e) { console.error('Failed to cleanup temp file', e) }
@@ -765,19 +1675,23 @@ export function registerIpcHandlers(): void {
     }
   })
   ipcMain.handle('cancel-backend-download', () => {
-    if (cancelBackendDl) {
-      cancelBackendDl()
-      cancelBackendDl = null
-    }
+    if (cancelBackendDl) { cancelBackendDl(); cancelBackendDl = null }
     return { success: true }
   })
+
   ipcMain.handle('open-folder', (_e, folderPath: string) => shell.openPath(folderPath))
-  ipcMain.handle('get-paths', () => ({ models: MODELS_DIR, templates: TEMPLATES_DIR, backend: BACKEND_DIR }))
+  ipcMain.handle('get-paths', async () => ({
+    models: MODELS_DIR,
+    templates: TEMPLATES_DIR,
+    backend: BACKEND_DIR,
+    mainModelFolder: await resolveMainModelFolder(),
+    mainBackendFolder: await resolveMainBackendFolder()
+  }))
   ipcMain.handle('open-external', (_e, url: string) => {
-    if (url.startsWith('https:') || url.startsWith('http:')) {
-      shell.openExternal(url)
-    }
+    if (url.startsWith('https:') || url.startsWith('http:')) shell.openExternal(url)
   })
+
+  // ----- HuggingFace -----
   ipcMain.handle('hf-search', async (_e, query: string, sort = 'downloads', direction = -1) => {
     try {
       const data = await fetchJson(`https://huggingface.co/api/models?search=${encodeURIComponent(query)}&filter=gguf&limit=24&sort=${sort}&direction=${direction}`) as any
@@ -798,14 +1712,16 @@ export function registerIpcHandlers(): void {
       }))
     } catch (err) { return { error: String(err) } }
   })
-  ipcMain.handle('hf-download-model', (_event, opts: { repoId: string; filename: string; downloadUrl: string }) => {
+  ipcMain.handle('hf-download-model', async (_event, opts: { repoId: string; filename: string; downloadUrl: string }) => {
     const id = opts.filename
     if (downloadTasks.has(id)) {
       const existing = downloadTasks.get(id)!
       if (existing.phase === 'downloading') return { success: false, error: 'Already downloading' }
     }
-    const folder = opts.repoId.split('/').pop() || 'downloads'
-    const destDir = join(MODELS_DIR, folder)
+    // Route to the main (starred) model folder, under a subfolder named after the repo page.
+    const sub = (opts.repoId.split('/').pop() || 'downloads').trim() || 'downloads'
+    const mainFolder = await resolveMainModelFolder()
+    const destDir = join(mainFolder, sub)
     if (!existsSync(destDir)) mkdirSync(destDir, { recursive: true })
     const finalPath = join(destDir, opts.filename)
     const tmpPath = finalPath + '.tmp'
@@ -813,7 +1729,6 @@ export function registerIpcHandlers(): void {
     const broadcast = (force = false) => {
       if (!force && !canBroadcast(task.id)) return
       const percent = task.totalBytes > 0 ? Math.round(task.receivedBytes / task.totalBytes * 100) : 0
-
       const payload = {
         id: task.id, filename: task.filename, phase: task.phase,
         percent, speed: task.speed, destPath: task.destPath,
@@ -821,9 +1736,7 @@ export function registerIpcHandlers(): void {
         repoId: task.repoId
       }
       BrowserWindow.getAllWindows().forEach(win => {
-        if (!win.isDestroyed()) {
-          win.webContents.send('hf-download-progress', payload)
-        }
+        if (!win.isDestroyed()) win.webContents.send('hf-download-progress', payload)
       })
     }
     task.cancelFn = startDownload(
@@ -839,8 +1752,740 @@ export function registerIpcHandlers(): void {
     downloadTasks.set(id, task)
     return { success: true }
   })
-  ipcMain.handle('hf-open-models-dir', () => shell.openPath(MODELS_DIR))
+  ipcMain.handle('hf-open-models-dir', async () => shell.openPath(await resolveMainModelFolder()))
+
   ipcMain.handle('onDownloadProgress', () => {})
   ipcMain.handle('removeDownloadListener', () => {})
   ipcMain.handle('get-version', () => app.getVersion())
+
+  // ----- Theme -----
+  ipcMain.handle('get-theme', async () => {
+    const s = await loadSettings()
+    return s.theme
+  })
+  ipcMain.handle('set-theme', async (_e, theme: ThemePref) => {
+    const s = await loadSettings()
+    s.theme = (['system', 'dark', 'light'].includes(theme) ? theme : 'system') as ThemePref
+    await saveSettings(s)
+    applyNativeTheme(s.theme)
+    BrowserWindow.getAllWindows().forEach(win => {
+      if (!win.isDestroyed()) win.webContents.send('theme-changed', s.theme)
+    })
+    return { success: true, theme: s.theme }
+  })
+  ipcMain.handle('get-system-theme', () => {
+    try {
+      // nativeTheme.shouldUseDarkColors is the most reliable signal.
+      return nativeTheme.shouldUseDarkColors ? 'dark' : 'light'
+    } catch {
+      return 'dark' // fallback per spec
+    }
+  })
+
+  // ----- CPU info (for thread slider bounds + recommended defaults) -----
+  ipcMain.handle('get-cpu-info', async () => {
+    const os = await import('os')
+    const cpus = os.cpus()
+    let physicalCores = cpus.length
+    let modelName = cpus[0]?.model || 'Unknown CPU'
+    try {
+      const si = (await import('systeminformation')).default
+      const cpu = await si.cpu()
+      if (cpu.physicalCores && cpu.physicalCores > 0) physicalCores = cpu.physicalCores
+      else if (cpu.cores && cpu.cores > 0) physicalCores = cpu.cores
+      if (cpu.brand) modelName = `${cpu.manufacturer || ''} ${cpu.brand}`.trim()
+    } catch {
+      // systeminformation unavailable — fall back to logical count.
+    }
+    return {
+      physicalCores,
+      logicalCores: cpus.length,
+      modelName
+    }
+  })
+
+  // ----- GGUF speculation auto-detection -----
+  // Scans the first ~8 MB of a .gguf file for tensor-name / metadata-key strings
+  // that indicate native Multi-Token Prediction (MTP) or dspark draftless
+  // acceleration architectures. Returns a recommended SpeculationMode.
+  ipcMain.handle('detect-speculation', async (_e, modelPath: string) => {
+    try {
+      if (!modelPath || !existsSync(modelPath)) return { mode: 'off' as const }
+      const fd = await fsPromises.open(modelPath, 'r')
+      const buf = Buffer.alloc(8 * 1024 * 1024) // 8 MB scan window
+      const { bytesRead } = await fd.read(buf, 0, buf.length, 0)
+      await fd.close()
+      const slice = buf.subarray(0, bytesRead).toString('latin1')
+      const lower = slice.toLowerCase()
+      // dspark detection — check first (more specific).
+      if (lower.includes('dspark') || lower.includes('draft-dspark')) {
+        return { mode: 'dspark' as const, reason: 'dspark tensors detected in model metadata' }
+      }
+      // MTP detection — look for mtp-related tensor/metadata patterns.
+      // Common indicators: tensor names like "blk.N.mtp.*", metadata keys like
+      // "mtp_count", "n_mtp", "mtp_layers", or tensor names containing "mtp".
+      if (
+        lower.includes('mtp') ||
+        lower.includes('multi_token_prediction') ||
+        lower.includes('draft-mtp')
+      ) {
+        return { mode: 'mtp' as const, reason: 'MTP (Multi-Token Prediction) tensors detected in model metadata' }
+      }
+      return { mode: 'off' as const }
+    } catch (err) {
+      return { mode: 'off' as const, error: String(err) }
+    }
+  })
+
+  // ----- GGUF metadata parser (features 12/13/14/16/29) -----
+  // Parses the GGUF binary header to extract block_count, context_length,
+  // expert_count, chat_template, hidden_size, kv_heads. Uses a typed reader
+  // that walks the metadata KV array and tensor info array.
+  ipcMain.handle('get-gguf-metadata', async (_e, modelPath: string) => {
+    const result: any = {
+      blockCount: null, contextLength: null, expertCount: null,
+      chatTemplate: null, hiddenSize: null, kvHeads: null,
+      modelName: null, architecture: null, isMoe: false, fileSizeMB: 0
+    }
+    try {
+      if (!modelPath || !existsSync(modelPath)) return { ...result, error: 'File not found' }
+      const st = await fsPromises.stat(modelPath)
+      result.fileSizeMB = Math.round(st.size / (1024 * 1024))
+
+      // ====== PRIORITY 1: Use native llama-gguf tool if available ======
+      // This uses the C gguf_init_from_file() implementation, guaranteeing
+      // 100% correct parsing for ANY GGUF file, regardless of version or
+      // converter quirks (Unsloth, official, etc.)
+      const ggufTool = await findGgufTool()
+      if (ggufTool) {
+        console.log('[GGUF] Using native llama-gguf tool:', ggufTool)
+        const toolOutput = await runGgufTool(ggufTool, modelPath)
+        if (toolOutput && toolOutput.length > 50) {
+          console.log('[GGUF] llama-gguf output length:', toolOutput.length)
+          const kv = parseGgufToolOutput(toolOutput)
+          console.log('[GGUF] llama-gguf parsed keys:', Object.keys(kv).join(', '))
+          // Extract values from the native tool output.
+          // The tool prints keys like "llama.block_count", "llama.context_length", etc.
+          const arch = (kv['general.architecture'] || kv['architecture'] || '').toLowerCase()
+          result.architecture = arch || null
+          result.modelName = kv['general.name'] || kv['name'] || null
+          result.chatTemplate = kv['tokenizer.chat_template'] || kv['chat_template'] || null
+          // Resolve architecture-specific keys.
+          const resolve = (suffix: string): number | null => {
+            const patterns = [`${arch}.${suffix}`, suffix]
+            for (const p of patterns) {
+              if (kv[p] !== undefined) {
+                const n = parseInt(kv[p], 10)
+                if (!isNaN(n)) return n
+              }
+            }
+            for (const k of Object.keys(kv)) {
+              if (k.endsWith(`.${suffix}`)) {
+                const n = parseInt(kv[k], 10)
+                if (!isNaN(n)) return n
+              }
+            }
+            return null
+          }
+          result.blockCount = resolve('block_count')
+          result.contextLength = resolve('context_length')
+          result.expertCount = resolve('expert_count')
+          result.hiddenSize = resolve('embedding_length')
+          result.kvHeads = resolve('attention.head_count_kv')
+          ;(result as any).expertUsedCount = resolve('expert_used_count')
+          result.isMoe = (result.expertCount || 0) > 0
+          // If we got the essential fields, return immediately — no need for JS fallback.
+          if (result.blockCount && result.contextLength) {
+            console.log('[GGUF] Native tool succeeded: blockCount=' + result.blockCount + ' contextLength=' + result.contextLength + ' chatTemplate=' + (result.chatTemplate ? 'yes' : 'no'))
+            return result
+          }
+          // If chatTemplate is missing but everything else is found, try the JS fallback for just that.
+          if (!result.chatTemplate) {
+            console.log('[GGUF] Native tool missing chat_template — trying JS fallback for that field')
+          }
+        } else {
+          console.log('[GGUF] llama-gguf produced no output — falling back to JS parser')
+        }
+      } else {
+        console.log('[GGUF] No llama-gguf tool found — using JS parser only')
+      }
+
+      // ====== FALLBACK: JS parser (if native tool not available or failed) ======
+      const fd = await fsPromises.open(modelPath, 'r')
+      // Read header: magic(4) + version(4) + tensor_count(8) + metadata_kv_count(8)
+      const header = Buffer.alloc(24)
+      await fd.read(header, 0, 24, 0)
+      const magic = header.toString('ascii', 0, 4)
+      if (magic !== 'GGUF') { await fd.close(); return { ...result, error: 'Not a valid GGUF file' } }
+      const version = header.readUInt32LE(4)
+      let offset = 8
+      let tensorCount: number
+      let kvCount: number
+      if (version >= 3) {
+        // GGUF v3+: tensor_count (u64) and metadata_kv_count (u64)
+        tensorCount = Number(readU64(header, offset)); offset += 8
+        kvCount = Number(readU64(header, offset)); offset += 8
+      } else {
+        // GGUF v1/v2: tensor_count (u32) and metadata_kv_count (u32)
+        tensorCount = header.readUInt32LE(offset); offset += 4
+        kvCount = header.readUInt32LE(offset); offset += 4
+      }
+      console.log('[GGUF] version:', version, '| tensorCount:', tensorCount, '| kvCount:', kvCount)
+
+      // We'll read metadata KV pairs sequentially from the file. Each KV is:
+      // key(gguf_string) + value_type(u32) + value(varies by type)
+      // gguf_string = u64 length + bytes (no null terminator) [v3+] or u32 [v1/v2]
+      const chunkSize = 512 * 1024 // 512 KB read window
+      // v3: header = 4(magic) + 4(version) + 8(tensor_count) + 8(kv_count) = 24
+      // v1/v2: header = 4(magic) + 4(version) + 4(tensor_count) + 4(kv_count) = 16
+      let fileOffset = version >= 3 ? 24 : 16
+      const readBuf = Buffer.alloc(chunkSize)
+      async function readBytes(n: number): Promise<Buffer> {
+        const out = Buffer.alloc(n)
+        let read = 0
+        while (read < n) {
+          const start = Math.floor(fileOffset / chunkSize) * chunkSize
+          const offInChunk = fileOffset % chunkSize
+          const avail = Math.min(chunkSize - offInChunk, n - read)
+          await fd.read(readBuf, 0, chunkSize, start)
+          readBuf.copy(out, read, offInChunk, offInChunk + avail)
+          fileOffset += avail
+          read += avail
+        }
+        return out
+      }
+      async function readString(): Promise<string> {
+        // GGUF v3+: string length is u64. v1/v2: u32.
+        const lenBytes = version >= 3 ? 8 : 4
+        const lenBuf = await readBytes(lenBytes)
+        const len = version >= 3 ? Number(readU64(lenBuf, 0)) : lenBuf.readUInt32LE(0)
+        if (len > 10 * 1024 * 1024) return '' // sanity cap at 10 MB
+        const strBuf = await readBytes(len)
+        return strBuf.toString('utf-8')
+      }
+      async function readValue(type: number): Promise<any> {
+        // GGUF metadata value types (from the official spec):
+        // https://github.com/ggerganov/ggml/blob/master/docs/gguf.md
+        switch (type) {
+          case 0: { const b = await readBytes(1); return b.readUInt8(0) }         // UINT8
+          case 1: { const b = await readBytes(1); return b.readInt8(0) }          // INT8
+          case 2: { const b = await readBytes(2); return b.readUInt16LE(0) }      // UINT16
+          case 3: { const b = await readBytes(2); return b.readInt16LE(0) }       // INT16
+          case 4: { const b = await readBytes(4); return b.readUInt32LE(0) }      // UINT32
+          case 5: { const b = await readBytes(4); return b.readInt32LE(0) }       // INT32
+          case 6: { const b = await readBytes(4); return b.readFloatLE(0) }       // FLOAT32
+          case 7: { const b = await readBytes(1); return b[0] !== 0 }             // BOOL
+          case 8: { return await readString() }                                    // STRING
+          case 9: { // ARRAY
+            const tBuf = await readBytes(4)
+            const arrType = tBuf.readUInt32LE(0)
+            // GGUF v3+: array length is u64. v1/v2: u32.
+            const arrLenBytes = version >= 3 ? 8 : 4
+            const lBuf = await readBytes(arrLenBytes)
+            const arrLen = version >= 3 ? Number(readU64(lBuf, 0)) : lBuf.readUInt32LE(0)
+            const arr: any[] = []
+            for (let i = 0; i < arrLen && i < 100000; i++) arr.push(await readValue(arrType))
+            return arr
+          }
+          case 10: { const b = await readBytes(8); return Number(b.readBigUInt64LE(0)) } // UINT64
+          case 11: { const b = await readBytes(8); return Number(b.readBigInt64LE(0)) }  // INT64
+          case 12: { const b = await readBytes(8); return b.readDoubleLE(0) }            // FLOAT64
+          default: return null
+        }
+      }
+
+      // Walk metadata KV pairs — with per-KV error recovery so a single bad
+      // value doesn't kill the entire parse.
+      let architecture = ''
+      const allMeta: Record<string, any> = {}  // store all keys for robust resolution
+      for (let i = 0; i < kvCount && i < 500; i++) {
+        try {
+          const key = await readString()
+          const typeBuf = await readBytes(4)
+          const valueType = typeBuf.readUInt32LE(0)
+          // Skip arrays entirely (they can be huge and we don't need them).
+          // Read just enough to advance the file offset.
+          if (valueType === 9) {
+            // ARRAY: read array type + length, then skip all elements
+            const arrTypeBuf = await readBytes(4)
+            const arrType = arrTypeBuf.readUInt32LE(0)
+            const arrLenBytes = version >= 3 ? 8 : 4
+            const lBuf = await readBytes(arrLenBytes)
+            const arrLen = version >= 3 ? Number(readU64(lBuf, 0)) : lBuf.readUInt32LE(0)
+            // Skip array elements by reading and discarding
+            for (let j = 0; j < Math.min(arrLen, 1000000); j++) {
+              await readValue(arrType)
+            }
+            allMeta[key.toLowerCase()] = []
+            continue
+          }
+          const value = await readValue(valueType)
+          const lk = key.toLowerCase()
+          allMeta[lk] = value
+          if (lk === 'general.architecture' && !result.architecture) { architecture = String(value); result.architecture = architecture }
+          if (lk === 'general.name' && !result.modelName) result.modelName = String(value)
+          if (lk === 'tokenizer.chat_template' && !result.chatTemplate) result.chatTemplate = String(value)
+        } catch (kvErr) {
+          // If we hit an error on this KV pair, log it and stop parsing further
+          // (we can't reliably continue since fileOffset may be wrong).
+          console.log('[GGUF] Parse error at KV pair', i, ':', String(kvErr))
+          break
+        }
+      }
+      // Debug: log all metadata keys to help diagnose missing fields.
+      console.log('[GGUF] architecture:', architecture, '| metadata keys found:', Object.keys(allMeta).length, '| keys:', Object.keys(allMeta).join(', '))
+      // Resolve architecture-specific keys AFTER the full walk (architecture
+      // might be set late in the metadata). Check arch-prefixed, then any key
+      // ending with the suffix.
+      const arch = architecture.toLowerCase()
+      const resolve = (suffix: string): number | null => {
+        // 1. Exact arch-prefixed match (e.g. "llama.block_count")
+        if (arch && allMeta[`${arch}.${suffix}`] !== undefined) return Number(allMeta[`${arch}.${suffix}`])
+        // 2. Unprefixed match (e.g. "block_count")
+        if (allMeta[suffix] !== undefined) return Number(allMeta[suffix])
+        // 3. Any key ending with the suffix (e.g. "llama.block_count" when arch is unknown)
+        for (const k of Object.keys(allMeta)) {
+          if (k.endsWith(`.${suffix}`) && allMeta[k] !== undefined) return Number(allMeta[k])
+        }
+        return null
+      }
+      // Fix 3: For MoE models, block_count might be stored as "llama.block_count"
+      // but some converters store it differently. Try multiple variants.
+      // Only set if the native tool didn't already find it.
+      if (!result.blockCount) result.blockCount = resolve('block_count')
+      if (!result.blockCount) result.blockCount = resolve('n_layers') || resolve('n_blocks')
+      if (!result.contextLength) result.contextLength = resolve('context_length')
+      if (!result.contextLength) result.contextLength = resolve('n_ctx') || resolve('max_context_length')
+      if (!result.expertCount) result.expertCount = resolve('expert_count')
+      if (!result.expertCount) result.expertCount = resolve('n_experts')
+      // expert_used_count: the number of active experts used for generation.
+      if (!(result as any).expertUsedCount) {
+        (result as any).expertUsedCount = resolve('expert_used_count') || resolve('n_experts_used')
+      }
+      if (!result.hiddenSize) result.hiddenSize = resolve('embedding_length')
+      if (!result.hiddenSize) result.hiddenSize = resolve('n_embd')
+      if (!result.kvHeads) {
+        const kvHeadsVal = (() => {
+          if (arch && allMeta[`${arch}.attention.head_count_kv`] !== undefined) return Number(allMeta[`${arch}.attention.head_count_kv`])
+          if (allMeta['attention.head_count_kv'] !== undefined) return Number(allMeta['attention.head_count_kv'])
+          for (const k of Object.keys(allMeta)) {
+            if (k.endsWith('.attention.head_count_kv')) return Number(allMeta[k])
+          }
+          return null
+        })()
+        result.kvHeads = kvHeadsVal
+      }
+
+      // Fix 1/2: Fallback byte-scan — if the structured parse failed to find
+      // block_count, context_length, or chat_template, do a raw byte search
+      // in the first 8 MB of the file. This catches cases where the structured
+      // parse broke partway through due to a large array or parse error.
+      if (!result.blockCount || !result.contextLength || !result.chatTemplate) {
+        try {
+          // Re-open from the beginning and read the first 8 MB
+          const scanFd = await fsPromises.open(modelPath, 'r')
+          const scanBuf = Buffer.alloc(16 * 1024 * 1024) // 16 MB scan window (increased for large tokenizers)
+          const { bytesRead } = await scanFd.read(scanBuf, 0, scanBuf.length, 0)
+          await scanFd.close()
+          const scanStr = scanBuf.subarray(0, bytesRead).toString('latin1')
+          const lowerScan = scanStr.toLowerCase()
+
+          // Helper: find a metadata key in the byte stream and read the value
+          // that follows it. In GGUF, after a string key comes a u32 value type,
+          // then the value. We search for the key bytes, then parse forward.
+          function findUint32AfterKey(keyName: string): number | null {
+            // The key is stored as: u64 length + UTF-8 bytes + u32 type + value
+            const keyBytes = Buffer.from(keyName, 'utf-8')
+            const keyIdx = scanBuf.indexOf(keyBytes, 0, 'latin1')
+            if (keyIdx === -1) return null
+            // After the key bytes, there should be a u32 value type at offset keyIdx + keyBytes.length
+            // But the key is preceded by a u64 length. We need to find the START of the length.
+            // Actually, since we found the key bytes, the u32 type is right after:
+            const afterKey = keyIdx + keyBytes.length
+            if (afterKey + 4 > bytesRead) return null
+            const valueType = scanBuf.readUInt32LE(afterKey)
+            // For UINT32 (type 4), the value is the next 4 bytes.
+            if (valueType === 4 || valueType === 5) {
+              const valOffset = afterKey + 4
+              if (valOffset + 4 > bytesRead) return null
+              return scanBuf.readUInt32LE(valOffset)
+            }
+            return null
+          }
+
+          function findStringAfterKey(keyName: string): string | null {
+            const keyBytes = Buffer.from(keyName, 'utf-8')
+            const keyIdx = scanBuf.indexOf(keyBytes, 0, 'latin1')
+            if (keyIdx === -1) return null
+            const afterKey = keyIdx + keyBytes.length
+            if (afterKey + 4 > bytesRead) return null
+            const valueType = scanBuf.readUInt32LE(afterKey)
+            // For STRING (type 8), the value is u64 length + UTF-8 bytes.
+            if (valueType === 8) {
+              const lenOffset = afterKey + 4
+              if (lenOffset + 8 > bytesRead) return null
+              const strLen = Number(scanBuf.readBigUInt64LE(lenOffset))
+              if (strLen <= 0 || strLen > 1024 * 1024) return null
+              const strStart = lenOffset + 8
+              if (strStart + strLen > bytesRead) return null
+              return scanBuf.subarray(strStart, strStart + strLen).toString('utf-8')
+            }
+            return null
+          }
+
+          // Try various key patterns for block_count
+          if (!result.blockCount) {
+            const patterns = [
+              `${arch}.block_count`, 'llama.block_count', 'block_count',
+              'qwen2moe.block_count', 'qwen2.block_count', 'gpt2.block_count',
+              'llm.block_count', 'n_layers', 'qwen3.block_count',
+              'qwen3moe.block_count', 'deepseek.block_count',
+              'stablelm.block_count', 'falcon.block_count',
+              'mpt.block_count', 'refact.block_count'
+            ]
+            for (const p of patterns) {
+              const v = findUint32AfterKey(p)
+              if (v !== null && v > 0 && v < 100000) {
+                result.blockCount = v
+                console.log('[GGUF] Fallback found block_count via key:', p, '=', v)
+                break
+              }
+            }
+          }
+
+          // Try various key patterns for context_length
+          if (!result.contextLength) {
+            const patterns = [
+              `${arch}.context_length`, 'llama.context_length', 'context_length',
+              'qwen2moe.context_length', 'qwen2.context_length', 'n_ctx',
+              'llm.context_length', 'max_context_length', 'max_sequence_length',
+              'qwen3.context_length', 'qwen3moe.context_length',
+              'deepseek.context_length', 'max_position_embeddings'
+            ]
+            for (const p of patterns) {
+              const v = findUint32AfterKey(p)
+              if (v !== null && v > 0 && v < 10000000) {
+                result.contextLength = v
+                console.log('[GGUF] Fallback found context_length via key:', p, '=', v)
+                break
+              }
+            }
+          }
+
+          // Try various key patterns for chat_template
+          if (!result.chatTemplate) {
+            const patterns = [
+              'tokenizer.chat_template', 'chat_template', 'general.chat_template',
+              'tokenizer.chat_template_jinja', 'general.chat_template_jinja'
+            ]
+            for (const p of patterns) {
+              const v = findStringAfterKey(p)
+              if (v !== null && v.length > 0) {
+                result.chatTemplate = v
+                console.log('[GGUF] Fallback found chat_template via key:', p, '(len:', v.length, ')')
+                break
+              }
+            }
+          }
+
+          // Try expert_count
+          if (!result.expertCount) {
+            const patterns = [`${arch}.expert_count`, 'llama.expert_count', 'expert_count', 'qwen2moe.expert_count', 'n_experts']
+            for (const p of patterns) {
+              const v = findUint32AfterKey(p)
+              if (v !== null && v > 0 && v < 10000) {
+                result.expertCount = v
+                console.log('[GGUF] Fallback found expert_count via key:', p, '=', v)
+                break
+              }
+            }
+          }
+
+          // Try expert_used_count
+          if (!(result as any).expertUsedCount) {
+            const patterns = [`${arch}.expert_used_count`, 'llama.expert_used_count', 'expert_used_count', 'qwen2moe.expert_used_count', 'n_experts_used']
+            for (const p of patterns) {
+              const v = findUint32AfterKey(p)
+              if (v !== null && v > 0 && v < 10000) {
+                (result as any).expertUsedCount = v
+                console.log('[GGUF] Fallback found expert_used_count via key:', p, '=', v)
+                break
+              }
+            }
+          }
+
+          // If still no expert_count, check for MoE tensor names in the byte stream
+          if (!result.expertCount) {
+            if (lowerScan.includes('ffn_gate_ex') || lowerScan.includes('ffn_exp') || lowerScan.includes('expert')) {
+              result.isMoe = true
+              console.log('[GGUF] Fallback: MoE tensor names detected in byte scan')
+            }
+          }
+        } catch (scanErr) {
+          console.log('[GGUF] Fallback byte scan error:', String(scanErr))
+        }
+      }
+
+      // If expert_count metadata wasn't found, scan tensor names for expert indicators.
+      if (result.expertCount === null) {
+        // Read tensor info: each is name(gguf_string) + n_dims(u32) + dims(u64*n) + dtype(u32) + offset(u64)
+        let expertTensorsFound = 0
+        for (let i = 0; i < Math.min(tensorCount, 2000); i++) {
+          const tname = await readString()
+          if (tname.includes('ffn_gate_ex') || tname.includes('ffn_exp')) expertTensorsFound++
+          if (expertTensorsFound > 0) break // one is enough to know it's MoE
+          // Skip dims + dtype + offset to advance
+          const ndBuf = await readBytes(4)
+          const ndims = ndBuf.readUInt32LE(0)
+          if (ndims > 0 && ndims < 10) await readBytes(8 * ndims) // dims
+          await readBytes(4 + 8) // dtype + offset
+        }
+        if (expertTensorsFound > 0) {
+          result.isMoe = true
+          // Can't determine exact count from name scan alone; leave expertCount null
+          // but mark isMoe so the UI shows the MoE block with a fallback max.
+        }
+      } else {
+        result.isMoe = result.expertCount > 0
+      }
+      await fd.close()
+      return result
+    } catch (err) {
+      return { ...result, error: String(err) }
+    }
+  })
+
+  // ----- VRAM telemetry (feature 14) -----
+  // Queries free VRAM via nvidia-smi (non-blocking). Falls back gracefully.
+  ipcMain.handle('get-vram-info', async () => {
+    try {
+      const isWin = process.platform === 'win32'
+      const isLinux = process.platform === 'linux'
+      if (!isWin && !isLinux) return { freeVRAMMB: 0, totalVRAMMB: 0, hasNvidia: false, gpuName: null }
+      const query = async (): Promise<string | null> => {
+        return new Promise((resolve) => {
+          const cmd = 'nvidia-smi --query-gpu=memory.free,memory.total,name --format=csv,noheader,nounits'
+          exec(cmd, { timeout: 5000 }, (err, stdout) => {
+            if (err) return resolve(null)
+            resolve(stdout.trim())
+          })
+        })
+      }
+      const out = await query()
+      if (!out) return { freeVRAMMB: 0, totalVRAMMB: 0, hasNvidia: false, gpuName: null }
+      // Parse first GPU line: "free,total,name"
+      const firstLine = out.split('\n')[0].trim()
+      const parts = firstLine.split(',').map(s => s.trim())
+      if (parts.length >= 3) {
+        const free = parseInt(parts[0], 10) || 0
+        const total = parseInt(parts[1], 10) || 0
+        const name = parts.slice(2).join(',').trim()
+        return { freeVRAMMB: free, totalVRAMMB: total, hasNvidia: true, gpuName: name }
+      }
+      return { freeVRAMMB: 0, totalVRAMMB: 0, hasNvidia: false, gpuName: null }
+    } catch (err) {
+      return { freeVRAMMB: 0, totalVRAMMB: 0, hasNvidia: false, gpuName: null, error: String(err) }
+    }
+  })
+
+  // ----- System RAM info (feature 19) -----
+  ipcMain.handle('get-system-ram', async () => {
+    const os = await import('os')
+    const total = os.totalmem()
+    const free = os.freemem()
+    return { totalRAMMB: Math.round(total / (1024 * 1024)), freeRAMMB: Math.round(free / (1024 * 1024)) }
+  })
+
+  // ----- Model Defaults settings (features 18/19) -----
+  ipcMain.handle('get-model-defaults', async () => {
+    const s = await loadSettings()
+    return s.modelDefaults || {
+      autoFitEnabled: true,
+      autoFitContextLength: 60000,
+      guardrailMode: 'strict' as const,
+      customMaxSizeGB: 0
+    }
+  })
+  ipcMain.handle('set-model-defaults', async (_e, defaults: any) => {
+    const s = await loadSettings()
+    s.modelDefaults = {
+      autoFitEnabled: !!defaults.autoFitEnabled,
+      autoFitContextLength: Math.max(2048, Math.min(200000, Number(defaults.autoFitContextLength) || 60000)),
+      guardrailMode: (['off','relaxed','balanced','strict','custom'].includes(defaults.guardrailMode) ? defaults.guardrailMode : 'strict'),
+      customMaxSizeGB: Math.max(0, Number(defaults.customMaxSizeGB) || 0)
+    }
+    await saveSettings(s)
+    return { success: true }
+  })
+
+  // ----- Base URL Override (feature 24) -----
+  ipcMain.handle('get-base-url-override', async () => {
+    const s = await loadSettings()
+    return s.baseUrlOverride || { ...DEFAULT_BASE_URL_OVERRIDE }
+  })
+  ipcMain.handle('set-base-url-override', async (_e, opts: any) => {
+    const s = await loadSettings()
+    s.baseUrlOverride = migrateBaseUrlOverride({
+      enabled: !!opts?.enabled,
+      port: Number(opts?.port) || 1234,
+      serveOnLocalNetwork: !!opts?.serveOnLocalNetwork,
+      apiKeyEnabled: !!opts?.apiKeyEnabled,
+      apiKey: typeof opts?.apiKey === 'string' ? opts.apiKey : ''
+    })
+    await saveSettings(s)
+    return { success: true }
+  })
+
+  // ----- Sampling presets (feature 28) -----
+  ipcMain.handle('list-sampling-presets', async () => {
+    const s = await loadSettings()
+    // Always include the 3 hardcoded presets; merge any user-added ones.
+    const hardcoded = getHardcodedPresets()
+    const userPresets = (s.samplingPresets || []).filter(p => !hardcoded.find(h => h.id === p.id))
+    // Ensure exactly one is starred.
+    const all = [...hardcoded, ...userPresets]
+    const starred = all.filter(p => p.isStarred)
+    if (starred.length === 0) all[0].isStarred = true
+    else if (starred.length > 1) starred.slice(1).forEach(p => p.isStarred = false)
+    return all
+  })
+  ipcMain.handle('add-sampling-preset', async (_e, name: string, values: any) => {
+    const s = await loadSettings()
+    const presets = [...(s.samplingPresets || [])]
+    const id = `user-${Date.now()}`
+    presets.push({ id, name, isDefault: false, isStarred: false, values })
+    s.samplingPresets = presets
+    await saveSettings(s)
+    return { success: true, preset: { id, name, isDefault: false, isStarred: false, values } }
+  })
+  ipcMain.handle('delete-sampling-preset', async (_e, id: string) => {
+    const s = await loadSettings()
+    s.samplingPresets = (s.samplingPresets || []).filter(p => p.id !== id)
+    await saveSettings(s)
+    return { success: true }
+  })
+  ipcMain.handle('star-sampling-preset', async (_e, id: string) => {
+    const s = await loadSettings()
+    // Star in both user presets and hardcoded (hardcoded stored as override flags).
+    const userPresets = (s.samplingPresets || []).map(p => ({ ...p, isStarred: p.id === id }))
+    s.samplingPresets = userPresets
+    s.starredPresetId = id
+    await saveSettings(s)
+    return { success: true }
+  })
+
+  // ----- Model loading guardrail check (feature 19) -----
+  // Pre-flight check before spawning llama-server. Returns { allowed, reason }.
+  ipcMain.handle('check-model-loading-guardrail', async (_e, opts: {
+    modelSizeMB: number
+    vramKVMB: number
+    vramMMMB: number
+  }) => {
+    const s = await loadSettings()
+    const mode = s.modelDefaults?.guardrailMode || 'strict'
+    if (mode === 'off') return { allowed: true, reason: 'Guardrails disabled' }
+    const os = await import('os')
+    const totalRAMMB = Math.round(os.totalmem() / (1024 * 1024))
+    const totalBudget = totalRAMMB // simplified: RAM + VRAM
+    const required = opts.modelSizeMB + opts.vramKVMB + opts.vramMMMB
+    // Thresholds per mode (fraction of total system RAM).
+    const thresholds: Record<string, number> = { relaxed: 0.95, balanced: 0.85, strict: 0.75, custom: 0.75 }
+    const threshold = thresholds[mode] || 0.75
+    if (mode === 'custom') {
+      const maxGB = s.modelDefaults?.customMaxSizeGB || 0
+      if (maxGB > 0 && opts.modelSizeMB / 1024 > maxGB) {
+        return { allowed: false, reason: `Model size (${(opts.modelSizeMB/1024).toFixed(1)} GB) exceeds custom limit (${maxGB} GB)` }
+      }
+    }
+    if (required > totalBudget * threshold) {
+      return { allowed: false, reason: `Model + KV cache + mmproj (${Math.round(required)} MB) exceeds the ${mode} guardrail threshold of ${Math.round(totalBudget * threshold)} MB. Reduce context size or GPU layers.` }
+    }
+    return { allowed: true, reason: 'Within guardrail budget' }
+  })
+
+  // Apply the persisted theme on startup.
+  loadSettings().then(s => applyNativeTheme(s.theme))
+
+  // ----- Silent automated multi-backend check on startup (feature 33) -----
+  // Runs check-all-backends in the background without spawning UI; results are
+  // broadcast to all windows so the UpdateBanner / tracker cards can react.
+  loadSettings().then(async (s) => {
+    if (!s.trackedBackends || s.trackedBackends.length === 0) return
+    try {
+      const results = await Promise.all(s.trackedBackends.map(t => fetchTrackedRelease(t)))
+      BrowserWindow.getAllWindows().forEach(win => {
+        if (!win.isDestroyed()) {
+          win.webContents.send('backends-checked-silent', { results })
+        }
+      })
+    } catch {}
+  })
+}
+
+// --------------------------------------------------------------------------
+// Helpers
+// --------------------------------------------------------------------------
+// Read a 64-bit little-endian unsigned integer from a Buffer at the given offset.
+// Returns a BigInt-safe number (may lose precision above 2^53, which is fine for
+// GGUF counts).
+function readU64(buf: Buffer, offset: number): bigint {
+  return buf.readBigUInt64LE(offset)
+}
+
+// The 3 hardcoded, immutable sampling presets (feature 28).
+function getHardcodedPresets(): any[] {
+  return [
+    {
+      id: 'lm-studio',
+      name: 'LM Studio',
+      isDefault: true,
+      isStarred: true,
+      values: { topK: 40, topP: 0.95, minP: 0.05, repeatPenalty: 1.1, presencePenalty: 0.0 }
+    },
+    {
+      id: 'qwen-thinking',
+      name: 'Qwen Thinking',
+      isDefault: true,
+      isStarred: false,
+      values: { temperature: 1.0, topP: 0.95, topK: 20, minP: 0.0, presencePenalty: 0.0, repeatPenalty: 1.0 }
+    },
+    {
+      id: 'qwen-instruct',
+      name: 'Qwen Instruct (Non-Thinking)',
+      isDefault: true,
+      isStarred: false,
+      values: { temperature: 0.7, topP: 0.80, topK: 20, minP: 0.0, presencePenalty: 1.5, repeatPenalty: 1.0 }
+    }
+  ]
+}
+
+function sortExternalFolders(folders: string[], mainFolder: string | null): string[] {
+  // Main (starred) folder first, then the rest sorted alphabetically by basename.
+  const main = mainFolder && folders.includes(mainFolder) ? mainFolder : null
+  const rest = folders.filter(f => f !== main).sort((a, b) => {
+    const na = basename(a).toLowerCase()
+    const nb = basename(b).toLowerCase()
+    return na.localeCompare(nb)
+  })
+  return main ? [main, ...rest] : rest
+}
+
+function appShouldUseDarkBackground(): boolean {
+  try {
+    const s = existsSync(SETTINGS_PATH) ? JSON.parse(readFileSync(SETTINGS_PATH, 'utf-8')) : null
+    const theme = s?.theme
+    if (theme === 'dark') return true
+    if (theme === 'light') return false
+    return nativeTheme.shouldUseDarkColors
+  } catch {
+    return true // fallback to dark
+  }
+}
+
+function applyNativeTheme(theme: ThemePref): void {
+  try {
+    if (theme === 'dark') nativeTheme.themeSource = 'dark'
+    else if (theme === 'light') nativeTheme.themeSource = 'light'
+    else nativeTheme.themeSource = 'system'
+  } catch {}
 }

@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useRef } from 'react'
 import { useStore } from '../store/useStore'
 import { Play, Square, Settings, ChevronDown, MoreVertical, Copy, Trash, Download, Globe, Server, AlertCircle } from 'lucide-react'
-import type { CardState, CommandParam } from '../../../shared/types'
+import type { CardState } from '../../../shared/types'
 import CmdParamsEditor from './CmdParamsEditor'
 interface Props { card: CardState }
 export default function ModelCard({ card }: Props) {
@@ -11,7 +11,7 @@ export default function ModelCard({ card }: Props) {
   const isRunning = card.status === 'running'
   const isExpanded = card.expanded
   const launchMode = card.template.launchMode || 'chat'
-  const modelExists = !card.template.modelPath || models.some(m => m.path === card.template.modelPath)
+  const modelExists = !card.template.modelPath || models.some(g => g.models.some(m => m.path === card.template.modelPath))
   useEffect(() => {
     function handleClickOutside(e: MouseEvent) {
       if (menuRef.current && !menuRef.current.contains(e.target as Node)) setShowMenu(false)
@@ -26,7 +26,7 @@ export default function ModelCard({ card }: Props) {
       else alert(`Failed to stop: ${res.error}`)
       return
     }
-    let targetBackend = backends.find(b => b.name === card.template.backendVersion)
+    let targetBackend = backends.find(b => b.name === card.template.backendVersion || b.version === card.template.backendVersion || b.id === card.template.backendVersion)
     if (!targetBackend && activeBackend) targetBackend = activeBackend
     if (!targetBackend || !targetBackend.exe) {
       alert('Backend not found or has no executable.')
@@ -54,6 +54,19 @@ export default function ModelCard({ card }: Props) {
     if (!args.includes('--port') && card.template.serverPort) {
       args.push('--port', String(card.template.serverPort))
     }
+    // Fix (context): ensure --ctx-size is passed so the server uses the model's
+    // real context (not the 4096 default). If the user set it via the slider,
+    // use that value. Otherwise inject the model's native context_length from
+    // the GGUF metadata (so the chat-window badge shows the real number).
+    // The run-model handler has a further safety-net injection of 0 if still
+    // missing.
+    const hasCtx = args.includes('--ctx-size') || args.includes('-c')
+    if (!hasCtx) {
+      const meta = useStore.getState().ggufMetadata[card.template.modelPath || '']
+      const nativeCtx = meta?.contextLength && meta.contextLength > 0 ? meta.contextLength : 0
+      args.push('--ctx-size', String(nativeCtx))
+    }
+    // If not set, llama-server uses the model's native context length (ctx=0).
     if (launchMode === 'api' && !args.includes('--no-webui')) {
       args.push('--no-webui')
     }
@@ -128,7 +141,7 @@ export default function ModelCard({ card }: Props) {
         </span>
         <span className="card-tag">
           <span className={`status-dot ${isRunning ? 'running' : 'idle'}`} />
-          {isRunning ? `Port ${card.tempPort || card.template.serverPort || 8080}` : 'Ready'}
+          {isRunning ? `Port ${card.tempPort || card.template.serverPort || 8080}${useStore.getState().baseUrlOverride?.enabled ? ' (Overridden)' : ''}` : 'Ready'}
         </span>
         {card.template.tags?.map(t => (
           <span key={t} className="card-tag" style={{ background: 'var(--surface-2, rgba(255,255,255,0.05))', border: '1px solid var(--border)' }}>
@@ -175,7 +188,11 @@ export default function ModelCard({ card }: Props) {
           <button
             className="btn card-run-btn"
             style={{ flex: 0.5, background: 'var(--accent)', color: 'var(--accent-fg)' }}
-            onClick={() => window.api.openChatWindow(card.tempPort || card.template.serverPort || 8080, card.template.name)}
+            onClick={() => {
+              const ctxVal = card.template.args?.['--ctx-size']
+              const ctxSize = ctxVal ? Number(ctxVal) : undefined
+              window.api.openChatWindow(card.tempPort || card.template.serverPort || 8080, card.template.name, ctxSize)
+            }}
             title="Open Chat Window"
           >
             <Globe size={14} /> Open Chat

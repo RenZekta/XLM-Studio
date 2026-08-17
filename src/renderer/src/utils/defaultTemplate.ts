@@ -64,11 +64,10 @@ function getRecommendedSettings(filename: string): RecommendedSettings {
   const quant = detectQuant(filename)
   const size = detectSize(filename)
   const family = detectFamily(filename)
-  const ctxMap: Record<string, number> = {
-    q1: 1024, q2: 2048, q3: 2048, q4: 4096,
-    q5: 4096, q6: 8192, q8: 8192, f16: 16384, f32: 16384
-  }
-  const ctxSize = ctxMap[quant] ?? 4096
+  // Fix 2: Don't set a hardcoded ctx-size. Let llama-server use the model's
+  // native context length (ctx=0 = from model). The web UI will show the real
+  // value from the server's /props endpoint.
+  const ctxSize = 0
   const threadMap: Record<string, number> = {
     '1b': 2, '3b': 4, '7b': 4, '13b': 6, '24b': 6, '34b': 8, '70b': 8, unknown: 4
   }
@@ -104,13 +103,16 @@ export function buildDefaultTemplate(
   const settings = getRecommendedSettings(filename)
   const port = getNextPort(existingTemplates)
   const args: Record<string, string | number | boolean | null> = {
-    '--ctx-size': settings.ctxSize,
     '--threads': settings.threads,
-    '--n-gpu-layers': settings.gpuLayers,
+    '--gpu-layers': settings.gpuLayers,   // was --n-gpu-layers (mismatched commands.json)
     '--batch-size': settings.batchSize,
     '--temp': settings.temp,
     '--repeat-penalty': settings.repeatPenalty
   }
+  // Context size: when not set explicitly, the run-model handler injects
+  // --ctx-size 0 (use the model's native context length from the GGUF file).
+  // We intentionally do NOT add --ctx-size here so the server picks up the
+  // native context. (See ipc.ts run-model for the safety-net injection.)
   return {
     id: `${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
     name: cleanName(filename) || filename,

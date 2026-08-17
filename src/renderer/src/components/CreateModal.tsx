@@ -37,7 +37,7 @@ function parseCommand(cmd: string): {
   return { modelPath, serverPort, args }
 }
 export default function CreateModal() {
-  const { setShowCreateModal, editingTemplate, backends, activeBackend, addCard, updateCard, models, prefillModelPath, setPrefillModelPath, cards } = useStore()
+  const { setShowCreateModal, editingTemplate, backends, activeBackend, addCard, updateCard, models, prefillModelPath, setPrefillModelPath, cards, baseUrlOverride } = useStore()
   const [name, setName] = useState('')
   const [description, setDescription] = useState('')
   const [backendVersion, setBackendVersion] = useState('')
@@ -164,7 +164,7 @@ export default function CreateModal() {
                     value={importCmd}
                     onChange={e => setImportCmd(e.target.value)}
                     placeholder="llama-server -m /models/model.gguf --port 8080 --ctx-size 4096 ..."
-                    style={{ fontSize: 12, fontFamily: "'SF Mono','Fira Code',monospace" }}
+                    style={{ fontSize: 12, fontFamily: "var(--font-mono)" }}
                   />
                   <button
                     type="button"
@@ -222,12 +222,13 @@ export default function CreateModal() {
                 >
                   <option value="">Default (Active)</option>
                   {backends.map(b => (
-                    <option key={b.name} value={b.name}>{b.name}</option>
+                    <option key={b.id} value={b.name}>{b.displayName}</option>
                   ))}
                 </select>
               </div>
               <div className="form-group">
-                <label className="form-label">Server Port</label>
+                <label className="form-label">
+                  Server Port {baseUrlOverride?.enabled && <span style={{ color: 'var(--warning)', fontSize: 12, fontWeight: 600 }}>(Overridden — using port {baseUrlOverride.port})</span>}</label>
                 <input
                   type="number"
                   className="form-input"
@@ -236,6 +237,11 @@ export default function CreateModal() {
                   min={1024}
                   max={65535}
                 />
+                {baseUrlOverride?.enabled && (
+                  <div className="form-hint" style={{ color: 'var(--warning)' }}>
+                    Base URL Override is enabled. The server will use port {baseUrlOverride.port} instead of {serverPort}. You can still change this port — it will be used when override is disabled. Disable override in Settings to use this port.
+                  </div>
+                )}
                 {(() => {
                   const conflict = cards.find(c =>
                     c.template.id !== editingTemplate?.id &&
@@ -272,10 +278,14 @@ export default function CreateModal() {
                   onChange={e => setModelPath(e.target.value)}
                 >
                   <option value="">-- Select a model --</option>
-                  {models.map(m => (
-                    <option key={m.path} value={m.path}>{m.name}</option>
+                  {models.map(g => (
+                    <optgroup key={g.folderPath} label={`${g.folder}${g.external ? ' (external)' : ''}${g.mmproj ? ' · mmproj' : ''}`}>
+                      {g.models.map(m => (
+                        <option key={m.path} value={m.path}>{m.name}</option>
+                      ))}
+                    </optgroup>
                   ))}
-                  {modelPath && !models.find(m => m.path === modelPath) && (
+                  {modelPath && !models.some(g => g.models.some(m => m.path === modelPath)) && (
                     <option value={modelPath}>{modelPath.split(/[/\\]/).pop()}</option>
                   )}
                 </select>
@@ -284,9 +294,10 @@ export default function CreateModal() {
                   Browse
                 </button>
               </div>
-              <div className="form-hint">Select a file from /models or browse your computer.</div>
+              <div className="form-hint">Models are grouped by folder. mmproj files are auto-detected and shared within each folder.</div>
             </div>
             {}
+            {/* Feature 15: Preset toggle is now inside CmdParamsEditor (no duplication). */}
             <div className="collapsible-section" style={{ marginTop: 20 }}>
               <button
                 type="button"

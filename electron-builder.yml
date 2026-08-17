@@ -1,5 +1,5 @@
-appId: com.hexllama.app
-productName: Hexllama
+appId: com.renzekta.xlmstudio
+productName: XLM Studio
 directories:
   buildResources: build
 files:

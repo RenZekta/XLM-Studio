@@ -1,22 +1,14 @@
 import React, { useState, useEffect, useCallback, useMemo } from 'react'
-import { useStore, ModelFileInfo, ModelDownloadInfo } from '../store/useStore'
+import { useStore } from '../store/useStore'
 import {
   HardDrive, Download, Trash, Pause, Play, X, Link, FolderOpen,
-  Pencil, Check, AlertCircle, Loader2, RefreshCw, Search, FilePlus, FileText
+  Pencil, Check, AlertCircle, Loader2, RefreshCw, Search, FilePlus, FileText,
+  ChevronRight, Eye, Layers
 } from 'lucide-react'
-function formatBytes(b: number) {
-  if (!b) return '—'
-  if (b < 1024 * 1024) return `${(b / 1024).toFixed(1)} KB`
-  if (b < 1024 ** 3) return `${(b / 1024 ** 2).toFixed(1)} MB`
-  return `${(b / 1024 ** 3).toFixed(2)} GB`
-}
-function formatSpeed(bps?: number) {
-  if (!bps) return ''
-  const mbps = bps / (1024 * 1024)
-  return `${mbps.toFixed(1)} MB/s`
-}
+import { formatBytes, formatSpeed } from '../utils/format'
+import type { ModelGroup } from '../../../shared/types'
+
 function UrlDownloadModal({ onClose }: { onClose: () => void }) {
-  const { upsertModelDownload } = useStore()
   const [url, setUrl] = useState('')
   const [loading, setLoading] = useState(false)
   const [hfFiles, setHfFiles] = useState<{ name: string; size: number; downloadUrl: string }[]>([])
@@ -98,12 +90,12 @@ function UrlDownloadModal({ onClose }: { onClose: () => void }) {
     </div>
   )
 }
-function DownloadRow({ dl }: { dl: ModelDownloadInfo }) {
+
+function DownloadRow({ dl }: { dl: any }) {
   const { removeModelDownload } = useStore()
   const isPaused = dl.phase === 'paused'
   const isDone = dl.phase === 'done'
   const isErr = dl.phase === 'error'
-  
   const [pending, setPending] = useState<'pausing' | 'resuming' | null>(null)
 
   async function togglePause() {
@@ -114,7 +106,6 @@ function DownloadRow({ dl }: { dl: ModelDownloadInfo }) {
       setPending('pausing')
       await window.api.pauseModelDownload(dl.id)
     }
-    
     setTimeout(() => setPending(null), 1500)
   }
   async function cancel() {
@@ -124,17 +115,13 @@ function DownloadRow({ dl }: { dl: ModelDownloadInfo }) {
 
   const showSpeed = dl.phase === 'downloading' && !pending && dl.speed && dl.speed > 0
   const statusLabel = pending === 'pausing'
-    ? 'Pausando…'
+    ? 'Pausing…'
     : pending === 'resuming'
-    ? 'Retomando…'
-    : isPaused
-    ? 'Pausado'
-    : isErr
-    ? 'Erro'
-    : isDone
-    ? 'Concluído'
-    : showSpeed
-    ? formatSpeed(dl.speed)
+    ? 'Resuming…'
+    : isPaused ? 'Paused'
+    : isErr ? 'Error'
+    : isDone ? 'Done'
+    : showSpeed ? formatSpeed(dl.speed)
     : `${dl.percent}%`
 
   return (
@@ -154,17 +141,8 @@ function DownloadRow({ dl }: { dl: ModelDownloadInfo }) {
         </span>
         {!isDone && !isErr && (
           <>
-            <button
-              className="btn btn-ghost btn-icon"
-              onClick={togglePause}
-              disabled={!!pending}
-              title={isPaused ? 'Resume' : 'Pause'}
-            >
-              {pending
-                ? <Loader2 size={13} className="spin" />
-                : isPaused
-                ? <Play size={13} />
-                : <Pause size={13} />}
+            <button className="btn btn-ghost btn-icon" onClick={togglePause} disabled={!!pending} title={isPaused ? 'Resume' : 'Pause'}>
+              {pending ? <Loader2 size={13} className="spin" /> : isPaused ? <Play size={13} /> : <Pause size={13} />}
             </button>
             <button className="btn btn-ghost btn-icon text-danger" onClick={cancel} title="Cancel">
               <X size={13} />
@@ -183,24 +161,33 @@ function DownloadRow({ dl }: { dl: ModelDownloadInfo }) {
   )
 }
 
-function ModelFileRow({ model, onDeleted }: { model: ModelFileInfo; onDeleted: () => void }) {
+// A single model file row inside a group.
+function ModelFileRow({
+  name, path, size, group, onDeleted
+}: {
+  name: string
+  path: string
+  size: number
+  group: ModelGroup
+  onDeleted: () => void
+}) {
   const { cards, setShowCreateModal, setView, setPrefillModelPath } = useStore()
   const [editing, setEditing] = useState(false)
-  const [newName, setNewName] = useState(model.name.replace(/\.[^.]+$/, ''))
+  const [newName, setNewName] = useState(name.replace(/\.[^.]+$/, ''))
   const existingTemplate = useMemo(
-    () => cards.find(c => c.template.modelPath === model.path)?.template ?? null,
-    [cards, model.path]
+    () => cards.find(c => c.template.modelPath === path)?.template ?? null,
+    [cards, path]
   )
   async function handleDelete() {
-    if (!confirm(`Delete "${model.name}"? This cannot be undone.`)) return
-    const res = await window.api.deleteModel(model.path)
+    if (!confirm(`Delete "${name}"? This cannot be undone.`)) return
+    const res = await window.api.deleteModel(path)
     if (res.success) onDeleted()
     else alert('Delete failed: ' + res.error)
   }
   async function handleRename() {
-    if (!newName.trim() || newName === model.name.replace(/\.[^.]+$/, '')) { setEditing(false); return }
-    const res = await window.api.renameModel(model.path, newName.trim())
-    if (res.success) { setEditing(false); onDeleted()  }
+    if (!newName.trim() || newName === name.replace(/\.[^.]+$/, '')) { setEditing(false); return }
+    const res = await window.api.renameModel(path, newName.trim())
+    if (res.success) { setEditing(false); onDeleted() }
     else alert('Rename failed: ' + res.error)
   }
   function handleTemplate() {
@@ -208,10 +195,13 @@ function ModelFileRow({ model, onDeleted }: { model: ModelFileInfo; onDeleted: (
     if (existingTemplate) {
       setShowCreateModal(true, existingTemplate)
     } else {
-      setPrefillModelPath(model.path)
+      setPrefillModelPath(path)
       setShowCreateModal(true, null)
     }
   }
+  // Size breakdown: if mmproj exists in the folder, show Total / Model + mmproj.
+  const mmproj = group.mmproj
+  const totalWithMmproj = mmproj ? size + mmproj.size : size
   return (
     <div className="models-file-row">
       <div className="models-file-icon"><HardDrive size={16} /></div>
@@ -223,13 +213,19 @@ function ModelFileRow({ model, onDeleted }: { model: ModelFileInfo; onDeleted: (
             <button className="btn btn-ghost btn-sm btn-icon" onClick={() => setEditing(false)}><X size={13} /></button>
           </div>
         ) : (
-          <span className="models-file-name">{model.name}</span>
+          <span className="models-file-name">{name}</span>
         )}
-        <div className="models-file-sub">
-          <span className="models-folder-badge">{model.folder}</span>
-          {model.external && <span className="models-folder-badge" title="Model from an external folder — will not be renamed or deleted by the app">External</span>}
-          <span>{formatBytes(model.size)}</span>
-        </div>
+        {mmproj ? (
+          <div className="model-size-breakdown">
+            <span className="total-chip">Total: {formatBytes(totalWithMmproj)}</span>
+            <span>Model: {formatBytes(size)}</span>
+            <span className="mmproj-chip">+ mmproj {formatBytes(mmproj.size)}</span>
+          </div>
+        ) : (
+          <div className="model-size-breakdown">
+            <span className="total-chip">Model: {formatBytes(size)}</span>
+          </div>
+        )}
       </div>
       <div className="models-file-actions">
         <button
@@ -239,23 +235,88 @@ function ModelFileRow({ model, onDeleted }: { model: ModelFileInfo; onDeleted: (
         >
           {existingTemplate ? <FileText size={14} /> : <FilePlus size={14} />}
         </button>
-        <button className="btn btn-ghost btn-icon" onClick={() => setEditing(true)} title={model.external ? 'Rename disabled for external models' : 'Rename'} disabled={model.external}><Pencil size={14} /></button>
-        <button className="btn btn-ghost btn-icon" onClick={() => window.api.openFolder(model.path.substring(0, model.path.lastIndexOf('/') === -1 ? model.path.lastIndexOf('\\') : model.path.lastIndexOf('/')))} title="Open folder"><FolderOpen size={14} /></button>
-        <button className="btn btn-ghost btn-icon text-danger" onClick={handleDelete} title={model.external ? 'Delete disabled for external models' : 'Delete'} disabled={model.external}><Trash size={14} /></button>
+        <button className="btn btn-ghost btn-icon" onClick={() => setEditing(true)} title={group.external ? 'Rename disabled for external models' : 'Rename'} disabled={group.external}><Pencil size={14} /></button>
+        <button className="btn btn-ghost btn-icon" onClick={() => window.api.openFolder(group.folderPath)} title="Open folder"><FolderOpen size={14} /></button>
+        <button className="btn btn-ghost btn-icon text-danger" onClick={handleDelete} title={group.external ? 'Delete disabled for external models' : 'Delete'} disabled={group.external}><Trash size={14} /></button>
       </div>
     </div>
   )
 }
+
+// A model group (folder) — expandable to show its model files.
+function ModelGroupCard({ group, onDeleted }: { group: ModelGroup; onDeleted: () => void }) {
+  const { expandedModelGroups, toggleModelGroup } = useStore()
+  const expanded = !!expandedModelGroups[group.folderPath]
+  const mmproj = group.mmproj
+  return (
+    <div className="model-group">
+      <div className="model-group-header" onClick={() => toggleModelGroup(group.folderPath)}>
+        <ChevronRight size={16} className={`model-group-chevron ${expanded ? 'open' : ''}`} />
+        <Layers size={15} style={{ color: 'var(--text-secondary)', flexShrink: 0 }} />
+        <span className="model-group-name" title={group.folderPath}>{group.folder}</span>
+        {group.external && <span className="external-tag" title="Model from an external folder">External</span>}
+        {mmproj ? (
+          <span className="mmproj-badge" title={mmproj.name}>
+            <Eye size={11} /> mmproj
+          </span>
+        ) : (
+          <span className="mmproj-badge absent" title="No multimodal projector detected">no mmproj</span>
+        )}
+        <span className="model-group-count">{group.models.length} model{group.models.length !== 1 ? 's' : ''}</span>
+        <span className="model-group-size">
+          {mmproj
+            ? `Total ${formatBytes(group.totalSize)}`
+            : formatBytes(group.totalSize)}
+        </span>
+      </div>
+      {expanded && (
+        <div className="model-group-body">
+          {group.models.map(m => (
+            <ModelFileRow
+              key={m.path}
+              name={m.name}
+              path={m.path}
+              size={m.size}
+              group={group}
+              onDeleted={onDeleted}
+            />
+          ))}
+          {mmproj && (
+            <div className="models-file-row" style={{ opacity: 0.7 }} title="Multimodal projector — shared by all models in this folder. Not listed as a separate model.">
+              <div className="models-file-icon"><Eye size={16} /></div>
+              <div className="models-file-meta">
+                <span className="models-file-name" style={{ color: 'var(--success)' }}>{mmproj.name}</span>
+                <div className="model-size-breakdown">
+                  <span className="mmproj-chip">mmproj {formatBytes(mmproj.size)}</span>
+                  <span style={{ fontSize: 10 }}>auto-detected, shared by this folder</span>
+                </div>
+              </div>
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  )
+}
+
 export default function ModelsView() {
   const { models, setModels, modelDownloads, upsertModelDownload, paths } = useStore()
   const [showUrlModal, setShowUrlModal] = useState(false)
   const [loading, setLoading] = useState(false)
   const [filter, setFilter] = useState('')
-  const filteredModels = useMemo(() => {
+
+  const totalModelFiles = useMemo(() => models.reduce((a, g) => a + g.models.length, 0), [models])
+  const filteredGroups = useMemo(() => {
     const q = filter.trim().toLowerCase()
     if (!q) return models
-    return models.filter(m => m.name.toLowerCase().includes(q) || m.folder.toLowerCase().includes(q))
+    return models
+      .map(g => ({
+        ...g,
+        models: g.models.filter(m => m.name.toLowerCase().includes(q))
+      }))
+      .filter(g => g.folder.toLowerCase().includes(q) || g.models.length > 0)
   }, [models, filter])
+
   const refresh = useCallback(async () => {
     setLoading(true)
     const m = await window.api.listModels()
@@ -265,20 +326,22 @@ export default function ModelsView() {
 
   useEffect(() => {
     refresh()
-
     window.api.listModelDownloads().then((list: any[]) => {
       list.forEach(dl => upsertModelDownload(dl))
     })
   }, [])
+
   const downloads = Object.values(modelDownloads)
   const activeDownloads = downloads.filter(d => d.phase !== 'cancelled')
+
   return (
     <div>
       <div className="page-header">
         <div>
           <h1 className="page-title">Models</h1>
           <p className="page-subtitle">
-            {filter ? `${filteredModels.length} of ${models.length}` : models.length} model{models.length !== 1 ? 's' : ''} installed
+            {filter ? `${filteredGroups.length} of ${models.length} folders` : models.length} folder{models.length !== 1 ? 's' : ''}
+            {' · '}{totalModelFiles} model{totalModelFiles !== 1 ? 's' : ''}
             {activeDownloads.length > 0 ? ` · ${activeDownloads.length} downloading` : ''}
           </p>
         </div>
@@ -286,7 +349,7 @@ export default function ModelsView() {
           <button className="btn btn-ghost btn-icon" onClick={refresh} title="Refresh" disabled={loading}>
             <RefreshCw size={15} className={loading ? 'spin' : ''} />
           </button>
-          <button className="btn btn-secondary" onClick={() => paths?.models && window.api.openFolder(paths.models)} disabled={!paths?.models}>
+          <button className="btn btn-secondary" onClick={() => paths && window.api.openFolder(paths.mainModelFolder || paths.models)} disabled={!paths}>
             <FolderOpen size={15} /> Open Folder
           </button>
           <button className="btn btn-primary" onClick={() => setShowUrlModal(true)}>
@@ -294,7 +357,7 @@ export default function ModelsView() {
           </button>
         </div>
       </div>
-      {}
+
       {activeDownloads.length > 0 && (
         <div className="models-section">
           <div className="models-section-title">
@@ -303,7 +366,7 @@ export default function ModelsView() {
           {activeDownloads.map(dl => <DownloadRow key={dl.id} dl={dl} />)}
         </div>
       )}
-      {}
+
       <div className="models-section">
         <div className="models-section-title">
           <HardDrive size={13} /> Installed Models
@@ -319,12 +382,7 @@ export default function ModelsView() {
               onChange={e => setFilter(e.target.value)}
             />
             {filter && (
-              <button
-                className="btn btn-ghost btn-icon"
-                onClick={() => setFilter('')}
-                title="Clear filter"
-                style={{ padding: 4 }}
-              >
+              <button className="btn btn-ghost btn-icon" onClick={() => setFilter('')} title="Clear filter" style={{ padding: 4 }}>
                 <X size={14} />
               </button>
             )}
@@ -334,13 +392,6 @@ export default function ModelsView() {
           <div style={{ textAlign: 'center', padding: '32px', color: 'var(--text-muted)', fontSize: 13 }}>
             <Loader2 size={16} className="spin" style={{ display: 'block', margin: '0 auto 8px' }} /> Loading...
           </div>
-        )}
-        {loading && models.length > 0 && (
-          <>
-            {[0, 1, 2].map(i => (
-              <div key={`skel-${i}`} className="hub-card skeleton" style={{ height: 56, marginBottom: 8 }} />
-            ))}
-          </>
         )}
         {!loading && models.length === 0 && (
           <div className="empty-state" style={{ padding: '40px 24px' }}>
@@ -352,13 +403,13 @@ export default function ModelsView() {
             </button>
           </div>
         )}
-        {models.length > 0 && filteredModels.length === 0 && (
+        {models.length > 0 && filteredGroups.length === 0 && (
           <div style={{ textAlign: 'center', padding: '24px', color: 'var(--text-muted)', fontSize: 13 }}>
             No models match "{filter}"
           </div>
         )}
-        {filteredModels.map(m => (
-          <ModelFileRow key={m.path} model={m} onDeleted={refresh} />
+        {filteredGroups.map(g => (
+          <ModelGroupCard key={g.folderPath} group={g} onDeleted={refresh} />
         ))}
       </div>
       {showUrlModal && <UrlDownloadModal onClose={() => { setShowUrlModal(false); refresh() }} />}

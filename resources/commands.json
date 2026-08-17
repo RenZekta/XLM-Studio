@@ -109,6 +109,7 @@
       "commands": [
         { "arg": "--port", "label": "Server Port", "description": "Port the server listens on", "type": "number", "default": 8080, "min": 1024, "max": 65535, "env": "LLAMA_ARG_PORT" },
         { "arg": "--host", "label": "Server Host", "description": "Host address to bind", "type": "string", "default": "127.0.0.1", "placeholder": "127.0.0.1", "env": "LLAMA_ARG_HOST" },
+        { "arg": "--api-key", "label": "API Key", "description": "API key required for all requests (set to enable authentication)", "type": "string", "placeholder": "sk-...", "env": "LLAMA_API_KEY" },
         { "arg": "--chat-template", "label": "Chat Template", "description": "Custom Jinja chat template name or path", "type": "string", "placeholder": "llama3", "env": "LLAMA_ARG_CHAT_TEMPLATE" },
         { "arg": "--system-prompt", "short": "-sys", "label": "System Prompt", "description": "System prompt to use with model", "type": "text", "placeholder": "You are a helpful assistant." },
         { "arg": "--jinja", "label": "Use Jinja Templating", "description": "Enable Jinja template engine for chat", "type": "boolean", "default": true, "env": "LLAMA_ARG_JINJA" },

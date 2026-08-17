@@ -1,5 +1,9 @@
 import { create } from 'zustand'
-import type { Template, BackendVersion, CommandsSchema, ReleaseInfo, RunningStatus } from '../../../shared/types'
+import type {
+  Template, BackendVersion, CommandsSchema, ReleaseInfo, RunningStatus,
+  ModelGroup, TrackedBackend, TrackedBackendRelease, ThemePref
+} from '../../../shared/types'
+
 interface CardState {
   template: Template
   status: RunningStatus
@@ -7,24 +11,23 @@ interface CardState {
   expanded: boolean
   tempPort?: number
 }
-export interface ModelFileInfo {
-  name: string; path: string; size: number; folder: string; external?: boolean
-}
+
 export interface ModelDownloadInfo {
   id: string; url: string; filename: string; destPath: string
   receivedBytes: number; totalBytes: number
   phase: 'downloading' | 'paused' | 'done' | 'error' | 'cancelled'
   percent: number; repoId?: string; speed?: number
 }
+
 interface AppStore {
   cards: CardState[]
   backends: BackendVersion[]
-  models: ModelFileInfo[]
+  models: ModelGroup[]
   activeBackend: BackendVersion | null
   commandsSchema: CommandsSchema | null
   releaseInfo: ReleaseInfo | null
-  paths: { models: string; templates: string; backend: string } | null
-  view: 'cards' | 'settings' | 'hub' | 'models' | 'about'
+  paths: { models: string; templates: string; backend: string; mainModelFolder: string; mainBackendFolder: string } | null
+  view: 'cards' | 'settings' | 'hub' | 'models' | 'about' | 'logs'
   showCreateModal: boolean
   editingTemplate: Template | null
   prefillModelPath: string | null
@@ -40,6 +43,31 @@ interface AppStore {
   hubSort: string
   hubDirection: number
   compactSidebarEnabled: boolean
+
+  // New state for feature groups
+  externalModelFolders: string[]
+  externalBackendFolders: string[]
+  mainModelFolder: string | null
+  mainBackendFolder: string | null
+  trackedBackends: TrackedBackend[]
+  trackerResults: Record<string, TrackedBackendRelease>
+  checkingAllBackends: boolean
+  theme: ThemePref
+  systemTheme: 'dark' | 'light'
+  expandedModelGroups: Record<string, boolean>
+  cpuInfo: { physicalCores: number; logicalCores: number; modelName: string } | null
+  detectedSpeculation: Record<string, { mode: 'off' | 'mtp' | 'draft' | 'dspark'; reason?: string }>
+  speculationApplied: Record<string, boolean>
+  // New state for features 12-34
+  ggufMetadata: Record<string, any>  // keyed by modelPath
+  vramInfo: { freeVRAMMB: number; totalVRAMMB: number; hasNvidia: boolean; gpuName: string | null } | null
+  systemRam: { totalRAMMB: number; freeRAMMB: number } | null
+  modelDefaults: { autoFitEnabled: boolean; autoFitContextLength: number; guardrailMode: string; customMaxSizeGB: number }
+  baseUrlOverride: { enabled: boolean; port: number; serveOnLocalNetwork: boolean; apiKeyEnabled: boolean; apiKey: string }
+  samplingPresets: any[]
+  paramViewMode: 'common' | 'full'  // feature 30
+  quickBaselineActive: boolean      // feature 25 — tracks if Quick preset is the active baseline
+
   setCompactSidebarEnabled: (enabled: boolean) => void
   setView: (v: AppStore['view']) => void
   setShowCreateModal: (show: boolean, template?: Template | null) => void
@@ -47,10 +75,10 @@ interface AppStore {
   setActiveBackend: (b: BackendVersion) => void
   setCommandsSchema: (s: CommandsSchema) => void
   setBackends: (b: BackendVersion[]) => void
-  setModels: (m: ModelFileInfo[]) => void
+  setModels: (m: ModelGroup[]) => void
   setCards: (c: CardState[]) => void
   setReleaseInfo: (r: ReleaseInfo | null) => void
-  setPaths: (p: { models: string; templates: string; backend: string }) => void
+  setPaths: (p: { models: string; templates: string; backend: string; mainModelFolder: string; mainBackendFolder: string }) => void
   setUpdateDismissed: (v: boolean) => void
   setCheckingUpdate: (v: boolean) => void
   setDownloadProgress: (data: { percent: number; phase: string } | null) => void
@@ -70,7 +98,30 @@ interface AppStore {
   setCardStatus: (id: string, status: RunningStatus, pid?: number, tempPort?: number) => void
   toggleCardExpanded: (id: string) => void
   collapseAllCards: () => void
+
+  setExternalModelFolders: (f: string[]) => void
+  setExternalBackendFolders: (f: string[]) => void
+  setMainModelFolder: (f: string | null) => void
+  setMainBackendFolder: (f: string | null) => void
+  setTrackedBackends: (t: TrackedBackend[]) => void
+  setTrackerResult: (r: TrackedBackendRelease) => void
+  setCheckingAllBackends: (v: boolean) => void
+  setTheme: (t: ThemePref) => void
+  setSystemTheme: (t: 'dark' | 'light') => void
+  toggleModelGroup: (folderPath: string) => void
+  setCpuInfo: (info: { physicalCores: number; logicalCores: number; modelName: string } | null) => void
+  setDetectedSpeculation: (modelPath: string, mode: 'off' | 'mtp' | 'draft' | 'dspark', reason?: string) => void
+  markSpeculationApplied: (templateId: string, applied: boolean) => void
+  setGgufMetadata: (modelPath: string, meta: any) => void
+  setVramInfo: (info: any) => void
+  setSystemRam: (info: { totalRAMMB: number; freeRAMMB: number }) => void
+  setModelDefaults: (defaults: any) => void
+  setBaseUrlOverride: (opts: any) => void
+  setSamplingPresets: (presets: any[]) => void
+  setParamViewMode: (mode: 'common' | 'full') => void
+  setQuickBaselineActive: (active: boolean) => void
 }
+
 export const useStore = create<AppStore>((set) => ({
   cards: [], backends: [], models: [], activeBackend: null,
   commandsSchema: null, releaseInfo: null, paths: null,
@@ -79,6 +130,29 @@ export const useStore = create<AppStore>((set) => ({
   templateSearch: '', modelDownloads: {}, hfDownloads: [],
   hubQuery: '', hubResults: [], hubSelectedModelId: null, hubSort: 'downloads', hubDirection: -1,
   compactSidebarEnabled: localStorage.getItem('compactSidebar') === 'true',
+
+  externalModelFolders: [],
+  externalBackendFolders: [],
+  mainModelFolder: null,
+  mainBackendFolder: null,
+  trackedBackends: [],
+  trackerResults: {},
+  checkingAllBackends: false,
+  theme: (localStorage.getItem('hexllama_theme') as ThemePref) || 'system',
+  systemTheme: 'dark',
+  expandedModelGroups: {},
+  cpuInfo: null,
+  detectedSpeculation: {},
+  speculationApplied: {},
+  ggufMetadata: {},
+  vramInfo: null,
+  systemRam: null,
+  modelDefaults: { autoFitEnabled: true, autoFitContextLength: 60000, guardrailMode: 'strict', customMaxSizeGB: 0 },
+  baseUrlOverride: { enabled: true, port: 1234, serveOnLocalNetwork: false, apiKeyEnabled: false, apiKey: '' },
+  samplingPresets: [],
+  paramViewMode: 'common',
+  quickBaselineActive: true,  // Fix 5: Quick settings is the default baseline
+
   setCompactSidebarEnabled: (enabled) => {
     localStorage.setItem('compactSidebar', String(enabled))
     set({ compactSidebarEnabled: enabled })
@@ -127,5 +201,36 @@ export const useStore = create<AppStore>((set) => ({
   toggleCardExpanded: (id) => set((s) => ({
     cards: s.cards.map(c => c.template.id === id ? { ...c, expanded: !c.expanded } : c)
   })),
-  collapseAllCards: () => set((s) => ({ cards: s.cards.map(c => ({ ...c, expanded: false })) }))
+  collapseAllCards: () => set((s) => ({ cards: s.cards.map(c => ({ ...c, expanded: false })) })),
+
+  setExternalModelFolders: (f) => set({ externalModelFolders: f }),
+  setExternalBackendFolders: (f) => set({ externalBackendFolders: f }),
+  setMainModelFolder: (f) => set({ mainModelFolder: f }),
+  setMainBackendFolder: (f) => set({ mainBackendFolder: f }),
+  setTrackedBackends: (t) => set({ trackedBackends: t }),
+  setTrackerResult: (r) => set((s) => ({ trackerResults: { ...s.trackerResults, [r.trackedId]: r } })),
+  setCheckingAllBackends: (v) => set({ checkingAllBackends: v }),
+  setTheme: (t) => {
+    localStorage.setItem('hexllama_theme', t)
+    set({ theme: t })
+  },
+  setSystemTheme: (t) => set({ systemTheme: t }),
+  toggleModelGroup: (folderPath) => set((s) => ({
+    expandedModelGroups: { ...s.expandedModelGroups, [folderPath]: !s.expandedModelGroups[folderPath] }
+  })),
+  setCpuInfo: (info) => set({ cpuInfo: info }),
+  setDetectedSpeculation: (modelPath, mode, reason) => set((s) => ({
+    detectedSpeculation: { ...s.detectedSpeculation, [modelPath]: { mode, reason } }
+  })),
+  markSpeculationApplied: (templateId, applied) => set((s) => ({
+    speculationApplied: { ...s.speculationApplied, [templateId]: applied }
+  })),
+  setGgufMetadata: (modelPath, meta) => set((s) => ({ ggufMetadata: { ...s.ggufMetadata, [modelPath]: meta } })),
+  setVramInfo: (info) => set({ vramInfo: info }),
+  setSystemRam: (info) => set({ systemRam: info }),
+  setModelDefaults: (defaults) => set({ modelDefaults: defaults }),
+  setBaseUrlOverride: (opts) => set({ baseUrlOverride: opts }),
+  setSamplingPresets: (presets) => set({ samplingPresets: presets }),
+  setParamViewMode: (mode) => set({ paramViewMode: mode }),
+  setQuickBaselineActive: (active) => set({ quickBaselineActive: active })
 }))

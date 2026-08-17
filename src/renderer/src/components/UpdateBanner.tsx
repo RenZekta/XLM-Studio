@@ -19,7 +19,8 @@ export default function UpdateBanner() {
     const res = await window.api.downloadRelease({
       url: asset.downloadUrl,
       version: `${releaseInfo.tagName}-${asset.name.replace('.zip', '')}`,
-      assetName: asset.name
+      assetName: asset.name,
+      backendKey: 'llama.cpp'
     })
     setDownloading(false)
     setDownloadProgress(null)

@@ -1,35 +1,13 @@
 import React from 'react'
-import { useStore } from '../store/useStore'
-import { RefreshCw } from 'lucide-react'
-interface Props {
-  onCheckUpdates: () => void
-}
+
+// Feature 32/33: Custom HTML title bar removed. Only a minimal drag region
+// remains so the native OS window frame can be used. The "Check for updates"
+// button has been removed; updates are now checked silently on startup.
 const IS_MACOS = typeof navigator !== 'undefined' && /Mac|iPhone|iPad/.test(navigator.userAgent)
-export default function Titlebar({ onCheckUpdates }: Props) {
-  const { checkingUpdate } = useStore()
+export default function Titlebar() {
   return (
-    <header className={`titlebar${IS_MACOS ? ' titlebar-macos' : ''}`}>
-      {}
-      <div className="titlebar-logo">
-        <img
-          src="./full-logo.png"
-          alt="hexllama"
-          className="titlebar-logo-img"
-          draggable={false}
-        />
-      </div>
-      {}
+    <header className={`titlebar${IS_MACOS ? ' titlebar-macos' : ''}`} style={{ height: 32 }}>
       <div className="titlebar-drag-region" />
-      <div className="titlebar-actions">
-        <button
-          className={`btn btn-ghost btn-icon ${checkingUpdate ? 'spin-btn' : ''}`}
-          onClick={onCheckUpdates}
-          title="Check for llama.cpp updates"
-          disabled={checkingUpdate}
-        >
-          <RefreshCw size={15} className={checkingUpdate ? 'spin' : ''} />
-        </button>
-      </div>
     </header>
   )
 }

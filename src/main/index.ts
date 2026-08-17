@@ -51,7 +51,8 @@ function createWindow(): void {
   }
 }
 app.whenReady().then(() => {
-  electronApp.setAppUserModelId('com.hexllama')
+  // Feature 31: Rebrand to XLM Studio — unique app user model id + standalone data dir.
+  electronApp.setAppUserModelId('com.renzekta.xlmstudio')
   app.on('browser-window-created', (_, window) => {
     optimizer.watchWindowShortcuts(window)
   })
