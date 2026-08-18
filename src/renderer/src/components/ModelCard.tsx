@@ -1,14 +1,50 @@
-import React, { useState, useEffect, useRef } from 'react'
+import React, { useState, useEffect, useRef, useMemo } from 'react'
 import { useStore } from '../store/useStore'
-import { Play, Square, Settings, ChevronDown, MoreVertical, Copy, Trash, Download, Globe, Server, AlertCircle } from 'lucide-react'
+import { Play, Square, Settings, ChevronDown, MoreVertical, Copy, Trash, Download, Globe, Server, AlertCircle, Gauge, Loader2 } from 'lucide-react'
 import type { CardState } from '../../../shared/types'
 import CmdParamsEditor from './CmdParamsEditor'
 interface Props { card: CardState }
 export default function ModelCard({ card }: Props) {
-  const { toggleCardExpanded, updateCard, setCardStatus, removeCard, backends, activeBackend, commandsSchema, setShowCreateModal, models } = useStore()
+  const { toggleCardExpanded, updateCard, setCardStatus, removeCard, backends, activeBackend, commandsSchema, setShowCreateModal, models, modelDefaults, ggufMetadata } = useStore()
+
+  // Feature (context): compute the EFFECTIVE context that will be passed to
+  // llama.cpp on the next run. Precedence (Task 2.1/5):
+  //   1. Per-preset "Ignore Context Length Override" (__ignoreCtxOverride) ON
+  //      → use the preset's own --ctx-size (or AutoFill-computed value), ignoring
+  //      the global Minimum AutoFit override from Settings.
+  //   2. Global "Minimum Context Length Override" (Model Defaults → autoFitEnabled)
+  //      ON → acts as a MINIMUM (floor): use max(preset --ctx-size, override).
+  //      If the preset's ctx is higher, it's respected. If lower, the minimum wins.
+  //   3. OFF → use the preset's own --ctx-size value (if set and > 0).
+  //   4. Otherwise fall back to the model's native context_length from the
+  //      GGUF metadata, then 32768.
+  const ignoreCtxOverride = card.template.args?.['__ignoreCtxOverride'] === true
+  const autoCtxFill = (card.template.args?.['__autoCtxFill'] as 'off' | 'auto' | 'maximum') || 'off'
+  const effectiveCtx = useMemo(() => {
+    const presetCtx = card.template.args?.['--ctx-size']
+    const presetVal = presetCtx !== undefined && presetCtx !== '' && presetCtx !== null ? Number(presetCtx) : 0
+    const meta = ggufMetadata[card.template.modelPath || '']
+    const native = meta?.contextLength && meta.contextLength > 0 ? meta.contextLength : 0
+    // Base value: preset ctx, else native, else 32768.
+    let base = presetVal > 0 ? presetVal : (native > 0 ? native : 32768)
+    // Task 5: global override acts as a MINIMUM (floor), not a strict override.
+    // When the override is enabled and not ignored, ensure ctx >= autoFitContextLength.
+    if (!ignoreCtxOverride && modelDefaults?.autoFitEnabled) {
+      const minCtx = Math.max(2048, Number(modelDefaults.autoFitContextLength) || 32768)
+      base = Math.max(base, minCtx)
+    }
+    return base
+  }, [modelDefaults, card.template.args, card.template.modelPath, ggufMetadata, ignoreCtxOverride])
+  // "from override" = the value comes from the global override (blue badge).
+  // When the per-preset Ignore-Override is ON, the badge is neutral (preset).
+  const ctxFromOverride = !ignoreCtxOverride && !!modelDefaults?.autoFitEnabled
+  // Task 2.1/2.2: when both Ignore-Override + AutoFill (Maximum) are ON, the
+  // hint changes to "*Auto/Max Context Fill".
+  const bothAutoFillOn = ignoreCtxOverride && autoCtxFill !== 'off'
   const [showMenu, setShowMenu] = useState(false)
   const menuRef = useRef<HTMLDivElement>(null)
   const isRunning = card.status === 'running'
+  const isStopping = card.status === 'stopping'
   const isExpanded = card.expanded
   const launchMode = card.template.launchMode || 'chat'
   const modelExists = !card.template.modelPath || models.some(g => g.models.some(m => m.path === card.template.modelPath))
@@ -21,9 +57,13 @@ export default function ModelCard({ card }: Props) {
   }, [])
   async function handleRunToggle() {
     if (isRunning) {
+      // Enter 'stopping' state: disables the Start button + shows a spinner while
+      // the main process kills the tree and waits for the port to be released.
+      // This is what makes rapid Stop→Start reliable (no more "port in use").
+      setCardStatus(card.template.id, 'stopping')
       const res = await window.api.stopModel(card.template.id)
       if (res.success) setCardStatus(card.template.id, 'idle')
-      else alert(`Failed to stop: ${res.error}`)
+      else { setCardStatus(card.template.id, 'running'); alert(`Failed to stop: ${res.error}`) }
       return
     }
     let targetBackend = backends.find(b => b.name === card.template.backendVersion || b.version === card.template.backendVersion || b.id === card.template.backendVersion)
@@ -35,6 +75,8 @@ export default function ModelCard({ card }: Props) {
     const args: string[] = []
     const tArgs = card.template.args
     if (card.template.modelPath) args.push('-m', card.template.modelPath)
+    // Helper to check if a key is an internal UI flag (not a real CLI arg).
+    const isInternal = (k: string) => k.startsWith('__')
     if (commandsSchema) {
       for (const cat of commandsSchema.categories) {
         for (const cmd of cat.commands) {
@@ -47,6 +89,7 @@ export default function ModelCard({ card }: Props) {
       }
     } else {
       for (const [k, v] of Object.entries(tArgs)) {
+        if (isInternal(k)) continue  // skip __-prefixed internal flags
         if (v === true) args.push(k)
         else if (v !== false && v !== null && v !== '') args.push(k, String(v))
       }
@@ -54,17 +97,42 @@ export default function ModelCard({ card }: Props) {
     if (!args.includes('--port') && card.template.serverPort) {
       args.push('--port', String(card.template.serverPort))
     }
-    // Fix (context): ensure --ctx-size is passed so the server uses the model's
-    // real context (not the 4096 default). If the user set it via the slider,
-    // use that value. Otherwise inject the model's native context_length from
-    // the GGUF metadata (so the chat-window badge shows the real number).
-    // The run-model handler has a further safety-net injection of 0 if still
-    // missing.
-    const hasCtx = args.includes('--ctx-size') || args.includes('-c')
-    if (!hasCtx) {
-      const meta = useStore.getState().ggufMetadata[card.template.modelPath || '']
-      const nativeCtx = meta?.contextLength && meta.contextLength > 0 ? meta.contextLength : 0
-      args.push('--ctx-size', String(nativeCtx))
+    // Feature (context): determine how --ctx-size / --fit are passed.
+    // AutoFill "Auto" (dense OR MoE): defer to llama-server's --fit — do NOT
+    //   pass --ctx-size at all, so llama-server decides context freely.
+    //   Note: --fit is a SELECT arg (options on/off), so it must be passed as
+    //   "--fit on" (a bare "--fit" flag crashes llama-server → server closes
+    //   instantly). This was the root cause of Task 3.
+    // AutoFill "Maximum": force --ctx-size to the computed max-fitting context.
+    // Otherwise: force --ctx-size to the effective context.
+    const autoFitMode = ignoreCtxOverride && autoCtxFill  // 'off' | 'auto' | 'maximum'
+    const isAutoFitAuto = autoFitMode === 'auto'
+    const setCtxArg = (val: number) => {
+      const idx = args.indexOf('--ctx-size')
+      if (idx !== -1 && idx + 1 < args.length) { args[idx + 1] = String(val); return }
+      const shortIdx = args.indexOf('-c')
+      if (shortIdx !== -1 && shortIdx + 1 < args.length) { args[shortIdx + 1] = String(val); return }
+      args.push('--ctx-size', String(val))
+    }
+    const removeCtxArg = () => {
+      let idx = args.indexOf('--ctx-size')
+      while (idx !== -1) { args.splice(idx, idx + 1 < args.length ? 2 : 1); idx = args.indexOf('--ctx-size') }
+      let sIdx = args.indexOf('-c')
+      while (sIdx !== -1) { args.splice(sIdx, sIdx + 1 < args.length ? 2 : 1); sIdx = args.indexOf('-c') }
+    }
+    const setFitArg = (val: string) => {
+      const idx = args.indexOf('--fit')
+      if (idx !== -1 && idx + 1 < args.length) { args[idx + 1] = val; return }
+      const shortIdx = args.indexOf('-fit')
+      if (shortIdx !== -1 && shortIdx + 1 < args.length) { args[shortIdx + 1] = val; return }
+      args.push('--fit', val)
+    }
+    if (isAutoFitAuto) {
+      // Auto: defer to llama-server --fit (handles offloading + context).
+      removeCtxArg()
+      setFitArg('on')
+    } else {
+      setCtxArg(effectiveCtx)
     }
     // If not set, llama-server uses the model's native context length (ctx=0).
     if (launchMode === 'api' && !args.includes('--no-webui')) {
@@ -107,6 +175,8 @@ export default function ModelCard({ card }: Props) {
         <div className="card-icon">
           {isRunning ? (
             <div className="spin"><Settings size={20} className="text-success" /></div>
+          ) : isStopping ? (
+            <div className="spin"><Settings size={20} className="text-warning" /></div>
           ) : (
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
               <path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z" />
@@ -116,7 +186,44 @@ export default function ModelCard({ card }: Props) {
           )}
         </div>
         <div className="card-info">
-          <h3 className="card-name" title={card.template.name}>{card.template.name}</h3>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 6, minWidth: 0 }}>
+            <h3 className="card-name" title={card.template.name}>{card.template.name}</h3>
+            {/* Feature (context): badge showing the context amount that will be
+                (or is being) used by llama.cpp. When the Minimum Context Length
+                Override is ON (and the per-preset "Ignore" is OFF), the badge is
+                blue and matches the Model Defaults value; otherwise it reflects
+                the preset's --ctx-size. Always visible so the user can verify
+                the value before/while running. */}
+            <span
+              className={`ctx-badge ${ctxFromOverride ? 'ctx-badge-override' : ''} ${isRunning ? 'ctx-badge-live' : ''}`}
+              title={
+                ctxFromOverride
+                  ? `Context: ${effectiveCtx.toLocaleString()} tokens — from Minimum Context Length Override (Model Defaults). Passed to llama.cpp, /props and the chat window.`
+                  : `Context: ${effectiveCtx.toLocaleString()} tokens — from this preset's --ctx-size. Passed to llama.cpp, /props and the chat window.`
+              }
+            >
+              <Gauge size={11} />
+              ctx {effectiveCtx.toLocaleString()}
+            </span>
+            {/* Task 2.1/2.2: yellow hint when Ignore Context Length Override is ON.
+                When AutoFill is also ON, the hint shows the chosen mode
+                ("Auto Context Fill" or "Max Context Fill") with a two-row tooltip. */}
+            {bothAutoFillOn ? (
+              <span
+                className="ctx-override-hint"
+                title={`Ignore Context Length Override in preset settings is turned on\nUse Automatic Context Fill is set to ${autoCtxFill === 'maximum' ? 'Maximum available' : 'Auto'}`}
+              >
+                *{autoCtxFill === 'maximum' ? 'Max' : 'Auto'} Context Fill
+              </span>
+            ) : ignoreCtxOverride ? (
+              <span
+                className="ctx-override-hint"
+                title="Ignore Context Length Override in preset settings is turned on"
+              >
+                *Override is ignored
+              </span>
+            ) : null}
+          </div>
           <p className="card-desc" title={card.template.description}>{card.template.description || 'No description'}</p>
         </div>
         <div className="card-menu-btn" ref={menuRef} style={{ position: 'relative', zIndex: 10 }}>
@@ -140,8 +247,8 @@ export default function ModelCard({ card }: Props) {
           {!modelExists ? <span style={{ color: 'var(--danger)' }}>Missing File</span> : (card.template.modelPath?.split(/[/\\]/).pop() || 'No model')}
         </span>
         <span className="card-tag">
-          <span className={`status-dot ${isRunning ? 'running' : 'idle'}`} />
-          {isRunning ? `Port ${card.tempPort || card.template.serverPort || 8080}${useStore.getState().baseUrlOverride?.enabled ? ' (Overridden)' : ''}` : 'Ready'}
+          <span className={`status-dot ${isRunning ? 'running' : isStopping ? 'stopping' : 'idle'}`} />
+          {isRunning ? `Port ${card.tempPort || card.template.serverPort || 8080}${useStore.getState().baseUrlOverride?.enabled ? ' (Overridden)' : ''}` : isStopping ? 'Stopping…' : 'Ready'}
         </span>
         {card.template.tags?.map(t => (
           <span key={t} className="card-tag" style={{ background: 'var(--surface-2, rgba(255,255,255,0.05))', border: '1px solid var(--border)' }}>
@@ -178,20 +285,20 @@ export default function ModelCard({ card }: Props) {
         <button
           className={`btn card-run-btn ${isRunning ? 'btn-danger' : 'btn-primary'}`}
           onClick={handleRunToggle}
-          disabled={!isRunning && !modelExists}
+          disabled={isStopping || (!isRunning && !modelExists)}
           style={isRunning && launchMode === 'chat' ? { flex: 0.5 } : {}}
-          title={!isRunning && !modelExists ? 'Cannot start: model file is missing' : ''}
+          title={isStopping ? 'Stopping… waiting for the port to be released' : (!isRunning && !modelExists ? 'Cannot start: model file is missing' : '')}
         >
-          {isRunning ? <><Square size={14} /> Stop</> : <><Play size={14} /> Start</>}
+          {isStopping ? <><Loader2 size={14} className="spin" /> Stopping…</> : isRunning ? <><Square size={14} /> Stop</> : <><Play size={14} /> Start</>}
         </button>
         {isRunning && launchMode === 'chat' && (
           <button
             className="btn card-run-btn"
             style={{ flex: 0.5, background: 'var(--accent)', color: 'var(--accent-fg)' }}
             onClick={() => {
-              const ctxVal = card.template.args?.['--ctx-size']
-              const ctxSize = ctxVal ? Number(ctxVal) : undefined
-              window.api.openChatWindow(card.tempPort || card.template.serverPort || 8080, card.template.name, ctxSize)
+              // Pass the EFFECTIVE context (override-aware) so the chat window
+              // badge shows the same value llama-server is actually using.
+              window.api.openChatWindow(card.tempPort || card.template.serverPort || 8080, card.template.name, effectiveCtx)
             }}
             title="Open Chat Window"
           >

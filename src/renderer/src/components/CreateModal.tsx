@@ -37,13 +37,31 @@ function parseCommand(cmd: string): {
   return { modelPath, serverPort, args }
 }
 export default function CreateModal() {
-  const { setShowCreateModal, editingTemplate, backends, activeBackend, addCard, updateCard, models, prefillModelPath, setPrefillModelPath, cards, baseUrlOverride } = useStore()
+  const { setShowCreateModal, editingTemplate, backends, activeBackend, addCard, updateCard, models, prefillModelPath, setPrefillModelPath, cards, baseUrlOverride, samplingPresets } = useStore()
   const [name, setName] = useState('')
   const [description, setDescription] = useState('')
   const [backendVersion, setBackendVersion] = useState('')
   const [modelPath, setModelPath] = useState('')
   const [serverPort, setServerPort] = useState(8080)
-  const [args, setArgs] = useState<Record<string, any>>({})
+  // Feature (sampling presets): NEW templates are seeded with the starred
+  // preset's sampling values (temperature/top-k/etc.) so the user doesn't have
+  // to re-select a preset each time. This runs ONCE on mount for a new
+  // template; existing templates keep their own args untouched.
+  const [args, setArgs] = useState<Record<string, any>>(() => {
+    if (editingTemplate) return { ...(editingTemplate.args || {}) }
+    // New template: apply the starred preset.
+    const starred = samplingPresets.find(p => p.isStarred) || samplingPresets[0]
+    const seeded: Record<string, any> = {}
+    if (starred?.values) {
+      if (starred.values.temperature !== undefined) seeded['--temperature'] = starred.values.temperature
+      if (starred.values.topK !== undefined) seeded['--top-k'] = starred.values.topK
+      if (starred.values.topP !== undefined) seeded['--top-p'] = starred.values.topP
+      if (starred.values.minP !== undefined) seeded['--min-p'] = starred.values.minP
+      if (starred.values.repeatPenalty !== undefined) seeded['--repeat-penalty'] = starred.values.repeatPenalty
+      if (starred.values.presencePenalty !== undefined) seeded['--presence-penalty'] = starred.values.presencePenalty
+    }
+    return seeded
+  })
   const [tagsStr, setTagsStr] = useState('')
   const [launchMode, setLaunchMode] = useState<'chat' | 'api'>('chat')
   const [showAdvanced, setShowAdvanced] = useState(false)
@@ -66,7 +84,22 @@ export default function CreateModal() {
       setLaunchMode(editingTemplate.launchMode || 'chat')
     } else {
       if (activeBackend) setBackendVersion(activeBackend.name)
-      setArgs({})
+      // Feature (sampling presets): NEW templates are seeded with the starred
+      // preset's sampling values. Existing templates (above branch) keep their
+      // own args. Re-seed here too (this effect runs on mount + when deps
+      // change), so the starred preset is always the starting point for a new
+      // template regardless of how the modal was opened.
+      const starred = samplingPresets.find(p => p.isStarred) || samplingPresets[0]
+      const seeded: Record<string, any> = {}
+      if (starred?.values) {
+        if (starred.values.temperature !== undefined) seeded['--temperature'] = starred.values.temperature
+        if (starred.values.topK !== undefined) seeded['--top-k'] = starred.values.topK
+        if (starred.values.topP !== undefined) seeded['--top-p'] = starred.values.topP
+        if (starred.values.minP !== undefined) seeded['--min-p'] = starred.values.minP
+        if (starred.values.repeatPenalty !== undefined) seeded['--repeat-penalty'] = starred.values.repeatPenalty
+        if (starred.values.presencePenalty !== undefined) seeded['--presence-penalty'] = starred.values.presencePenalty
+      }
+      setArgs(seeded)
       setTagsStr('')
       setLaunchMode('chat')
       if (prefillModelPath) {
@@ -78,6 +111,7 @@ export default function CreateModal() {
       while (usedPorts.has(port)) port++
       setServerPort(port)
     }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [editingTemplate, activeBackend, prefillModelPath, setPrefillModelPath, cards])
   async function handlePickModel() {
     const file = await window.api.pickModelFile()

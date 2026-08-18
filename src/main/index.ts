@@ -1,7 +1,7 @@
 import { app, shell, BrowserWindow } from 'electron'
 import { join } from 'path'
 import { electronApp, optimizer, is } from '@electron-toolkit/utils'
-import { registerIpcHandlers } from './ipc'
+import { registerIpcHandlers, cleanupAllProcesses, getRunningProcessCount } from './ipc'
 import { existsSync } from 'fs'
 function resolveIcon(): string | undefined {
   const candidates = [
@@ -65,5 +65,23 @@ app.whenReady().then(() => {
 app.on('window-all-closed', () => {
   if (process.platform !== 'darwin') {
     app.quit()
+  }
+})
+
+// Feature (stop/start race): before quitting, kill every still-running
+// llama-server process tree so no orphan survives after XLM Studio closes
+// (previously a child could keep port 1234 alive, forcing a Task Manager kill).
+// `before-quit` fires before the app actually exits; we block the quit briefly
+// to let killProcessTree do its job, then re-quit.
+let _cleaningUp = false
+app.on('before-quit', (event) => {
+  if (_cleaningUp) return
+  if (getRunningProcessCount() > 0) {
+    _cleaningUp = true
+    event.preventDefault()
+    cleanupAllProcesses().finally(() => {
+      _cleaningUp = false
+      app.quit()
+    })
   }
 })

@@ -13,6 +13,9 @@
   --success: #16a34a;
   --danger: #dc2626;
   --warning: #d97706;
+  /* Blue accent used across the advanced-parameters UI (changed-state indicator,
+     toggle switches, VRAM banner). Reused by the Logs view for the template name. */
+  --info-blue: #3b82f6;
   --radius: 14px;
   --radius-sm: 8px;
   --radius-lg: 20px;
@@ -178,7 +181,41 @@ input[type="number"] {
 }
 .card-icon .spin svg { width: 20px; height: 20px; display: block; }
 .card-info { flex: 1; min-width: 0; }
-.card-name { font-size: 15px; font-weight: 700; letter-spacing: -.3px; truncate: ellipsis; white-space: nowrap; overflow: hidden; }
+/* card-name now sits in a flex row alongside the ctx badge, so it must be
+   allowed to shrink/truncate and yield space to the (non-shrinking) badge. */
+.card-name { font-size: 15px; font-weight: 700; letter-spacing: -.3px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; flex: 1; min-width: 0; }
+
+/* Feature (context): badge next to the model name showing the context amount
+   that will be (or is being) passed to llama.cpp. Blue variant = the value
+   comes from the Minimum Context Length Override (Model Defaults); neutral
+   variant = it comes from the preset's --ctx-size. */
+.ctx-badge {
+  display: inline-flex; align-items: center; gap: 3px;
+  flex-shrink: 0;
+  font-family: var(--font-mono); font-size: 10px; font-weight: 600;
+  color: var(--text-secondary);
+  background: var(--bg); border: 1px solid var(--border);
+  border-radius: 99px; padding: 1px 7px;
+  line-height: 1.4; white-space: nowrap;
+  transition: box-shadow 200ms ease, border-color 200ms ease;
+}
+.ctx-badge svg { width: 10px; height: 10px; flex-shrink: 0; }
+.ctx-badge-override {
+  color: var(--info-blue);
+  border-color: rgba(59,130,246,.45);
+  background: rgba(59,130,246,.08);
+}
+.ctx-badge-live {
+  box-shadow: 0 0 0 2px rgba(59,130,246,.14);
+  border-color: rgba(59,130,246,.6);
+}
+/* Task 2.1: yellow hint shown next to the ctx badge when the per-preset
+   "Ignore Context Length Override" is ON (and/or AutoFill is active). */
+.ctx-override-hint {
+  font-size: 10px; font-weight: 600; color: var(--warning);
+  white-space: nowrap; flex-shrink: 0;
+  cursor: help;
+}
 .card-desc { font-size: 12px; color: var(--text-secondary); margin-top: 2px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .card-menu-btn { flex-shrink: 0; position: relative; }
 .card-meta { padding: 0 18px 14px; display: flex; flex-wrap: wrap; gap: 6px; }
@@ -193,6 +230,7 @@ input[type="number"] {
 .status-dot { width: 7px; height: 7px; border-radius: 50%; display: inline-block; }
 .status-dot.running { background: var(--success); box-shadow: 0 0 0 3px rgba(22,163,74,.25); animation: pulse 1.8s ease-in-out infinite; }
 .status-dot.idle { background: var(--text-muted); }
+.status-dot.stopping { background: var(--warning); box-shadow: 0 0 0 3px rgba(217,119,6,.25); animation: pulse 1.2s ease-in-out infinite; }
 .status-dot.error { background: var(--danger); }
 @keyframes pulse { 0%,100%{opacity:1}50%{opacity:.5} }
 .card-actions { padding: 12px 18px 16px; display: flex; gap: 8px; align-items: center; }
@@ -1517,6 +1555,11 @@ input[type="number"] {
 .segmented-toggle-btn:hover:not(.active) { color: var(--text); }
 .segmented-toggle-btn:disabled { opacity: 0.45; cursor: not-allowed; }
 .segmented-toggle-btn svg { width: 12px; height: 12px; }
+/* Task 5: stacked multi-line label (e.g. "FULL" / "AUTO") for the FULL AUTO
+   preset button — keeps it narrow while showing both words vertically. */
+.segmented-toggle-btn.stacked-label { line-height: 1.05; padding-top: 3px; padding-bottom: 3px; }
+.segmented-toggle-btn .stacked-label-inner { display: flex; flex-direction: column; align-items: center; gap: 1px; }
+.segmented-toggle-btn .stacked-label-line { display: block; }
 
 /* Feature 15: Toggle switches accent color changed to blue (was white) */
 .toggle input:checked ~ .toggle-track { background: #3b82f6; }

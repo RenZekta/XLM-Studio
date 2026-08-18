@@ -11,6 +11,7 @@ import LogsView from './components/LogsView'
 import CreateModal from './components/CreateModal'
 import UpdateBanner from './components/UpdateBanner'
 import ChatWindow from './components/ChatWindow'
+import MetadataExtractionToast from './components/MetadataExtractionToast'
 import { buildDefaultTemplate } from './utils/defaultTemplate'
 import { phrases } from './utils/phrases'
 import { useTheme } from './hooks/useTheme'
@@ -49,7 +50,8 @@ export default function App() {
     setMainModelFolder, setMainBackendFolder,
     setTrackedBackends, setCpuInfo,
     setVramInfo, setSystemRam, setModelDefaults, setBaseUrlOverride, setSamplingPresets,
-    setTrackerResult
+    setTrackerResult,
+    setGgufMetadataBulk, setGgufMetadata, setMetadataExtraction, clearMetadataExtraction
   } = useStore()
 
   useEffect(() => {
@@ -66,6 +68,27 @@ export default function App() {
         setPaths(paths)
         setBackends(backendsData)
         setModels(modelsData)
+        // Task 1: bulk-load the GGUF metadata cache so metadata is instantly
+        // available for every detected model (no re-extraction on view).
+        try {
+          const cache = await window.api?.getMetadataCache?.()
+          if (cache && typeof cache === 'object') setGgufMetadataBulk(cache)
+        } catch {}
+        // Task 1: trigger background extraction for any detected model that
+        // isn't yet in the cache. The main process caches + broadcasts the
+        // result; we show a "extracting…" notification meanwhile.
+        try {
+          const allPaths: string[] = []
+          for (const g of modelsData) for (const m of g.models) allPaths.push(m.path)
+          const cached = useStore.getState().ggufMetadata
+          for (const p of allPaths) {
+            if (!cached[p]) {
+              // Fire-and-forget — the onMetadataExtracting listener shows the
+              // notification; onGgufMetadataUpdated populates the store.
+              window.api?.getGgufMetadata?.(p).catch(() => {})
+            }
+          }
+        } catch {}
         setExternalModelFolders(extModelFolders)
         setExternalBackendFolders(extBackendFolders)
         setTrackedBackends(tracked)
@@ -143,6 +166,34 @@ export default function App() {
         useStore.getState().setBackends(updated)
       })
     } catch {}
+
+    // Task 1: metadata extraction lifecycle — show "extracting…" notification
+    // and populate the store when the main process finishes caching.
+    try {
+      window.api?.onMetadataExtracting?.((data) => {
+        if (data.status === 'extracting') {
+          setMetadataExtraction(data.modelPath, data.name, 'extracting')
+        } else {
+          // done/error → clear the notification (the store auto-clears on
+          // done/error, but we call it to be explicit).
+          clearMetadataExtraction(data.modelPath)
+        }
+      })
+    } catch {}
+    try {
+      window.api?.onGgufMetadataUpdated?.((data) => {
+        setGgufMetadata(data.modelPath, data.meta)
+      })
+    } catch {}
+
+    // Task 2.2: Poll Free VRAM + Free RAM every 10s so the VRAM banner + the
+    // Automatic Context Fill calculator always use the freshest memory data.
+    // Without this, memory figures would be stale from the single init fetch.
+    const memPoll = setInterval(async () => {
+      try { setVramInfo(await window.api?.getVramInfo?.()) } catch {}
+      try { setSystemRam(await window.api?.getSystemRam?.()) } catch {}
+    }, 10000)
+    return () => clearInterval(memPoll)
   }, [])
 
   useEffect(() => {
@@ -290,6 +341,7 @@ export default function App() {
         </main>
       </div>
       {showCreateModal && <CreateModal />}
+      <MetadataExtractionToast />
     </div>
   )
 }

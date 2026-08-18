@@ -128,6 +128,18 @@ const api = {
 
   // ----- GGUF metadata parser (features 12/13/14/16/29) -----
   getGgufMetadata: (modelPath: string) => ipcRenderer.invoke('get-gguf-metadata', modelPath) as Promise<any>,
+  // Task 1: metadata cache (bulk-load + live updates)
+  getMetadataCache: () => ipcRenderer.invoke('get-metadata-cache') as Promise<Record<string, any>>,
+  onMetadataExtracting: (cb: (data: { modelPath: string; name: string; status: 'extracting' | 'done' | 'error' }) => void) => {
+    ipcRenderer.removeAllListeners('metadata-extracting')
+    ipcRenderer.on('metadata-extracting', (_e, data) => cb(data))
+  },
+  removeMetadataExtractingListener: () => ipcRenderer.removeAllListeners('metadata-extracting'),
+  onGgufMetadataUpdated: (cb: (data: { modelPath: string; meta: any }) => void) => {
+    ipcRenderer.removeAllListeners('gguf-metadata-updated')
+    ipcRenderer.on('gguf-metadata-updated', (_e, data) => cb(data))
+  },
+  removeGgufMetadataUpdatedListener: () => ipcRenderer.removeAllListeners('gguf-metadata-updated'),
 
   // ----- VRAM + system RAM telemetry (features 14/19) -----
   getVramInfo: () => ipcRenderer.invoke('get-vram-info') as Promise<any>,

@@ -9,7 +9,10 @@ interface Props<T extends string> {
 }
 
 // A reusable segmented toggle switch with a sliding blue accent highlight.
-// Used for "Settings: Quick / Clear" (feature 15) and "Parameters: Common / Full" (feature 30).
+// Used for "Settings: FULL AUTO / Quick / Clear" (feature 15/Task 5) and
+// "Parameters: Common / Full" (feature 30).
+// Multi-line labels (containing "\n") are stacked vertically inside the button
+// so a wide label like "FULL AUTO" fits without taking extra horizontal space.
 export default function SegmentedToggle<T extends string>({ label, options, value, onChange, disabled }: Props<T>) {
   const activeIndex = Math.max(0, options.findIndex(o => o.value === value))
   return (
@@ -23,18 +26,26 @@ export default function SegmentedToggle<T extends string>({ label, options, valu
             transform: `translateX(${activeIndex * 100}%)`
           }}
         />
-        {options.map(o => (
-          <button
-            key={o.value}
-            type="button"
-            className={`segmented-toggle-btn ${value === o.value ? 'active' : ''}`}
-            onClick={() => onChange(o.value)}
-            disabled={disabled}
-          >
-            {o.icon}
-            {o.label}
-          </button>
-        ))}
+        {options.map(o => {
+          const lines = o.label.split('\n')
+          const stacked = lines.length > 1
+          return (
+            <button
+              key={o.value}
+              type="button"
+              className={`segmented-toggle-btn ${value === o.value ? 'active' : ''} ${stacked ? 'stacked-label' : ''}`}
+              onClick={() => onChange(o.value)}
+              disabled={disabled}
+            >
+              {o.icon}
+              {stacked ? (
+                <span className="stacked-label-inner">
+                  {lines.map((ln, i) => <span key={i} className="stacked-label-line">{ln}</span>)}
+                </span>
+              ) : o.label}
+            </button>
+          )
+        })}
       </div>
     </div>
   )

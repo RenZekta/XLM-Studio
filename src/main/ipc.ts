@@ -21,9 +21,33 @@ const MODELS_DIR    = join(APP_ROOT, 'models')
 const TEMPLATES_DIR = join(APP_ROOT, 'templates')
 const BACKEND_DIR   = join(APP_ROOT, 'backend')
 const SETTINGS_PATH = join(APP_ROOT, 'settings.json')
+// Task 1: persisted GGUF metadata cache so metadata is available instantly
+// whenever the user accesses a model (no re-extraction on every view).
+const METADATA_CACHE_PATH = join(APP_ROOT, 'metadata-cache.json')
 for (const dir of [MODELS_DIR, TEMPLATES_DIR, BACKEND_DIR]) {
   if (!existsSync(dir)) mkdirSync(dir, { recursive: true })
 }
+
+// --------------------------------------------------------------------------
+// Task 1: GGUF metadata cache (load/save + in-memory mirror)
+// --------------------------------------------------------------------------
+// The cache is keyed by absolute model file path. On `list-models`, we diff the
+// set of currently-detected model files against the cache: extract metadata for
+// any new files (fire-and-forget), and delete entries for files that no longer
+// exist. This way the metadata is always ready when the user opens a template.
+let metadataCache: Record<string, any> = {}
+function loadMetadataCache(): void {
+  try {
+    if (existsSync(METADATA_CACHE_PATH)) {
+      metadataCache = JSON.parse(readFileSync(METADATA_CACHE_PATH, 'utf-8'))
+      if (!metadataCache || typeof metadataCache !== 'object' || Array.isArray(metadataCache)) metadataCache = {}
+    }
+  } catch { metadataCache = {} }
+}
+function saveMetadataCache(): void {
+  try { writeFileSync(METADATA_CACHE_PATH, JSON.stringify(metadataCache, null, 2)) } catch {}
+}
+loadMetadataCache()
 
 // --------------------------------------------------------------------------
 // Tracked backends — built-in defaults
@@ -60,7 +84,7 @@ interface AppSettings {
   mainBackendFolder: string | null
   theme: ThemePref
   trackedBackends: TrackedBackend[]
-  modelDefaults?: { autoFitEnabled: boolean; autoFitContextLength: number; guardrailMode: string; customMaxSizeGB: number }
+  modelDefaults?: { autoFitEnabled: boolean; autoFitContextLength: number; guardrailMode: string; customMaxSizeGB: number; useCurrentMemState?: boolean; moeOffloadStrategy?: 'offload' | 'max' }
   baseUrlOverride?: BaseUrlOverride
   samplingPresets?: any[]
   starredPresetId?: string
@@ -120,7 +144,7 @@ const DEFAULT_SETTINGS: AppSettings = {
   mainBackendFolder: null,
   theme: 'system',
   trackedBackends: DEFAULT_TRACKED,
-  modelDefaults: { autoFitEnabled: true, autoFitContextLength: 60000, guardrailMode: 'strict', customMaxSizeGB: 0 },
+  modelDefaults: { autoFitEnabled: true, autoFitContextLength: 60000, guardrailMode: 'strict', customMaxSizeGB: 0, useCurrentMemState: false, moeOffloadStrategy: 'offload' },
   baseUrlOverride: { ...DEFAULT_BASE_URL_OVERRIDE },
   samplingPresets: [],
   starredPresetId: 'lm-studio'
@@ -145,7 +169,14 @@ async function loadSettings(): Promise<AppSettings> {
       mainBackendFolder: typeof data.mainBackendFolder === 'string' ? data.mainBackendFolder : null,
       theme: (['system', 'dark', 'light'].includes(data.theme) ? data.theme : 'system') as ThemePref,
       trackedBackends: tracked,
-      modelDefaults: data.modelDefaults || DEFAULT_SETTINGS.modelDefaults,
+      modelDefaults: {
+        autoFitEnabled: data.modelDefaults?.autoFitEnabled ?? DEFAULT_SETTINGS.modelDefaults!.autoFitEnabled,
+        autoFitContextLength: data.modelDefaults?.autoFitContextLength ?? DEFAULT_SETTINGS.modelDefaults!.autoFitContextLength,
+        guardrailMode: data.modelDefaults?.guardrailMode ?? DEFAULT_SETTINGS.modelDefaults!.guardrailMode,
+        customMaxSizeGB: data.modelDefaults?.customMaxSizeGB ?? DEFAULT_SETTINGS.modelDefaults!.customMaxSizeGB,
+        useCurrentMemState: data.modelDefaults?.useCurrentMemState ?? false,
+        moeOffloadStrategy: (data.modelDefaults?.moeOffloadStrategy === 'max' ? 'max' : 'offload')
+      },
       baseUrlOverride: migrateBaseUrlOverride(data.baseUrlOverride),
       samplingPresets: Array.isArray(data.samplingPresets) ? data.samplingPresets : [],
       starredPresetId: typeof data.starredPresetId === 'string' ? data.starredPresetId : 'lm-studio'
@@ -184,8 +215,25 @@ async function backendRoots(): Promise<{ dir: string; external: boolean }[]> {
   return roots
 }
 
-const runningProcesses = new Map<string, ChildProcess>()
+const runningProcesses = new Map<string, { proc: ChildProcess; port: number }>
 let sharedChatWindow: BrowserWindow | null = null
+
+// Per-model flags so we only emit each "important" app-log event once per run.
+const serverReadyFlags = new Map<string, boolean>()
+const modelLoadingFlags = new Map<string, boolean>()
+
+// Feature (logs): emit an app-level meta log into the same `server-log` stream
+// consumed by the Logs view. These appear with a left blue bar + faint tint so
+// the user can spot lifecycle / generation / chat / error events at a glance,
+// on top of the raw llama-server stdout/stderr.
+function emitAppLog(id: string, name: string, line: string): void {
+  const ts = Date.now()
+  BrowserWindow.getAllWindows().forEach(win => {
+    if (!win.isDestroyed()) {
+      win.webContents.send('server-log', { id, name, stream: 'app', line, ts })
+    }
+  })
+}
 
 function isPortAvailable(port: number): Promise<boolean> {
   return new Promise((resolve) => {
@@ -199,6 +247,72 @@ function isPortAvailable(port: number): Promise<boolean> {
     })
     server.listen(port, '127.0.0.1')
   })
+}
+
+// ---------------------------------------------------------------------------
+// Robust process termination (feature: stop/start race fix)
+// ---------------------------------------------------------------------------
+// Problem: `proc.kill()` (SIGTERM) returns immediately but the OS takes a
+// moment to actually tear down the process and release its listening socket.
+// On Windows, SIGTERM is not supported and Node falls back to TerminateProcess
+// on the *parent* only — child processes spawned by llama-server keep the
+// port alive, so a rapid Stop→Start hits "port already in use" and the only
+// recovery is killing XLM Studio from Task Manager.
+//
+// Solution: terminate the whole process tree (Windows: `taskkill /F /T /PID`,
+// POSIX: SIGKILL to the negative group id after detaching into its own group),
+// then poll the port until it's free (or a timeout). This makes Stop→Start
+// reliable without orphaned children.
+function killProcessTree(proc: ChildProcess): Promise<void> {
+  return new Promise((resolve) => {
+    if (!proc || proc.exitCode !== null || proc.signalCode) {
+      resolve()
+      return
+    }
+    const pid = proc.pid
+    let settled = false
+    const done = () => {
+      if (settled) return
+      settled = true
+      resolve()
+    }
+    // Resolve as soon as the process actually exits.
+    proc.once('exit', done)
+
+    if (process.platform === 'win32') {
+      // /F = force, /T = kill the whole process tree (children included).
+      exec(`taskkill /F /T /PID ${pid}`, { timeout: 5000 }, () => {
+        // taskkill returns non-zero if the process is already gone — ignore.
+        // Give the OS a beat to release the socket.
+        setTimeout(done, 200)
+      })
+    } else {
+      try {
+        // Try sending SIGKILL to the whole process group first (covers children).
+        if (pid) {
+          try { process.kill(-pid, 'SIGKILL') } catch { /* group may not exist */ }
+          try { proc.kill('SIGKILL') } catch { /* already dead */ }
+        }
+      } catch {
+        try { proc.kill('SIGKILL') } catch {}
+      }
+      setTimeout(done, 200)
+    }
+    // Hard safety net so we never hang the IPC handler.
+    setTimeout(done, 6000)
+  })
+}
+
+// Poll a port until it's free (or the timeout elapses). llama-server releases
+// the listening socket shortly after the process exits, but not instantly —
+// this is the key to making rapid Stop→Start work.
+async function waitForPortFree(port: number, timeoutMs = 8000, intervalMs = 100): Promise<boolean> {
+  const start = Date.now()
+  while (Date.now() - start < timeoutMs) {
+    if (await isPortAvailable(port)) return true
+    await new Promise(r => setTimeout(r, intervalMs))
+  }
+  return false
 }
 
 // --------------------------------------------------------------------------
@@ -454,6 +568,52 @@ async function runGgufTool(ggufToolPath: string, modelPath: string): Promise<str
     console.log(`[GGUF] llama-gguf (${a.label}) output didn't look like metadata (${res.stdout.length} bytes)`)
   }
   return ''
+}
+
+// ---------------------------------------------------------------------------
+// GGUF file_type enum → human-readable quant name (Task 3: BPW math).
+// Source: ggml.h GGML_FTYPE values. Used to label the dominant quantization
+// and (via the BPW table) to estimate weight bits-per-weight when the exact
+// per-tensor census isn't available.
+// ---------------------------------------------------------------------------
+const GGUF_FTYPE_NAMES: Record<number, string> = {
+  0: 'F32', 1: 'F16', 2: 'Q4_0', 3: 'Q4_1', 4: 'Q4_1_SOME_F16',
+  7: 'Q8_0', 8: 'Q5_0', 9: 'Q5_1', 10: 'Q2_K', 11: 'Q3_K_S',
+  12: 'Q3_K_M', 13: 'Q3_K_L', 14: 'Q4_K_S', 15: 'Q4_K_M',
+  16: 'Q5_K_S', 17: 'Q5_K_M', 18: 'Q6_K', 19: 'IQ2_XXS',
+  20: 'IQ2_XS', 21: 'Q2_K_S', 22: 'IQ3_XS', 23: 'IQ3_XXS',
+  24: 'IQ1_S', 25: 'IQ4_NL', 26: 'IQ3_S', 27: 'IQ3_M',
+  28: 'IQ2_S', 29: 'IQ2_M', 30: 'IQ4_XS', 31: 'IQ1_M',
+  32: 'BF16', 33: 'Q4_0_4_4', 34: 'Q4_0_4_8', 35: 'Q4_0_8_8',
+  36: 'TQ1_0', 37: 'TQ2_0', 38: 'IQ2_XXS_NL'
+}
+function ggufFileTypeName(ftype: number): string | null {
+  return GGUF_FTYPE_NAMES[ftype] || null
+}
+
+// Approximate bits-per-weight for each GGUF ftype. Used as a fallback for the
+// weight-memory (W) estimate when we can't do an exact per-tensor census.
+// For KV-cache math we use the explicit KV-type bytes-per-element table in
+// useVramBudget.ts. These are conservative (slightly high) averages.
+const GGUF_FTYPE_BPW: Record<string, number> = {
+  'F32': 32, 'BF16': 16, 'F16': 16,
+  'Q8_0': 8.5,
+  'Q4_0': 4.5, 'Q4_1': 5.0, 'Q4_1_SOME_F16': 5.5,
+  'Q5_0': 5.5, 'Q5_1': 6.0,
+  'Q2_K': 2.625, 'Q2_K_S': 2.625,
+  'Q3_K_S': 3.0625, 'Q3_K_M': 3.4375, 'Q3_K_L': 3.8125,
+  'Q4_K_S': 4.5, 'Q4_K_M': 4.8125,
+  'Q5_K_S': 5.5, 'Q5_K_M': 5.6875,
+  'Q6_K': 6.5625,
+  'IQ2_XXS': 2.0625, 'IQ2_XS': 2.3125, 'IQ2_S': 2.5, 'IQ2_M': 2.6875, 'IQ2_XXS_NL': 2.0625,
+  'IQ3_XS': 3.0625, 'IQ3_XXS': 3.0625, 'IQ3_S': 3.125, 'IQ3_M': 3.4375,
+  'IQ4_NL': 4.5, 'IQ4_XS': 4.25,
+  'IQ1_S': 1.5625, 'IQ1_M': 1.75,
+  'TQ1_0': 1.6875, 'TQ2_0': 2.0625,
+  'Q4_0_4_4': 4.5, 'Q4_0_4_8': 4.5, 'Q4_0_8_8': 4.5
+}
+export function ggufFileTypeBPW(name: string): number | null {
+  return GGUF_FTYPE_BPW[name] ?? null
 }
 
 // Parse the output of `llama-gguf` into a key-value map.
@@ -810,6 +970,26 @@ async function cleanupOldBackendVersions(backendKey: string, newVersion: string)
 }
 
 // ==========================================================================
+// App-quit cleanup (feature: stop/start race fix)
+// ==========================================================================
+// On quit, kill every still-running llama-server process tree so no orphan
+// survives after XLM Studio closes (the user reported having to kill XLM
+// Studio from Task Manager because a child kept port 1234 alive). Called
+// from main/index.ts on `before-quit`.
+export async function cleanupAllProcesses(): Promise<void> {
+  if (runningProcesses.size === 0) return
+  const entries = Array.from(runningProcesses.entries())
+  runningProcesses.clear()
+  await Promise.all(entries.map(([_id, e]) => killProcessTree(e.proc).catch(() => {})))
+}
+
+// Peek at the running-process count so the quit handler can decide whether to
+// defer the quit until cleanup finishes.
+export function getRunningProcessCount(): number {
+  return runningProcesses.size
+}
+
+// ==========================================================================
 // IPC handlers
 // ==========================================================================
 export function registerIpcHandlers(): void {
@@ -845,8 +1025,25 @@ export function registerIpcHandlers(): void {
         groups.push(g)
       }
     }
+    // Task 1: prune the metadata cache — delete entries for model files that
+    // are no longer detected (e.g. deleted / moved). mmproj files are never
+    // cached (they're not models), so they're naturally absent.
+    const detectedPaths = new Set<string>()
+    for (const g of groups) for (const m of g.models) detectedPaths.add(m.path)
+    let pruned = false
+    for (const cachedPath of Object.keys(metadataCache)) {
+      if (!detectedPaths.has(cachedPath) || !existsSync(cachedPath)) {
+        delete metadataCache[cachedPath]
+        pruned = true
+      }
+    }
+    if (pruned) saveMetadataCache()
     return groups
   })
+
+  // Task 1: return the full metadata cache so the renderer can bulk-load it
+  // (instant access, no re-extraction on every view).
+  ipcMain.handle('get-metadata-cache', async () => metadataCache)
 
   ipcMain.handle('list-external-model-folders', async () => {
     const s = await loadSettings()
@@ -889,6 +1086,11 @@ export function registerIpcHandlers(): void {
       const allowed = [MODELS_DIR, ...s.externalModelFolders]
       if (!allowed.some(b => isSafePath(b, filePath))) return { success: false, error: 'Access denied' }
       unlinkSync(filePath)
+      // Task 1: remove the cached metadata for the deleted model file.
+      if (metadataCache[filePath]) {
+        delete metadataCache[filePath]
+        saveMetadataCache()
+      }
       const dir = dirname(filePath)
       // Remove the now-empty model folder (but never the storage roots themselves).
       const isRoot = [MODELS_DIR, ...s.externalModelFolders].some(b => resolve(dir) === resolve(b))
@@ -1264,49 +1466,30 @@ export function registerIpcHandlers(): void {
       }
     }
     if (!available) {
-      const response = await dialog.showMessageBox({
-        type: 'question',
-        buttons: ['Yes', 'No'],
-        defaultId: 0,
-        title: 'Port Conflict',
-        message: `Port ${port} is already in use by another running model or process.`,
-        detail: `Would you like to temporarily allocate a different available port for "${opts.name}"?`,
-        cancelId: 1
-      })
-      if (response.response === 0) {
-        let tempPort = port + 1
-        while (tempPort < 65535) {
-          if (await isPortAvailable(tempPort)) break
-          tempPort++
-        }
-        finalPort = tempPort
-        const portIdx = finalArgs.indexOf('--port')
-        if (portIdx !== -1 && portIdx + 1 < finalArgs.length) {
-          finalArgs[portIdx + 1] = String(finalPort)
-        } else {
-          const shortPortIdx = finalArgs.indexOf('-p')
-          if (shortPortIdx !== -1 && shortPortIdx + 1 < finalArgs.length) {
-            finalArgs[shortPortIdx + 1] = String(finalPort)
-          } else {
-            finalArgs.push('--port', String(finalPort))
-          }
-        }
-        available = true
-      } else {
-        return { success: false, error: `Port ${port} is already in use.` }
-      }
+      // Task 10: no more "run on a different port?" dialog or temp-port
+      // reassignment — that "parallel processes" behavior was confusing. Just
+      // return a clean error so the renderer alerts the user. The Stop button
+      // already disables Start while the previous server is closing, so a busy
+      // port here means another process (or another running model) genuinely
+      // holds it.
+      return { success: false, error: `Port ${port} is already in use. Stop the other model or change the port.` }
     }
 
-    // Fix (context): ALWAYS ensure --ctx-size is passed. When omitted, llama-server
-    // defaults to 4096 (NOT the model's native context length). Passing
-    // --ctx-size 0 tells llama-server to use the model's full context from the
-    // GGUF file, which fixes "context_exceeded" errors and makes the built-in
-    // web UI show the real available context (via the /props endpoint).
+    // Fix (context): ensure --ctx-size is passed so the server uses the model's
+    // real context (not the 4096 default). The renderer (ModelCard) is now the
+    // source of truth for the EFFECTIVE context — it computes it from the
+    // per-preset "Ignore Context Length Override" flag + the global Minimum
+    // AutoFit override + the preset's own --ctx-size, and forces --ctx-size to
+    // that value. The main process therefore does NOT re-apply the global
+    // override (doing so would break the per-preset ignore flag). It only
+    // ensures --ctx-size is present (0 = native) when the renderer didn't set
+    // one (e.g. MoE Auto mode passes --fit and leaves ctx to llama-server).
     {
-      const ctxIdx = finalArgs.indexOf('--ctx-size')
-      const shortCtxIdx = finalArgs.indexOf('-c')
-      if (ctxIdx === -1 && shortCtxIdx === -1) {
-        finalArgs.push('--ctx-size', '0')
+      const hasFit = finalArgs.includes('--fit') || finalArgs.includes('-fit')
+      if (!hasFit) {
+        const idx = finalArgs.indexOf('--ctx-size')
+        const sIdx = finalArgs.indexOf('-c')
+        if (idx === -1 && sIdx === -1) finalArgs.push('--ctx-size', '0')
       }
     }
     // Fix (override): Apply "Serve on local network" (--host 0.0.0.0) and
@@ -1344,7 +1527,40 @@ export function registerIpcHandlers(): void {
     if (!allowedRoots.some(b => isSafePath(b, exePath))) return { success: false, error: 'Access denied' }
     if (!existsSync(exePath)) return { success: false, error: `Executable not found: ${exePath}` }
     try {
-      const proc = spawn(exePath, finalArgs, { detached: false, stdio: 'pipe', cwd: dirname(exePath), windowsHide: false })
+      // Feature (logs): emit a launch event with the effective runtime params so
+      // the user can see exactly what is being passed to llama.cpp.
+      serverReadyFlags.delete(opts.id)
+      modelLoadingFlags.delete(opts.id)
+      {
+        const ctxArgIdx = finalArgs.indexOf('--ctx-size')
+        const ctxArgShortIdx = finalArgs.indexOf('-c')
+        const ctxArgPos = ctxArgIdx !== -1 ? ctxArgIdx : ctxArgShortIdx
+        let ctxValStr = '0 (native)'
+        if (ctxArgPos !== -1 && ctxArgPos + 1 < finalArgs.length) {
+          const v = finalArgs[ctxArgPos + 1]
+          ctxValStr = v === '0' ? '0 (native)' : String(v)
+        }
+        const nglIdx = finalArgs.indexOf('--gpu-layers')
+        const nglShortIdx = finalArgs.indexOf('-ngl')
+        const nglPos = nglIdx !== -1 ? nglIdx : nglShortIdx
+        const nglVal = nglPos !== -1 && nglPos + 1 < finalArgs.length ? finalArgs[nglPos + 1] : 'auto'
+        const overrideActive = overridePort !== null
+        const parts = [
+          `Launching "${opts.name}"`,
+          `backend=${opts.exe}`,
+          `port=${finalPort}${overrideActive ? ' (override)' : ''}`,
+          `ctx-size=${ctxValStr}`,
+          `gpu-layers=${nglVal}`
+        ]
+        if (s.modelDefaults?.autoFitEnabled) {
+          parts.push(`min-ctx-override=${s.modelDefaults.autoFitContextLength}`)
+        }
+        emitAppLog(opts.id, opts.name, parts.join(' · '))
+      }
+      // detached:true on POSIX so we get a new process group we can SIGKILL
+      // wholesale (covers llama-server's child threads). On Windows we rely on
+      // `taskkill /F /T` instead, so detached doesn't matter there.
+      const proc = spawn(exePath, finalArgs, { detached: process.platform !== 'win32', stdio: 'pipe', cwd: dirname(exePath), windowsHide: false })
       // Fix 4: Stream server logs to all renderer windows for the Logs tab.
       proc.stderr?.on('data', (d) => {
         const line = d.toString()
@@ -1352,6 +1568,15 @@ export function registerIpcHandlers(): void {
         BrowserWindow.getAllWindows().forEach(win => {
           if (!win.isDestroyed()) win.webContents.send('server-log', { id: opts.id, name: opts.name, stream: 'stderr', line, ts: Date.now() })
         })
+        // Feature (logs): surface important stderr events (errors/fatals) as
+        // highlighted app-level logs so they aren't lost in the raw stream.
+        try {
+          const lower = line.toLowerCase()
+          if (lower.includes('error') || lower.includes('fatal') || lower.includes('failed') || lower.includes('cannot') || lower.includes('abort')) {
+            const trimmed = line.replace(/\s+/g, ' ').trim().slice(0, 300)
+            if (trimmed) emitAppLog(opts.id, opts.name, `⚠ ${trimmed}`)
+          }
+        } catch {}
       })
       proc.stdout?.on('data', (d) => {
         const line = d.toString()
@@ -1359,6 +1584,39 @@ export function registerIpcHandlers(): void {
         BrowserWindow.getAllWindows().forEach(win => {
           if (!win.isDestroyed()) win.webContents.send('server-log', { id: opts.id, name: opts.name, stream: 'stdout', line, ts: Date.now() })
         })
+        // Feature (logs): detect lifecycle / generation / chat-request markers in
+        // the llama-server output and emit enriched app-level logs for them.
+        try {
+          const lower = line.toLowerCase()
+          // Model loaded / ready to serve.
+          if (!modelLoadingFlags.get(opts.id) && (lower.includes('model loaded') || lower.includes('llama_model_loader') || lower.includes('load_tensors'))) {
+            modelLoadingFlags.set(opts.id, true)
+            emitAppLog(opts.id, opts.name, 'Model loaded — preparing server...')
+          }
+          // HTTP server listening (ready to accept requests).
+          if (!serverReadyFlags.get(opts.id) && (lower.includes('server is listening') || lower.includes('http server listening') || lower.includes('listening on') || lower.includes('all slots are initialized') || lower.includes('main: server listening'))) {
+            serverReadyFlags.set(opts.id, true)
+            emitAppLog(opts.id, opts.name, `✓ Server ready — listening on port ${finalPort}`)
+          }
+          // Chat completion request (user message hitting the API).
+          if (lower.includes('chat/completions') || lower.includes('/v1/chat/completions')) {
+            if (lower.includes('post') || lower.includes('request') || lower.includes(' 200 ')) {
+              emitAppLog(opts.id, opts.name, '💬 Chat completion request received (user message)')
+            }
+          }
+          // Generation completion — llama-server prints "print_timings:" after each
+          // generation with prompt/predicted token stats.
+          if (lower.includes('print_timings')) {
+            const m = line.match(/n_predict\s*=\s*(\d+)/i) || line.match(/predicted\s+(\d+)\s+tokens/i)
+            const n = m ? m[1] : ''
+            emitAppLog(opts.id, opts.name, n ? `✨ Generation completed — ${n} tokens predicted` : '✨ Generation completed')
+          }
+          // System prompt / slot events (indicates system message processing).
+          if (lower.includes('slot') && (lower.includes('system') || lower.includes('prompt processing'))) {
+            const trimmed = line.replace(/\s+/g, ' ').trim().slice(0, 160)
+            if (trimmed) emitAppLog(opts.id, opts.name, `🔧 ${trimmed}`)
+          }
+        } catch {}
       })
       proc.on('error', (err: any) => {
         let msg = String(err)
@@ -1367,11 +1625,18 @@ export function registerIpcHandlers(): void {
         }
         console.error('[llama-server] spawn error:', msg)
         runningProcesses.delete(opts.id)
+        serverReadyFlags.delete(opts.id)
+        modelLoadingFlags.delete(opts.id)
+        emitAppLog(opts.id, opts.name, `✖ Spawn error: ${msg}`)
         _e.sender.send('model-error', { id: opts.id, error: msg })
       })
-      runningProcesses.set(opts.id, proc)
+      runningProcesses.set(opts.id, { proc, port: finalPort })
       proc.on('exit', () => {
         runningProcesses.delete(opts.id)
+        const wasReady = serverReadyFlags.get(opts.id)
+        serverReadyFlags.delete(opts.id)
+        modelLoadingFlags.delete(opts.id)
+        emitAppLog(opts.id, opts.name, wasReady ? '■ Model stopped' : '■ Process exited')
         BrowserWindow.getAllWindows().forEach(win => {
           win.webContents.send('model-exited', { id: opts.id })
         })
@@ -1534,10 +1799,20 @@ export function registerIpcHandlers(): void {
       if (!win.isDestroyed()) win.webContents.send('tab-moved-elsewhere', { url })
     })
   })
-  ipcMain.handle('stop-model', (_e, id: string) => {
-    const proc = runningProcesses.get(id)
-    if (!proc) return { success: true, alreadyStopped: true }
-    proc.kill(); runningProcesses.delete(id)
+  ipcMain.handle('stop-model', async (_e, id: string) => {
+    const entry = runningProcesses.get(id)
+    if (!entry) return { success: true, alreadyStopped: true }
+    const { proc, port } = entry
+    runningProcesses.delete(id)  // remove immediately so a concurrent Start doesn't see "Already running"
+    serverReadyFlags.delete(id)
+    modelLoadingFlags.delete(id)
+    // Kill the whole process tree (children included) and wait for the process
+    // to actually exit. This fixes the Stop→Start race where the port was still
+    // bound when the user clicked Start again right after Stop.
+    await killProcessTree(proc)
+    // Now poll the port until the OS releases the listening socket. This is the
+    // critical step: without it, a rapid restart reports "port already in use".
+    await waitForPortFree(port, 8000, 100)
     return { success: true }
   })
 
@@ -1839,13 +2114,34 @@ export function registerIpcHandlers(): void {
 
   // ----- GGUF metadata parser (features 12/13/14/16/29) -----
   // Parses the GGUF binary header to extract block_count, context_length,
-  // expert_count, chat_template, hidden_size, kv_heads. Uses a typed reader
-  // that walks the metadata KV array and tensor info array.
+  // expert_count, chat_template, hidden_size, kv_heads, AND the full attention
+  // geometry needed for BPW-accurate KV-cache VRAM math (head_count,
+  // key_length, value_length, sliding_window, MLA kv_lora_rank/qk_rope_head_dim,
+  // file_type). Uses a typed reader that walks the metadata KV array and tensor
+  // info array.
   ipcMain.handle('get-gguf-metadata', async (_e, modelPath: string) => {
+    // Task 1: check the persistent cache first — metadata is stable for a given
+    // file (it's read from the GGUF header), so caching avoids re-parsing on
+    // every view. The cache is pruned in `list-models` when files disappear.
+    if (modelPath && metadataCache[modelPath]) {
+      return metadataCache[modelPath]
+    }
+    // Broadcast that extraction is starting (for the renderer notification).
+    if (modelPath) {
+      const fn = basename(modelPath)
+      BrowserWindow.getAllWindows().forEach(win => {
+        if (!win.isDestroyed()) win.webContents.send('metadata-extracting', { modelPath, name: fn, status: 'extracting' })
+      })
+    }
     const result: any = {
       blockCount: null, contextLength: null, expertCount: null,
       chatTemplate: null, hiddenSize: null, kvHeads: null,
-      modelName: null, architecture: null, isMoe: false, fileSizeMB: 0
+      modelName: null, architecture: null, isMoe: false, fileSizeMB: 0,
+      // BPW-accurate VRAM math (Task 3):
+      headCount: null, headCountKv: null, keyLength: null, valueLength: null,
+      slidingWindow: null, kvLoraRank: null, qkRopeHeadDim: null,
+      expertUsedCount: null, expertSharedCount: null,
+      fileType: null, fileTypeValue: null, vocabSize: null, fullAttentionInterval: null
     }
     try {
       if (!modelPath || !existsSync(modelPath)) return { ...result, error: 'File not found' }
@@ -1892,7 +2188,33 @@ export function registerIpcHandlers(): void {
           result.expertCount = resolve('expert_count')
           result.hiddenSize = resolve('embedding_length')
           result.kvHeads = resolve('attention.head_count_kv')
-          ;(result as any).expertUsedCount = resolve('expert_used_count')
+          // BPW math (Task 3): full attention geometry.
+          result.headCount = resolve('attention.head_count')
+          result.headCountKv = result.kvHeads
+          result.keyLength = resolve('attention.key_length')
+          result.valueLength = resolve('attention.value_length')
+          result.slidingWindow = resolve('attention.sliding_window')
+          result.kvLoraRank = resolve('attention.kv_lora_rank')
+          result.qkRopeHeadDim = resolve('attention.qk_rope_head_dim')
+          result.expertUsedCount = resolve('expert_used_count')
+          result.expertSharedCount = resolve('expert_shared_count')
+          // Task 6: hybrid SSM/attention — only every Nth layer carries KV.
+          result.fullAttentionInterval = resolve('full_attention_interval') || resolve('attention.full_attention_interval')
+          // file_type: numeric enum → human-readable name for the BPW table.
+          const ftVal = resolve('file_type')
+          result.fileTypeValue = ftVal
+          result.fileType = ftVal !== null ? ggufFileTypeName(ftVal) : null
+          // vocab size: count of tokenizer.ggml.tokens array (if present).
+          const vocabArrLen = (() => {
+            // The native tool may print "tokenizer.ggml.tokens" as a count or array.
+            const v = kv['tokenizer.ggml.tokens']
+            if (v !== undefined) {
+              const n = parseInt(v, 10)
+              if (!isNaN(n) && n > 0) return n
+            }
+            return null
+          })()
+          result.vocabSize = vocabArrLen
           result.isMoe = (result.expertCount || 0) > 0
           // If we got the essential fields, return immediately — no need for JS fallback.
           if (result.blockCount && result.contextLength) {
@@ -2075,6 +2397,27 @@ export function registerIpcHandlers(): void {
         })()
         result.kvHeads = kvHeadsVal
       }
+      // BPW math (Task 3): full attention geometry from the JS fallback too.
+      if (!result.headCount) result.headCount = resolve('attention.head_count')
+      if (!result.headCountKv) result.headCountKv = result.kvHeads
+      if (!result.keyLength) result.keyLength = resolve('attention.key_length')
+      if (!result.valueLength) result.valueLength = resolve('attention.value_length')
+      if (!result.slidingWindow) result.slidingWindow = resolve('attention.sliding_window')
+      if (!result.kvLoraRank) result.kvLoraRank = resolve('attention.kv_lora_rank')
+      if (!result.qkRopeHeadDim) result.qkRopeHeadDim = resolve('attention.qk_rope_head_dim')
+      if (!result.expertSharedCount) result.expertSharedCount = resolve('expert_shared_count')
+      // Task 6: hybrid SSM/attention — JS fallback extraction too.
+      if (!(result as any).fullAttentionInterval) {
+        (result as any).fullAttentionInterval = resolve('full_attention_interval') || resolve('attention.full_attention_interval')
+      }
+      if (!result.fileTypeValue) {
+        const ftv = resolve('file_type')
+        result.fileTypeValue = ftv
+        if (ftv !== null) result.fileType = ggufFileTypeName(ftv)
+      }
+      // vocab size: count of tokenizer.ggml.tokens array (the JS parser stores
+      // arrays as [] so we can't get the length here; best-effort via vocab_size key).
+      if (!result.vocabSize) result.vocabSize = resolve('tokenizer.ggml.tokens.count') || resolve('vocab_size')
 
       // Fix 1/2: Fallback byte-scan — if the structured parse failed to find
       // block_count, context_length, or chat_template, do a raw byte search
@@ -2249,20 +2592,50 @@ export function registerIpcHandlers(): void {
         result.isMoe = result.expertCount > 0
       }
       await fd.close()
+      // Task 1: cache the extracted metadata + broadcast so the renderer updates
+      // its store (and any open CmdParamsEditor) without a second fetch.
+      if (modelPath && !result.error) {
+        metadataCache[modelPath] = result
+        saveMetadataCache()
+        const fn = basename(modelPath)
+        BrowserWindow.getAllWindows().forEach(win => {
+          if (!win.isDestroyed()) {
+            win.webContents.send('gguf-metadata-updated', { modelPath, meta: result })
+            win.webContents.send('metadata-extracting', { modelPath, name: fn, status: 'done' })
+          }
+        })
+      }
       return result
     } catch (err) {
+      // Broadcast the error so the renderer can clear the notification.
+      if (modelPath) {
+        const fn = basename(modelPath)
+        BrowserWindow.getAllWindows().forEach(win => {
+          if (!win.isDestroyed()) win.webContents.send('metadata-extracting', { modelPath, name: fn, status: 'error' })
+        })
+      }
       return { ...result, error: String(err) }
     }
   })
 
   // ----- VRAM telemetry (feature 14) -----
-  // Queries free VRAM via nvidia-smi (non-blocking). Falls back gracefully.
+  // GPU detection strategy (in priority order):
+  //   1. nvidia-smi            → NVIDIA GPUs (free + total + name, accurate).
+  //   2. systeminformation     → AMD / Intel GPUs (name + total VRAM via WMI/PCI).
+  //   3. Linux amdgpu sysfs    → accurate free VRAM for AMD on Linux.
+  // Previously this only ever tried nvidia-smi, so a machine with an AMD GPU
+  // (e.g. RX 9070 XT) was reported as "NVIDIA GPU (0 MB VRAM)". The fallbacks
+  // below detect the real vendor + name and report a best-effort free VRAM.
   ipcMain.handle('get-vram-info', async () => {
     try {
       const isWin = process.platform === 'win32'
       const isLinux = process.platform === 'linux'
-      if (!isWin && !isLinux) return { freeVRAMMB: 0, totalVRAMMB: 0, hasNvidia: false, gpuName: null }
-      const query = async (): Promise<string | null> => {
+      if (!isWin && !isLinux) {
+        return { freeVRAMMB: 0, totalVRAMMB: 0, hasNvidia: false, gpuName: null, vendor: null, gpuType: null }
+      }
+
+      // --- 1. nvidia-smi (NVIDIA) ---
+      const queryNvidiaSmi = async (): Promise<string | null> => {
         return new Promise((resolve) => {
           const cmd = 'nvidia-smi --query-gpu=memory.free,memory.total,name --format=csv,noheader,nounits'
           exec(cmd, { timeout: 5000 }, (err, stdout) => {
@@ -2271,20 +2644,85 @@ export function registerIpcHandlers(): void {
           })
         })
       }
-      const out = await query()
-      if (!out) return { freeVRAMMB: 0, totalVRAMMB: 0, hasNvidia: false, gpuName: null }
-      // Parse first GPU line: "free,total,name"
-      const firstLine = out.split('\n')[0].trim()
-      const parts = firstLine.split(',').map(s => s.trim())
-      if (parts.length >= 3) {
-        const free = parseInt(parts[0], 10) || 0
-        const total = parseInt(parts[1], 10) || 0
-        const name = parts.slice(2).join(',').trim()
-        return { freeVRAMMB: free, totalVRAMMB: total, hasNvidia: true, gpuName: name }
+      const nvidiaOut = await queryNvidiaSmi()
+      if (nvidiaOut) {
+        const firstLine = nvidiaOut.split('\n')[0].trim()
+        const parts = firstLine.split(',').map(s => s.trim())
+        if (parts.length >= 3) {
+          const free = parseInt(parts[0], 10) || 0
+          const total = parseInt(parts[1], 10) || 0
+          const name = parts.slice(2).join(',').trim()
+          return { freeVRAMMB: free, totalVRAMMB: total, hasNvidia: true, gpuName: name, vendor: 'NVIDIA', gpuType: 'discrete' }
+        }
       }
-      return { freeVRAMMB: 0, totalVRAMMB: 0, hasNvidia: false, gpuName: null }
+
+      // --- 2. No NVIDIA GPU — detect AMD / Intel via systeminformation ---
+      let si: any = null
+      try { si = (await import('systeminformation')).default } catch { si = null }
+      if (si) {
+        let controllers: any[] = []
+        try { const g = await si.graphics(); controllers = g.controllers || [] } catch {}
+        // Pick the "best" controller: prefer discrete (NVIDIA/AMD/ATI) over Intel
+        // integrated, then the one with the highest reported VRAM.
+        let best: any = null
+        const isDiscrete = (vendor: string) => {
+          const v = (vendor || '').toLowerCase()
+          return v.includes('nvidia') || v.includes('amd') || v.includes('advanced micro') || v.includes('ati') || v.includes('radeon')
+        }
+        for (const c of controllers) {
+          if (!best) { best = c; continue }
+          const cDiscrete = isDiscrete(c.vendor || '') || isDiscrete(c.model || '')
+          const bDiscrete = isDiscrete(best.vendor || '') || isDiscrete(best.model || '')
+          if (cDiscrete && !bDiscrete) { best = c; continue }
+          if (cDiscrete === bDiscrete && (c.vram || 0) > (best.vram || 0)) { best = c; continue }
+        }
+        if (best) {
+          const vendorStr = `${best.vendor || ''} ${best.model || ''}`.toLowerCase()
+          let vendor = 'Other'
+          let gpuType: string | null = 'discrete'
+          if (vendorStr.includes('nvidia')) vendor = 'NVIDIA'
+          else if (vendorStr.includes('amd') || vendorStr.includes('advanced micro') || vendorStr.includes('ati') || vendorStr.includes('radeon')) vendor = 'AMD'
+          else if (vendorStr.includes('intel')) { vendor = 'Intel'; gpuType = 'integrated' }
+
+          let totalVRAMMB = Math.round(Number(best.vram) || 0)  // systeminformation reports vram in MB
+          let freeVRAMMB = 0
+
+          // --- 3. Linux amdgpu sysfs: accurate free VRAM for AMD ---
+          if (isLinux && vendor === 'AMD') {
+            try {
+              const drmEntries = readdirSync('/sys/class/drm').filter(d => /^card\d+$/.test(d))
+              let foundSys = false
+              for (const d of drmEntries) {
+                const totalPath = `/sys/class/drm/${d}/device/mem_info_vram_total`
+                const usedPath = `/sys/class/drm/${d}/device/mem_info_vram_used`
+                if (existsSync(totalPath) && existsSync(usedPath)) {
+                  const t = parseInt(readFileSync(totalPath, 'utf8').trim(), 10)
+                  const u = parseInt(readFileSync(usedPath, 'utf8').trim(), 10)
+                  if (!isNaN(t) && t > 0) {
+                    totalVRAMMB = Math.round(t / (1024 * 1024))
+                    freeVRAMMB = Math.max(0, Math.round((t - (isNaN(u) ? 0 : u)) / (1024 * 1024)))
+                    foundSys = true
+                    break
+                  }
+                }
+              }
+              if (!foundSys) console.log('[VRAM] amdgpu sysfs not found, using systeminformation vram')
+            } catch (e) { console.log('[VRAM] sysfs read error:', String(e)) }
+          }
+
+          // Best-effort free estimate when the platform can't report free VRAM
+          // directly (e.g. Windows + AMD). Keeps VRAM budgeting functional.
+          if (freeVRAMMB === 0 && totalVRAMMB > 0) {
+            freeVRAMMB = Math.round(totalVRAMMB * 0.85)
+          }
+
+          return { freeVRAMMB, totalVRAMMB, hasNvidia: vendor === 'NVIDIA', gpuName: best.model || best.vendor || null, vendor, gpuType }
+        }
+      }
+
+      return { freeVRAMMB: 0, totalVRAMMB: 0, hasNvidia: false, gpuName: null, vendor: null, gpuType: null }
     } catch (err) {
-      return { freeVRAMMB: 0, totalVRAMMB: 0, hasNvidia: false, gpuName: null, error: String(err) }
+      return { freeVRAMMB: 0, totalVRAMMB: 0, hasNvidia: false, gpuName: null, vendor: null, gpuType: null, error: String(err) }
     }
   })
 
@@ -2312,7 +2750,9 @@ export function registerIpcHandlers(): void {
       autoFitEnabled: !!defaults.autoFitEnabled,
       autoFitContextLength: Math.max(2048, Math.min(200000, Number(defaults.autoFitContextLength) || 60000)),
       guardrailMode: (['off','relaxed','balanced','strict','custom'].includes(defaults.guardrailMode) ? defaults.guardrailMode : 'strict'),
-      customMaxSizeGB: Math.max(0, Number(defaults.customMaxSizeGB) || 0)
+      customMaxSizeGB: Math.max(0, Number(defaults.customMaxSizeGB) || 0),
+      useCurrentMemState: !!defaults.useCurrentMemState,
+      moeOffloadStrategy: (defaults.moeOffloadStrategy === 'max' ? 'max' : 'offload')
     }
     await saveSettings(s)
     return { success: true }
@@ -2342,11 +2782,19 @@ export function registerIpcHandlers(): void {
     // Always include the 3 hardcoded presets; merge any user-added ones.
     const hardcoded = getHardcodedPresets()
     const userPresets = (s.samplingPresets || []).filter(p => !hardcoded.find(h => h.id === p.id))
-    // Ensure exactly one is starred.
     const all = [...hardcoded, ...userPresets]
-    const starred = all.filter(p => p.isStarred)
-    if (starred.length === 0) all[0].isStarred = true
-    else if (starred.length > 1) starred.slice(1).forEach(p => p.isStarred = false)
+    // Determine the starred preset from the persisted starredPresetId.
+    // Default to 'lm-studio' only if no star has ever been set.
+    const starredId = s.starredPresetId || 'lm-studio'
+    let foundStarred = false
+    for (const p of all) {
+      const isStar = p.id === starredId
+      p.isStarred = isStar
+      if (isStar) foundStarred = true
+    }
+    // If the saved starredId no longer exists (e.g. a user preset was deleted),
+    // fall back to the first preset so exactly one is always starred.
+    if (!foundStarred && all.length > 0) all[0].isStarred = true
     return all
   })
   ipcMain.handle('add-sampling-preset', async (_e, name: string, values: any) => {
@@ -2434,12 +2882,17 @@ function readU64(buf: Buffer, offset: number): bigint {
 
 // The 3 hardcoded, immutable sampling presets (feature 28).
 function getHardcodedPresets(): any[] {
+  // NOTE: isStarred is always false here on purpose. The starred preset is
+  // determined by the persisted `starredPresetId` in settings.json, applied
+  // at list time. Previously LM Studio was baked-in as isStarred:true, which
+  // overrode the saved star on every relaunch (bug: the dropdown always
+  // reset to "LM Studio ★" even after the user starred a different preset).
   return [
     {
       id: 'lm-studio',
       name: 'LM Studio',
       isDefault: true,
-      isStarred: true,
+      isStarred: false,
       values: { topK: 40, topP: 0.95, minP: 0.05, repeatPenalty: 1.1, presencePenalty: 0.0 }
     },
     {

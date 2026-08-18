@@ -3,7 +3,7 @@ import { useStore } from '../store/useStore'
 import {
   HardDrive, Download, Trash, RefreshCw, Loader2, ChevronDown, Terminal,
   Bell, BellOff, Folder, Monitor, Moon, Sun, Link2, Plus,
-  AlertCircle, ExternalLink, Cpu, Layers, Shield, Database
+  AlertCircle, ExternalLink, Cpu, Layers, Shield, Database, Copy, Check
 } from 'lucide-react'
 import CommandsEditor from './CommandsEditor'
 import ExternalFolderList from './ExternalFolderList'
@@ -15,6 +15,109 @@ const NOTIF_KEY = 'hexllama_update_notify'
 
 function getNotifPref(): 'banner' | 'manual' {
   return (localStorage.getItem(NOTIF_KEY) as 'banner' | 'manual') || 'banner'
+}
+
+// Task 1: Base URL field — LM Studio style.
+// REST (not focused): the whole URL "http://localhost:<port>/v1" is one
+//   continuous white string (a single link, no breaks). A copy button sits
+//   on the RIGHT inside the box.
+// FOCUSED (editing the port): "http://localhost:" turns gray, the port is
+//   white/editable, and "/v1" is pushed to the right border (gray, static
+//   suffix). The copy button disappears to make room for /v1 at the right.
+//   A blue/purple focus glow highlights the box.
+function BaseUrlField({ port, onPortChange, onPortBlur }: {
+  port: number
+  onPortChange: (p: number) => void
+  onPortBlur: () => void
+}) {
+  const [focused, setFocused] = useState(false)
+  const [copied, setCopied] = useState(false)
+  const fullUrl = `http://localhost:${port}/v1`
+  function handleCopy() {
+    navigator.clipboard.writeText(fullUrl).then(() => {
+      setCopied(true)
+      setTimeout(() => setCopied(false), 1500)
+    })
+  }
+  return (
+    <div
+      className="base-url-field-lm"
+      style={{
+        display: 'flex', alignItems: 'center',
+        width: '100%', maxWidth: 420, height: 36,
+        border: `1px solid ${focused ? 'var(--info-blue, #3b82f6)' : 'var(--border)'}`,
+        borderRadius: 'var(--radius-sm)',
+        background: 'var(--surface)',
+        boxShadow: focused ? '0 0 0 3px rgba(59,130,246,.18)' : 'none',
+        transition: 'border-color 150ms, box-shadow 150ms',
+        fontFamily: 'var(--font-mono)', fontSize: 13,
+        overflow: 'hidden'
+      }}
+    >
+      {/* "http://localhost:" — white in rest, gray when focused (editing). */}
+      <span
+        style={{
+          padding: '0 0 0 10px',
+          color: focused ? 'var(--text-muted)' : 'var(--text)',
+          whiteSpace: 'nowrap', userSelect: 'none'
+        }}
+      >
+        http://localhost:
+      </span>
+      {/* The port — inline transparent input. White in both states. */}
+      <input
+        type="number"
+        min={1}
+        max={65535}
+        value={port}
+        onFocus={() => setFocused(true)}
+        onChange={(e) => {
+          const p = Math.max(1, Math.min(65535, Number(e.target.value) || 1234))
+          onPortChange(p)
+        }}
+        onBlur={() => { setFocused(false); onPortBlur() }}
+        style={{
+          width: `${Math.max(1, String(port || '').length)}ch`,
+          minWidth: '1ch',
+          border: 'none', outline: 'none', background: 'transparent',
+          textAlign: 'center',
+          fontFamily: 'var(--font-mono)', fontSize: 13,
+          color: 'var(--text)', fontWeight: 600,
+          MozAppearance: 'textfield', padding: 0,
+          flexGrow: 0
+        }}
+        title="Port number (1–65535)"
+      />
+      {/* Right side: in REST show "/v1" + copy button as one continuous white
+          link. When FOCUSED, push "/v1" to the right border (gray) and hide the
+          copy button (it would collide). */}
+      {!focused ? (
+        <>
+          <span style={{ padding: '0 2px', color: 'var(--text)', whiteSpace: 'nowrap', userSelect: 'none' }}>
+            /v1
+          </span>
+          <button
+            type="button"
+            onClick={handleCopy}
+            title="Copy URL"
+            style={{
+              flexShrink: 0, width: 34, height: '100%', marginLeft: 'auto',
+              display: 'flex', alignItems: 'center', justifyContent: 'center',
+              border: 'none', borderLeft: '1px solid var(--border)',
+              background: 'transparent', cursor: 'pointer',
+              color: copied ? 'var(--success)' : 'var(--text-muted)'
+            }}
+          >
+            {copied ? <Check size={14} /> : <Copy size={14} />}
+          </button>
+        </>
+      ) : (
+        <span style={{ padding: '0 10px 0 4px', color: 'var(--text-muted)', whiteSpace: 'nowrap', userSelect: 'none', marginLeft: 'auto' }}>
+          /v1
+        </span>
+      )}
+    </div>
+  )
 }
 
 export default function SettingsView() {
@@ -226,6 +329,54 @@ export default function SettingsView() {
                 }} />
             </div>
           )}
+          {/* Task 4: Current Memory State use in memory calculations */}
+          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', width: '100%', marginTop: 8 }}>
+            <div>
+              <div className="settings-row-label">Current Memory State use in memory calculations</div>
+              <div className="settings-row-sub">
+                ON = use the currently-available Free VRAM / Free RAM (polled every 10s). OFF (default) = use the static maximum VRAM / RAM totals — more conservative and stable.
+              </div>
+            </div>
+            <div className="toggle-wrap">
+              <label className="toggle">
+                <input type="checkbox" checked={!!modelDefaults.useCurrentMemState} onChange={async (e) => {
+                  const d = { ...modelDefaults, useCurrentMemState: e.target.checked }
+                  setModelDefaults(d); try { await window.api?.setModelDefaults?.(d) } catch {}
+                }} />
+                <span className="toggle-track"></span><span className="toggle-thumb"></span>
+              </label>
+            </div>
+          </div>
+          {!modelDefaults.useCurrentMemState && (
+            <div style={{ fontSize: 11, color: 'var(--warning)', marginTop: 6, lineHeight: 1.5 }}>
+              Consider turning memory overhead on for system stability when using device alongside running model with full VRAM/RAM utilization.
+            </div>
+          )}
+          {/* Task 8: Strategy for MoE offloading calculations */}
+          <div style={{ width: '100%', marginTop: 12 }}>
+            <div className="settings-row-label" style={{ marginBottom: 4 }}>Strategy for MoE offloading calculations</div>
+            <div className="settings-row-sub" style={{ marginBottom: 8 }}>
+              "Offload GPU Layers" finds a good GPU layer count for MoE models. "MAX GPU Layers and Force MoE Weights onto CPU" pushes as many non-expert layers to GPU as possible (experts on CPU) for higher speed — disables the "Maximum available" AutoFill option (conflict).
+            </div>
+            <div className="mmproj-mode-toggle" style={{ display: 'inline-flex' }}>
+              <button
+                type="button"
+                className={`mmproj-mode-btn ${(modelDefaults.moeOffloadStrategy || 'offload') === 'offload' ? 'active' : ''}`}
+                onClick={async () => {
+                  const d = { ...modelDefaults, moeOffloadStrategy: 'offload' as const }
+                  setModelDefaults(d); try { await window.api?.setModelDefaults?.(d) } catch {}
+                }}
+              >Offload GPU Layers</button>
+              <button
+                type="button"
+                className={`mmproj-mode-btn ${modelDefaults.moeOffloadStrategy === 'max' ? 'active' : ''}`}
+                onClick={async () => {
+                  const d = { ...modelDefaults, moeOffloadStrategy: 'max' as const }
+                  setModelDefaults(d); try { await window.api?.setModelDefaults?.(d) } catch {}
+                }}
+              >MAX GPU Layers and Force MoE Weights onto CPU</button>
+            </div>
+          </div>
         </div>
       </div>
 
@@ -262,11 +413,25 @@ export default function SettingsView() {
                 }} />
             </div>
           )}
-          {vramInfo && systemRam && (
-            <div style={{ fontSize: 11, color: 'var(--text-muted)', marginTop: 8 }}>
-              Detected: {vramInfo.gpuName || 'NVIDIA GPU'} ({vramInfo.totalVRAMMB} MB VRAM) · {systemRam.totalRAMMB} MB system RAM
-            </div>
-          )}
+          {vramInfo && systemRam && (() => {
+            // Vendor-aware label — no longer hardcodes "NVIDIA GPU" when an AMD /
+            // Intel / unknown GPU is present (fix for RX 9070 XT being reported as
+            // "NVIDIA GPU (0 MB VRAM)").
+            const gpuLabel = vramInfo.gpuName
+              || (vramInfo.vendor ? `${vramInfo.vendor} GPU` : 'GPU not detected')
+            const vram = vramInfo.totalVRAMMB || 0
+            const ram = systemRam.totalRAMMB || 0
+            const total = vram + ram
+            return (
+              <div style={{ fontSize: 11, color: 'var(--text-muted)', marginTop: 8 }}>
+                Detected: <span style={{ color: 'var(--text-secondary)', fontWeight: 600 }}>{gpuLabel}</span>
+                {vram > 0 ? ` (${vram.toLocaleString()} MB VRAM)` : ' (VRAM unavailable)'}
+                {' · '}{ram.toLocaleString()} MB system RAM
+                {' · Total: '}<span style={{ color: 'var(--text-secondary)', fontWeight: 600 }}>{total.toLocaleString()} MB</span>
+                {' (VRAM + RAM)'}
+              </div>
+            )
+          })()}
         </div>
       </div>
 
@@ -290,48 +455,20 @@ export default function SettingsView() {
             </div>
           </div>
 
-          {/* Port input: only the number is editable; prefix/suffix are grayed out. */}
+          {/* Task 1: Base URL — LM Studio style. Single unified box with the full
+              URL as one continuous string; the port is an inline transparent input.
+              A copy button sits on the LEFT, visible when the input isn't focused.
+              When focused, a purple/blue focus glow highlights the box. */}
           <div style={{ width: '100%' }}>
-            <div className="settings-row-label" style={{ marginBottom: 6 }}>Base URL</div>
-            <div className="base-url-field" style={{
-              display: 'flex', alignItems: 'center', gap: 0,
-              border: '1px solid var(--border)', borderRadius: 'var(--radius-sm)',
-              background: 'var(--bg)', height: 36, padding: '0 4px 0 0',
-              fontFamily: 'var(--font-mono)'
-            }}>
-              <span style={{
-                padding: '0 8px', height: '100%', display: 'flex', alignItems: 'center',
-                color: 'var(--text-muted)', background: 'var(--surface-hover)',
-                borderRadius: 'var(--radius-sm) 0 0 var(--radius-sm)', borderRight: '1px solid var(--border)',
-                userSelect: 'none', cursor: 'default', fontSize: 13
-              }}>http://localhost:</span>
-              <input
-                type="number"
-                min={1}
-                max={65535}
-                value={baseUrlOverride.port}
-                onChange={async (e) => {
-                  const p = Math.max(1, Math.min(65535, Number(e.target.value) || 1234))
-                  const o = { ...baseUrlOverride, port: p }
-                  setBaseUrlOverride(o)
-                }}
-                onBlur={async () => { try { await window.api?.setBaseUrlOverride?.(baseUrlOverride) } catch {} }}
-                style={{
-                  width: 90, height: '100%', border: 'none', outline: 'none',
-                  background: 'transparent', textAlign: 'center',
-                  fontFamily: 'var(--font-mono)', fontSize: 13, color: 'var(--text)',
-                  fontWeight: 600, MozAppearance: 'textfield'
-                }}
-                title="Port number (1–65535)"
-              />
-              <span style={{
-                padding: '0 8px', height: '100%', display: 'flex', alignItems: 'center',
-                color: 'var(--text-muted)', background: 'var(--surface-hover)',
-                borderRadius: '0 var(--radius-sm) var(--radius-sm) 0', borderLeft: '1px solid var(--border)',
-                userSelect: 'none', cursor: 'default', fontSize: 13
-              }}>/v1</span>
-            </div>
-            <div className="form-hint">Only the port number is editable. The full URL is <code>http://localhost:{baseUrlOverride.port}/v1</code>.</div>
+            <BaseUrlField
+              port={baseUrlOverride.port}
+              onPortChange={async (p) => {
+                const o = { ...baseUrlOverride, port: p }
+                setBaseUrlOverride(o)
+              }}
+              onPortBlur={async () => { try { await window.api?.setBaseUrlOverride?.(baseUrlOverride) } catch {} }}
+            />
+            <div className="form-hint">Only the port number is editable. Click the box to edit, or use the copy button to copy the full URL.</div>
           </div>
 
           {/* Serve on local network */}

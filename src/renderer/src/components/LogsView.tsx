@@ -5,7 +5,9 @@ import { Terminal, Trash, Pause, Play, Download } from 'lucide-react'
 interface LogEntry {
   id: string
   name: string
-  stream: 'stdout' | 'stderr'
+  // 'stdout' / 'stderr' = raw llama-server output.
+  // 'app' = app-level meta log (lifecycle / generation / chat-request / errors).
+  stream: 'stdout' | 'stderr' | 'app'
   line: string
   ts: number
 }
@@ -53,7 +55,7 @@ export default function LogsView() {
   function handleClear() { setLogs([]) }
 
   function handleExport() {
-    const text = filteredLogs().map(l => `[${new Date(l.ts).toISOString()}] [${l.stream}] ${l.line}`).join('\n')
+    const text = filteredLogs().map(l => `[${new Date(l.ts).toISOString()}] [${l.stream}] [${l.name}] ${l.line}`).join('\n')
     const blob = new Blob([text], { type: 'text/plain' })
     const url = URL.createObjectURL(blob)
     const a = document.createElement('a')
@@ -65,6 +67,7 @@ export default function LogsView() {
 
   const runningModels = cards.filter(c => c.status === 'running')
   const displayed = filteredLogs()
+  const appLogCount = logs.filter(l => l.stream === 'app').length
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', height: '100%' }}>
@@ -72,7 +75,7 @@ export default function LogsView() {
         <div>
           <h1 className="page-title">Logs</h1>
           <p className="page-subtitle">
-            Live server output stream · {logs.length} lines {paused ? '· Paused' : ''}
+            Live server output stream · {logs.length} lines {appLogCount > 0 ? `· ${appLogCount} events ` : ''}{paused ? '· Paused' : ''}
           </p>
         </div>
         <div className="page-actions">
@@ -125,26 +128,37 @@ export default function LogsView() {
         {displayed.length === 0 ? (
           <div style={{ color: 'var(--text-muted)', textAlign: 'center', padding: 40 }}>
             <Terminal size={28} style={{ display: 'block', margin: '0 auto 8px', opacity: 0.5 }} />
-            No logs yet. Start a model to see server output here.
+            No logs yet. Start a model to see server output, generation events, chat messages and lifecycle info here.
           </div>
         ) : (
-          displayed.map((l, i) => (
-            <div
-              key={i}
-              style={{
-                color: l.stream === 'stderr' ? 'var(--danger)' : 'var(--text-secondary)',
-                whiteSpace: 'pre-wrap',
-                wordBreak: 'break-all',
-                padding: '1px 0'
-              }}
-            >
-              <span style={{ color: 'var(--text-muted)', fontSize: 11 }}>
-                [{new Date(l.ts).toLocaleTimeString()}]
-              </span>{' '}
-              <span style={{ color: 'var(--text-muted)', fontSize: 11 }}>[{l.name}]</span>{' '}
-              {l.line}
-            </div>
-          ))
+          displayed.map((l, i) => {
+            // App-level meta logs (lifecycle / generation / chat-request / errors)
+            // get a subtle highlight (left blue bar + faint blue tint) so the user
+            // can spot "important" events among the raw server output. Text colors
+            // still follow the requested scheme: time=white, name=blue, rest=gray.
+            const isApp = l.stream === 'app'
+            return (
+              <div
+                key={i}
+                style={{
+                  color: 'var(--text-secondary)',
+                  whiteSpace: 'pre-wrap',
+                  wordBreak: 'break-all',
+                  padding: isApp ? '2px 6px 2px 8px' : '1px 0',
+                  margin: isApp ? '2px 0' : 0,
+                  borderRadius: isApp ? 4 : 0,
+                  borderLeft: isApp ? '3px solid var(--info-blue)' : 'none',
+                  background: isApp ? 'rgba(59,130,246,.06)' : 'transparent'
+                }}
+              >
+                <span style={{ color: 'var(--text)', fontSize: 11 }}>
+                  [{new Date(l.ts).toLocaleTimeString()}]
+                </span>{' '}
+                <span style={{ color: 'var(--info-blue)', fontSize: 11, fontWeight: 600 }}>[{l.name}]</span>{' '}
+                {l.line}
+              </div>
+            )
+          })
         )}
       </div>
     </div>

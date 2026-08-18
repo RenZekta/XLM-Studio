@@ -118,6 +118,12 @@ interface LlamaCppApi {
 
   // GGUF metadata + VRAM + system RAM
   getGgufMetadata: (modelPath: string) => Promise<any>
+  // Task 1: metadata cache
+  getMetadataCache: () => Promise<Record<string, any>>
+  onMetadataExtracting: (cb: (data: { modelPath: string; name: string; status: 'extracting' | 'done' | 'error' }) => void) => void
+  removeMetadataExtractingListener: () => void
+  onGgufMetadataUpdated: (cb: (data: { modelPath: string; meta: any }) => void) => void
+  removeGgufMetadataUpdatedListener: () => void
   getVramInfo: () => Promise<any>
   getSystemRam: () => Promise<{ totalRAMMB: number; freeRAMMB: number }>
 
@@ -138,6 +144,10 @@ interface LlamaCppApi {
 
   // Silent backend check
   onBackendsCheckedSilent: (cb: (data: any) => void) => void
+
+  // Backends list changed (e.g. after auto-cleanup of outdated versions)
+  onBackendsChanged: (cb: (data: { deleted: string[] }) => void) => void
+  removeBackendsChangedListener: () => void
 
   // Server log stream (Fix 4)
   onServerLog: (cb: (data: { id: string; name: string; stream: string; line: string; ts: number }) => void) => void

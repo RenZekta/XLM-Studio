@@ -97,7 +97,10 @@ export interface ReleaseInfo {
   assets: ReleaseAsset[]
   error?: string
 }
-export type RunningStatus = 'idle' | 'running' | 'error'
+// 'stopping' = a Stop was requested and we're waiting for the process tree to
+// die + the port to be released (Stop→Start race fix). The Start button is
+// disabled and shows a spinner during this short window.
+export type RunningStatus = 'idle' | 'running' | 'stopping' | 'error'
 export interface CardState {
   template: Template
   status: RunningStatus
@@ -154,6 +157,24 @@ export interface GgufMetadata {
   architecture: string | null     // general.architecture
   isMoe: boolean                  // derived: expert_count > 0 or expert tensors found
   fileSizeMB: number              // file size in MB for VRAM estimation
+  // --- BPW-based VRAM calculation (Task 3): full attention geometry + file type ---
+  headCount: number | null        // llama.attention.head_count — for head_dim = n_embd / n_head
+  headCountKv: number | null      // alias of kvHeads (explicit name)
+  keyLength: number | null        // llama.attention.key_length — explicit per-head K dim (overrides n_embd/n_head)
+  valueLength: number | null      // llama.attention.value_length — explicit per-head V dim
+  slidingWindow: number | null    // llama.attention.sliding_window — SWA layers cap KV at min(ctx, S)
+  kvLoraRank: number | null       // llama.attention.kv_lora_rank — MLA (DeepSeek-V2/V3) compressed latent
+  qkRopeHeadDim: number | null    // llama.attention.qk_rope_head_dim — MLA decoupled RoPE dim
+  expertUsedCount: number | null  // llama.expert_used_count — active experts (speed only, not RAM)
+  expertSharedCount: number | null // llama.expert_shared_count
+  fileType: string | null         // general.file_type — dominant quant enum (e.g. "Q4_K_M", "F16")
+  fileTypeValue: number | null    // numeric general.file_type enum (for BPW lookup)
+  vocabSize: number | null         // tokenizer vocabulary size — logits buffer estimate
+  // Task 6: hybrid SSM/attention models (Qwen3-Next, Qwen3.5/3.8, gpt-oss) —
+  // only every Nth layer (N = full_attention_interval) carries a KV cache.
+  // The rest use linear-attention/RNN with constant-size state. Dividing the
+  // layer count by this fixes the 3-4x KV overshoot for these architectures.
+  fullAttentionInterval: number | null
   error?: string
 }
 
@@ -161,8 +182,10 @@ export interface GgufMetadata {
 export interface VramInfo {
   freeVRAMMB: number       // free VRAM in MB (0 if unavailable)
   totalVRAMMB: number      // total VRAM in MB (0 if unavailable)
-  hasNvidia: boolean       // whether an NVIDIA GPU was detected
-  gpuName: string | null
+  hasNvidia: boolean       // whether an NVIDIA GPU was detected (legacy flag)
+  gpuName: string | null   // full GPU model name (e.g. "AMD Radeon RX 9070 XT")
+  vendor?: string | null   // "NVIDIA" | "AMD" | "Intel" | "Other" | null
+  gpuType?: string | null  // "discrete" | "integrated" | null
   error?: string
 }
 
@@ -197,6 +220,15 @@ export interface ModelDefaultsSettings {
   autoFitContextLength: number
   guardrailMode: GuardrailMode
   customMaxSizeGB: number
+  // Task 4: when true, memory calculations use the currently-available Free
+  // VRAM / Free RAM (polled every 10s). When false (default), they use the
+  // static maximum VRAM / RAM totals — more conservative & stable.
+  useCurrentMemState?: boolean
+  // Task 8: MoE offloading strategy. 'offload' = find a good GPU layer count
+  // (default). 'max' = push as many layers to GPU as possible, forcing MoE
+  // expert weights onto CPU (--moe-cpu-layers). When 'max', the "Maximum
+  // available" AutoFill option is disabled (it would conflict).
+  moeOffloadStrategy?: 'offload' | 'max'
 }
 
 // Base URL Override settings (feature 24).

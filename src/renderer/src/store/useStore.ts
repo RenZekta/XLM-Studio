@@ -60,13 +60,18 @@ interface AppStore {
   speculationApplied: Record<string, boolean>
   // New state for features 12-34
   ggufMetadata: Record<string, any>  // keyed by modelPath
-  vramInfo: { freeVRAMMB: number; totalVRAMMB: number; hasNvidia: boolean; gpuName: string | null } | null
+  // Task 1: per-model metadata extraction status (for the "extracting…" notification).
+  metadataExtractions: Record<string, { name: string; status: 'extracting' | 'done' | 'error' }>
+  vramInfo: { freeVRAMMB: number; totalVRAMMB: number; hasNvidia: boolean; gpuName: string | null; vendor?: string | null; gpuType?: string | null } | null
   systemRam: { totalRAMMB: number; freeRAMMB: number } | null
-  modelDefaults: { autoFitEnabled: boolean; autoFitContextLength: number; guardrailMode: string; customMaxSizeGB: number }
+  modelDefaults: { autoFitEnabled: boolean; autoFitContextLength: number; guardrailMode: string; customMaxSizeGB: number; useCurrentMemState?: boolean; moeOffloadStrategy?: 'offload' | 'max' }
   baseUrlOverride: { enabled: boolean; port: number; serveOnLocalNetwork: boolean; apiKeyEnabled: boolean; apiKey: string }
   samplingPresets: any[]
   paramViewMode: 'common' | 'full'  // feature 30
   quickBaselineActive: boolean      // feature 25 — tracks if Quick preset is the active baseline
+  // Task 5: 3-way preset mode. 'clear' = empty, 'quick' = LM Studio baselines,
+  // 'fullauto' = Quick baselines + Ignore-Context-Override + Auto-Context-Fill ON.
+  presetMode: 'clear' | 'quick' | 'fullauto'
 
   setCompactSidebarEnabled: (enabled: boolean) => void
   setView: (v: AppStore['view']) => void
@@ -113,6 +118,9 @@ interface AppStore {
   setDetectedSpeculation: (modelPath: string, mode: 'off' | 'mtp' | 'draft' | 'dspark', reason?: string) => void
   markSpeculationApplied: (templateId: string, applied: boolean) => void
   setGgufMetadata: (modelPath: string, meta: any) => void
+  setGgufMetadataBulk: (cache: Record<string, any>) => void
+  setMetadataExtraction: (modelPath: string, name: string, status: 'extracting' | 'done' | 'error') => void
+  clearMetadataExtraction: (modelPath: string) => void
   setVramInfo: (info: any) => void
   setSystemRam: (info: { totalRAMMB: number; freeRAMMB: number }) => void
   setModelDefaults: (defaults: any) => void
@@ -120,6 +128,7 @@ interface AppStore {
   setSamplingPresets: (presets: any[]) => void
   setParamViewMode: (mode: 'common' | 'full') => void
   setQuickBaselineActive: (active: boolean) => void
+  setPresetMode: (mode: 'clear' | 'quick' | 'fullauto') => void
 }
 
 export const useStore = create<AppStore>((set) => ({
@@ -145,13 +154,15 @@ export const useStore = create<AppStore>((set) => ({
   detectedSpeculation: {},
   speculationApplied: {},
   ggufMetadata: {},
+  metadataExtractions: {},
   vramInfo: null,
   systemRam: null,
-  modelDefaults: { autoFitEnabled: true, autoFitContextLength: 60000, guardrailMode: 'strict', customMaxSizeGB: 0 },
+  modelDefaults: { autoFitEnabled: true, autoFitContextLength: 60000, guardrailMode: 'strict', customMaxSizeGB: 0, useCurrentMemState: false, moeOffloadStrategy: 'offload' },
   baseUrlOverride: { enabled: true, port: 1234, serveOnLocalNetwork: false, apiKeyEnabled: false, apiKey: '' },
   samplingPresets: [],
   paramViewMode: 'common',
   quickBaselineActive: true,  // Fix 5: Quick settings is the default baseline
+  presetMode: 'quick',        // Task 5: default to Quick (matches quickBaselineActive)
 
   setCompactSidebarEnabled: (enabled) => {
     localStorage.setItem('compactSidebar', String(enabled))
@@ -226,11 +237,27 @@ export const useStore = create<AppStore>((set) => ({
     speculationApplied: { ...s.speculationApplied, [templateId]: applied }
   })),
   setGgufMetadata: (modelPath, meta) => set((s) => ({ ggufMetadata: { ...s.ggufMetadata, [modelPath]: meta } })),
+  setGgufMetadataBulk: (cache) => set((s) => ({ ggufMetadata: { ...cache, ...s.ggufMetadata } })),
+  setMetadataExtraction: (modelPath, name, status) => set((s) => {
+    if (status === 'done' || status === 'error') {
+      // Auto-clear after done/error (the notification fades).
+      const next = { ...s.metadataExtractions }
+      delete next[modelPath]
+      return { metadataExtractions: next }
+    }
+    return { metadataExtractions: { ...s.metadataExtractions, [modelPath]: { name, status } } }
+  }),
+  clearMetadataExtraction: (modelPath) => set((s) => {
+    const next = { ...s.metadataExtractions }
+    delete next[modelPath]
+    return { metadataExtractions: next }
+  }),
   setVramInfo: (info) => set({ vramInfo: info }),
   setSystemRam: (info) => set({ systemRam: info }),
   setModelDefaults: (defaults) => set({ modelDefaults: defaults }),
   setBaseUrlOverride: (opts) => set({ baseUrlOverride: opts }),
   setSamplingPresets: (presets) => set({ samplingPresets: presets }),
   setParamViewMode: (mode) => set({ paramViewMode: mode }),
-  setQuickBaselineActive: (active) => set({ quickBaselineActive: active })
+  setQuickBaselineActive: (active) => set({ quickBaselineActive: active }),
+  setPresetMode: (mode) => set({ presetMode: mode, quickBaselineActive: mode !== 'clear' })
 }))

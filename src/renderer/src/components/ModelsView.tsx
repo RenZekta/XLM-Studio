@@ -2,7 +2,7 @@ import React, { useState, useEffect, useCallback, useMemo } from 'react'
 import { useStore } from '../store/useStore'
 import {
   HardDrive, Download, Trash, Pause, Play, X, Link, FolderOpen,
-  Pencil, Check, AlertCircle, Loader2, RefreshCw, Search, FilePlus, FileText,
+  Pencil, Check, AlertCircle, Loader2, RefreshCw, Search, FilePlus,
   ChevronRight, Eye, Layers
 } from 'lucide-react'
 import { formatBytes, formatSpeed } from '../utils/format'
@@ -171,13 +171,9 @@ function ModelFileRow({
   group: ModelGroup
   onDeleted: () => void
 }) {
-  const { cards, setShowCreateModal, setView, setPrefillModelPath } = useStore()
+  const { setShowCreateModal, setView, setPrefillModelPath } = useStore()
   const [editing, setEditing] = useState(false)
   const [newName, setNewName] = useState(name.replace(/\.[^.]+$/, ''))
-  const existingTemplate = useMemo(
-    () => cards.find(c => c.template.modelPath === path)?.template ?? null,
-    [cards, path]
-  )
   async function handleDelete() {
     if (!confirm(`Delete "${name}"? This cannot be undone.`)) return
     const res = await window.api.deleteModel(path)
@@ -190,14 +186,13 @@ function ModelFileRow({
     if (res.success) { setEditing(false); onDeleted() }
     else alert('Rename failed: ' + res.error)
   }
+  // Always create a NEW template for this model (never edit an existing one).
+  // The user wants to be able to quickly create many templates even with the
+  // same model, so the button never switches to "edit existing" mode.
   function handleTemplate() {
     setView('cards')
-    if (existingTemplate) {
-      setShowCreateModal(true, existingTemplate)
-    } else {
-      setPrefillModelPath(path)
-      setShowCreateModal(true, null)
-    }
+    setPrefillModelPath(path)
+    setShowCreateModal(true, null)
   }
   // Size breakdown: if mmproj exists in the folder, show Total / Model + mmproj.
   const mmproj = group.mmproj
@@ -231,9 +226,9 @@ function ModelFileRow({
         <button
           className="btn btn-ghost btn-icon"
           onClick={handleTemplate}
-          title={existingTemplate ? `Edit template "${existingTemplate.name}"` : 'Create a new template for this model'}
+          title="Create a new template for this model"
         >
-          {existingTemplate ? <FileText size={14} /> : <FilePlus size={14} />}
+          <FilePlus size={14} />
         </button>
         <button className="btn btn-ghost btn-icon" onClick={() => setEditing(true)} title={group.external ? 'Rename disabled for external models' : 'Rename'} disabled={group.external}><Pencil size={14} /></button>
         <button className="btn btn-ghost btn-icon" onClick={() => window.api.openFolder(group.folderPath)} title="Open folder"><FolderOpen size={14} /></button>
