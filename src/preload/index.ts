@@ -130,6 +130,7 @@ const api = {
   getGgufMetadata: (modelPath: string) => ipcRenderer.invoke('get-gguf-metadata', modelPath) as Promise<any>,
   // Task 1: metadata cache (bulk-load + live updates)
   getMetadataCache: () => ipcRenderer.invoke('get-metadata-cache') as Promise<Record<string, any>>,
+  clearMetadataCache: () => ipcRenderer.invoke('clear-metadata-cache') as Promise<{ success: boolean; cleared: number }>,
   onMetadataExtracting: (cb: (data: { modelPath: string; name: string; status: 'extracting' | 'done' | 'error' }) => void) => {
     ipcRenderer.removeAllListeners('metadata-extracting')
     ipcRenderer.on('metadata-extracting', (_e, data) => cb(data))

@@ -169,6 +169,14 @@ export interface GgufMetadata {
   expertSharedCount: number | null // llama.expert_shared_count
   fileType: string | null         // general.file_type — dominant quant enum (e.g. "Q4_K_M", "F16")
   fileTypeValue: number | null    // numeric general.file_type enum (for BPW lookup)
+  // Bug fix (item 2): `fileType` above is now the FILENAME-derived quant label
+  // when the filename has a recognizable one (e.g. "...-UD-Q3_K_XL.gguf" ->
+  // "Q3_K_XL"), since Unsloth's Dynamic/mixed quants can have an internal
+  // general.file_type that legitimately disagrees with their own naming.
+  // fileTypeInternal keeps the raw internal metadata value for reference/BPW
+  // lookups (which need the ACTUAL dominant per-tensor type, not the
+  // marketing label, for an accurate weight-memory estimate).
+  fileTypeInternal: string | null
   vocabSize: number | null         // tokenizer vocabulary size — logits buffer estimate
   // Task 6: hybrid SSM/attention models (Qwen3-Next, Qwen3.5/3.8, gpt-oss) —
   // only every Nth layer (N = full_attention_interval) carries a KV cache.

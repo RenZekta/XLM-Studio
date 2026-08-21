@@ -274,7 +274,9 @@ input[type="number"] {
   transition: border-color var(--transition);
 }
 .cmd-row:hover { border-color: var(--border-strong); }
-.cmd-row.active-param { border-color: var(--accent); background: rgba(10,10,10,.02); }
+/* Item 1.7: .cmd-row.active-param removed — legacy hexllama-era contour that
+   highlighted any set value regardless of preset ("differs from nothing"),
+   now redundant with .changed-param which is preset-relative. */
 .cmd-label-group { min-width: 0; }
 /* Fix 5: Increased font sizes for readability */
 .cmd-label { font-size: 14px; font-weight: 600; color: var(--text); }
@@ -434,6 +436,16 @@ input[type="number"] {
 }
 .cmd-preview .arg { color: #86efac; }
 .cmd-preview .val { color: #93c5fd; }
+/* Item 8: highlight command-preview values that differ from what's literally
+   stored in the template (currently: --ctx-size raised by the global Minimum
+   AutoFit override floor), so it's obvious at a glance the preview reflects
+   the ACTUAL launch command, not just the saved args. */
+.cmd-preview .cmd-preview-overridden {
+  color: #fbbf24;
+  text-decoration: underline dotted;
+  text-underline-offset: 3px;
+  cursor: help;
+}
 .flex { display: flex; }
 .flex-col { flex-direction: column; }
 .flex-1 { flex: 1; }
@@ -1526,7 +1538,9 @@ input[type="number"] {
   top: 3px;
   bottom: 3px;
   left: 3px;
-  width: calc(50% - 3px);
+  /* Fallback only — SegmentedToggle always sets the real width inline as
+     calc(100% / optionCount) so it's exact for any number of options. */
+  width: calc(100% / var(--total, 2) - 3px);
   background: #3b82f6;
   border-radius: calc(var(--radius-sm) - 3px);
   transition: transform 220ms cubic-bezier(0.4, 0, 0.2, 1);
@@ -1537,6 +1551,14 @@ input[type="number"] {
   z-index: 1;
   display: inline-flex;
   align-items: center;
+  justify-content: center;
+  /* Bug fix: buttons were only as wide as their own text + padding, while the
+     sliding highlight is always exactly 100%/N of the container. With unequal
+     label lengths (e.g. "Common" vs "Full") the highlight and the button text
+     drifted out of alignment. Giving every button an equal flex share (matching
+     the highlight's width formula) keeps the highlight centered under whichever
+     label is active, regardless of label length. */
+  flex: 1 1 0;
   gap: 5px;
   padding: 6px 16px;
   font-size: 12px;
@@ -1560,6 +1582,12 @@ input[type="number"] {
 .segmented-toggle-btn.stacked-label { line-height: 1.05; padding-top: 3px; padding-bottom: 3px; }
 .segmented-toggle-btn .stacked-label-inner { display: flex; flex-direction: column; align-items: center; gap: 1px; }
 .segmented-toggle-btn .stacked-label-line { display: block; }
+/* Bug fix: anchor for CmdParamsEditor's header portal (Settings/Parameters
+   toggles + CPU/model/Free-VRAM banners) in CreateModal — sits above the
+   collapsible "Advanced Parameters" section so those controls/monitors are
+   always visible without expanding it. Empty when nothing is portaled in. */
+.cmd-header-anchor:empty { display: none; }
+.cmd-header-anchor:not(:empty) { margin-top: 4px; margin-bottom: 4px; }
 
 /* Feature 15: Toggle switches accent color changed to blue (was white) */
 .toggle input:checked ~ .toggle-track { background: #3b82f6; }
@@ -1583,6 +1611,26 @@ input[type="number"] {
 }
 .vram-info-banner svg { flex-shrink: 0; color: #3b82f6; }
 .vram-info-banner strong { color: #3b82f6; }
+/* Item 6: small round ✓ apply-recommendation button next to each Free VRAM
+   recommendation line. */
+.vram-apply-btn {
+  flex-shrink: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 20px;
+  height: 20px;
+  border-radius: 50%;
+  border: 1px solid rgba(59,130,246,.4);
+  background: rgba(59,130,246,.12);
+  color: #3b82f6;
+  cursor: pointer;
+  transition: background 150ms ease, transform 150ms ease;
+  padding: 0;
+}
+.vram-apply-btn:hover:not(:disabled) { background: rgba(59,130,246,.28); transform: scale(1.08); }
+.vram-apply-btn:disabled { opacity: 0.4; cursor: not-allowed; }
+.vram-apply-btn svg { color: #3b82f6; }
 
 /* ==========================================================================
    FEATURE 16: MoE EXPERIMENTAL BADGE

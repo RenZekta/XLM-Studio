@@ -120,6 +120,7 @@ interface LlamaCppApi {
   getGgufMetadata: (modelPath: string) => Promise<any>
   // Task 1: metadata cache
   getMetadataCache: () => Promise<Record<string, any>>
+  clearMetadataCache: () => Promise<{ success: boolean; cleared: number }>
   onMetadataExtracting: (cb: (data: { modelPath: string; name: string; status: 'extracting' | 'done' | 'error' }) => void) => void
   removeMetadataExtractingListener: () => void
   onGgufMetadataUpdated: (cb: (data: { modelPath: string; meta: any }) => void) => void

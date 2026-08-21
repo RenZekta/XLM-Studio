@@ -24,6 +24,17 @@ const SETTINGS_PATH = join(APP_ROOT, 'settings.json')
 // Task 1: persisted GGUF metadata cache so metadata is available instantly
 // whenever the user accesses a model (no re-extraction on every view).
 const METADATA_CACHE_PATH = join(APP_ROOT, 'metadata-cache.json')
+// Bug fix (Task 1.2 / KV overshoot): the cache is disk-persisted with NO
+// schema check, so entries written before a metadata field was added (e.g.
+// `fullAttentionInterval`, added for hybrid SSM/attention models like
+// Qwen3.5/3.6/Next) get served forever as-is — the field is simply absent
+// (undefined), every KV-cache formula's `|| 1` fallback silently kicks in,
+// and the "divide by full_attention_interval" fix has no visible effect for
+// any model that was already scanned before the fix shipped. Bump this
+// whenever a field is added to the extracted metadata shape, and the cache
+// read below will treat mismatched/missing-version entries as stale and
+// transparently re-extract instead of serving the incomplete old object.
+const METADATA_SCHEMA_VERSION = 3
 for (const dir of [MODELS_DIR, TEMPLATES_DIR, BACKEND_DIR]) {
   if (!existsSync(dir)) mkdirSync(dir, { recursive: true })
 }
@@ -84,7 +95,7 @@ interface AppSettings {
   mainBackendFolder: string | null
   theme: ThemePref
   trackedBackends: TrackedBackend[]
-  modelDefaults?: { autoFitEnabled: boolean; autoFitContextLength: number; guardrailMode: string; customMaxSizeGB: number; useCurrentMemState?: boolean; moeOffloadStrategy?: 'offload' | 'max' }
+  modelDefaults?: { autoFitEnabled: boolean; autoFitContextLength: number; guardrailMode: string; customMaxSizeGB: number; useCurrentMemState?: boolean; moeOffloadStrategy?: 'offload' | 'max'; autoFitUse2xIncrements?: boolean; autoFitYarnAutoScale?: boolean; autoEnableMmproj?: boolean }
   baseUrlOverride?: BaseUrlOverride
   samplingPresets?: any[]
   starredPresetId?: string
@@ -144,7 +155,7 @@ const DEFAULT_SETTINGS: AppSettings = {
   mainBackendFolder: null,
   theme: 'system',
   trackedBackends: DEFAULT_TRACKED,
-  modelDefaults: { autoFitEnabled: true, autoFitContextLength: 60000, guardrailMode: 'strict', customMaxSizeGB: 0, useCurrentMemState: false, moeOffloadStrategy: 'offload' },
+  modelDefaults: { autoFitEnabled: true, autoFitContextLength: 60000, guardrailMode: 'strict', customMaxSizeGB: 0, useCurrentMemState: false, moeOffloadStrategy: 'max' /* item 6: default to MAX+ForceMoEtoCPU */, autoFitUse2xIncrements: false, autoFitYarnAutoScale: false, autoEnableMmproj: true },
   baseUrlOverride: { ...DEFAULT_BASE_URL_OVERRIDE },
   samplingPresets: [],
   starredPresetId: 'lm-studio'
@@ -175,7 +186,20 @@ async function loadSettings(): Promise<AppSettings> {
         guardrailMode: data.modelDefaults?.guardrailMode ?? DEFAULT_SETTINGS.modelDefaults!.guardrailMode,
         customMaxSizeGB: data.modelDefaults?.customMaxSizeGB ?? DEFAULT_SETTINGS.modelDefaults!.customMaxSizeGB,
         useCurrentMemState: data.modelDefaults?.useCurrentMemState ?? false,
-        moeOffloadStrategy: (data.modelDefaults?.moeOffloadStrategy === 'max' ? 'max' : 'offload')
+        // Item 6: fixed to match the same "respect saved value, else use the
+        // CURRENT default" pattern as every other field here. It previously
+        // hardcoded 'offload' as the fallback regardless of DEFAULT_SETTINGS,
+        // so bumping the default above would never actually reach anyone with
+        // an existing settings.json (i.e. everyone but a fresh install).
+        moeOffloadStrategy: (data.modelDefaults?.moeOffloadStrategy === 'offload' || data.modelDefaults?.moeOffloadStrategy === 'max')
+          ? data.modelDefaults.moeOffloadStrategy
+          : DEFAULT_SETTINGS.modelDefaults!.moeOffloadStrategy,
+        // Item 5/8: 2x-increment context-slider lock + YaRN auto-scaling override.
+        autoFitUse2xIncrements: data.modelDefaults?.autoFitUse2xIncrements ?? false,
+        autoFitYarnAutoScale: data.modelDefaults?.autoFitYarnAutoScale ?? false,
+        // New Settings toggle: "Enable Multimodal Projector automatically in
+        // new Template if mmproj was detected" — ON by default.
+        autoEnableMmproj: data.modelDefaults?.autoEnableMmproj ?? true
       },
       baseUrlOverride: migrateBaseUrlOverride(data.baseUrlOverride),
       samplingPresets: Array.isArray(data.samplingPresets) ? data.samplingPresets : [],
@@ -587,6 +611,27 @@ const GGUF_FTYPE_NAMES: Record<number, string> = {
   32: 'BF16', 33: 'Q4_0_4_4', 34: 'Q4_0_4_8', 35: 'Q4_0_8_8',
   36: 'TQ1_0', 37: 'TQ2_0', 38: 'IQ2_XXS_NL'
 }
+// Bug fix (item 2): the internal `general.file_type` GGUF metadata field is a
+// SINGLE enum representing whatever the converter considered the "dominant"
+// quant type — but Unsloth's "Dynamic"/UD-* quants deliberately mix bit-
+// widths per-tensor (important layers upcast for quality), so that single
+// internal field can legitimately disagree with the quant label in the
+// filename/on the model card (e.g. a file named "...-UD-Q3_K_XL.gguf" can
+// have general.file_type pointing at Q4_K_S, if that happens to be the most
+// numerous individual tensor type even though "Q3_K_XL" is the correct
+// overall classification). The browser/HF file listing shows the filename-
+// derived name, which is what users actually recognize — so parse that as
+// the PREFERRED source, falling back to the internal metadata field only
+// when the filename doesn't contain a recognizable quant token.
+const FILENAME_QUANT_PATTERN = /(?:^|[-_.])((?:IQ|TQ)[1-4]_[A-Z0-9]+|Q[2-8]_[A-Z0-9]+(?:_[A-Z0-9]+)?|Q[4-8]_[01]|BF16|F16|F32)(?:[-_.]|$)/i
+export function parseQuantFromFilename(filePath: string): string | null {
+  const base = filePath.split(/[\\/]/).pop() || filePath
+  const m = base.match(FILENAME_QUANT_PATTERN)
+  if (!m) return null
+  // Normalize casing to match GGUF_FTYPE_NAMES convention (e.g. "q3_k_xl" -> "Q3_K_XL").
+  return m[1].toUpperCase()
+}
+
 function ggufFileTypeName(ftype: number): string | null {
   return GGUF_FTYPE_NAMES[ftype] || null
 }
@@ -1044,6 +1089,21 @@ export function registerIpcHandlers(): void {
   // Task 1: return the full metadata cache so the renderer can bulk-load it
   // (instant access, no re-extraction on every view).
   ipcMain.handle('get-metadata-cache', async () => metadataCache)
+
+  // Item 3: "Reextract model data" — wipe the ENTIRE persisted metadata
+  // cache (every model, regardless of schema version) so the next
+  // get-gguf-metadata call for each one is forced to re-run extraction from
+  // scratch. This is the manual counterpart to the schema-version auto-
+  // invalidation (see METADATA_SCHEMA_VERSION) — useful any time the user
+  // suspects stale/incorrect cached data for a reason the schema bump
+  // wouldn't catch (e.g. a model file was silently replaced in place with
+  // the same path). Returns how many entries were cleared.
+  ipcMain.handle('clear-metadata-cache', async () => {
+    const count = Object.keys(metadataCache).length
+    metadataCache = {}
+    saveMetadataCache()
+    return { success: true, cleared: count }
+  })
 
   ipcMain.handle('list-external-model-folders', async () => {
     const s = await loadSettings()
@@ -2087,7 +2147,10 @@ export function registerIpcHandlers(): void {
     try {
       if (!modelPath || !existsSync(modelPath)) return { mode: 'off' as const }
       const fd = await fsPromises.open(modelPath, 'r')
-      const buf = Buffer.alloc(8 * 1024 * 1024) // 8 MB scan window
+      const buf = Buffer.alloc(32 * 1024 * 1024) // 32 MB scan window — bumped from
+      // 8MB (item 5 investigation): large models (many tensors, big vocab)
+      // can have GGUF metadata/tensor-info headers exceeding 8MB, pushing the
+      // nextn/mtp tensor names past the old cutoff.
       const { bytesRead } = await fd.read(buf, 0, buf.length, 0)
       await fd.close()
       const slice = buf.subarray(0, bytesRead).toString('latin1')
@@ -2096,15 +2159,32 @@ export function registerIpcHandlers(): void {
       if (lower.includes('dspark') || lower.includes('draft-dspark')) {
         return { mode: 'dspark' as const, reason: 'dspark tensors detected in model metadata' }
       }
-      // MTP detection — look for mtp-related tensor/metadata patterns.
-      // Common indicators: tensor names like "blk.N.mtp.*", metadata keys like
-      // "mtp_count", "n_mtp", "mtp_layers", or tensor names containing "mtp".
+      // MTP detection.
+      // Bug fix (item 5): the canonical llama.cpp naming convention for MTP is
+      // NOT the literal substring "mtp" — it's the `{arch}.nextn_predict_layers`
+      // GGUF metadata key, and tensor names use a "nextn" prefix (e.g.
+      // "blk.N.nextn.eh_proj", "blk.N.nextn.enorm", "nextn.pre_projection").
+      // Real-world MTP GGUFs (Qwen3.5/3.6/3.8, DeepSeek V3/R1, GLM 4.5/4.6,
+      // Gemma 4) — including Unsloth's quantizations, which is what the user
+      // who reported this was using — carry these "nextn"-named tensors, NOT
+      // anything containing the literal string "mtp". The old check below
+      // (which only looked for "mtp") consequently missed every one of them,
+      // which is why detection kept silently failing even after every other
+      // fix to the React-side application logic. Check for "nextn" (and its
+      // associated metadata key / sub-tensor names) FIRST since it's the
+      // authoritative, standardized signal; keep the older "mtp" substring
+      // checks as a fallback for any non-standard/older conversions.
       if (
+        lower.includes('nextn_predict_layers') ||
+        lower.includes('.nextn.') ||
+        lower.includes('nextn.eh_proj') ||
+        lower.includes('nextn.enorm') ||
+        lower.includes('nextn.pre_projection') ||
         lower.includes('mtp') ||
         lower.includes('multi_token_prediction') ||
         lower.includes('draft-mtp')
       ) {
-        return { mode: 'mtp' as const, reason: 'MTP (Multi-Token Prediction) tensors detected in model metadata' }
+        return { mode: 'mtp' as const, reason: 'MTP (Multi-Token Prediction / nextn) tensors detected in model metadata' }
       }
       return { mode: 'off' as const }
     } catch (err) {
@@ -2123,7 +2203,11 @@ export function registerIpcHandlers(): void {
     // Task 1: check the persistent cache first — metadata is stable for a given
     // file (it's read from the GGUF header), so caching avoids re-parsing on
     // every view. The cache is pruned in `list-models` when files disappear.
-    if (modelPath && metadataCache[modelPath]) {
+    // Bug fix: only trust a cached entry if it was written by the CURRENT
+    // metadata schema. Older entries (missing e.g. fullAttentionInterval,
+    // or any other field added since) fall through and get re-extracted —
+    // otherwise a stale cache silently masks any fix to the extraction logic.
+    if (modelPath && metadataCache[modelPath] && metadataCache[modelPath].schemaVersion === METADATA_SCHEMA_VERSION) {
       return metadataCache[modelPath]
     }
     // Broadcast that extraction is starting (for the renderer notification).
@@ -2141,7 +2225,7 @@ export function registerIpcHandlers(): void {
       headCount: null, headCountKv: null, keyLength: null, valueLength: null,
       slidingWindow: null, kvLoraRank: null, qkRopeHeadDim: null,
       expertUsedCount: null, expertSharedCount: null,
-      fileType: null, fileTypeValue: null, vocabSize: null, fullAttentionInterval: null
+      fileType: null, fileTypeValue: null, fileTypeInternal: null, vocabSize: null, fullAttentionInterval: null
     }
     try {
       if (!modelPath || !existsSync(modelPath)) return { ...result, error: 'File not found' }
@@ -2203,7 +2287,11 @@ export function registerIpcHandlers(): void {
           // file_type: numeric enum → human-readable name for the BPW table.
           const ftVal = resolve('file_type')
           result.fileTypeValue = ftVal
-          result.fileType = ftVal !== null ? ggufFileTypeName(ftVal) : null
+          result.fileTypeInternal = ftVal !== null ? ggufFileTypeName(ftVal) : null
+          // Bug fix (item 2): prefer the filename-derived quant label — see
+          // parseQuantFromFilename comment for why the internal metadata
+          // field can disagree with it for Unsloth Dynamic/mixed quants.
+          result.fileType = parseQuantFromFilename(modelPath) || result.fileTypeInternal
           // vocab size: count of tokenizer.ggml.tokens array (if present).
           const vocabArrLen = (() => {
             // The native tool may print "tokenizer.ggml.tokens" as a count or array.
@@ -2219,6 +2307,24 @@ export function registerIpcHandlers(): void {
           // If we got the essential fields, return immediately — no need for JS fallback.
           if (result.blockCount && result.contextLength) {
             console.log('[GGUF] Native tool succeeded: blockCount=' + result.blockCount + ' contextLength=' + result.contextLength + ' chatTemplate=' + (result.chatTemplate ? 'yes' : 'no'))
+            // Bug fix: the native-tool path previously returned WITHOUT ever
+            // writing to metadataCache/disk — every single call for a model
+            // whose metadata only the native tool could resolve was forced to
+            // re-run the tool from scratch (this branch), defeating the whole
+            // point of the persisted cache. Stamp + persist it like the JS
+            // fallback path does below.
+            result.schemaVersion = METADATA_SCHEMA_VERSION
+            if (modelPath) {
+              metadataCache[modelPath] = result
+              saveMetadataCache()
+              const fn = basename(modelPath)
+              BrowserWindow.getAllWindows().forEach(win => {
+                if (!win.isDestroyed()) {
+                  win.webContents.send('gguf-metadata-updated', { modelPath, meta: result })
+                  win.webContents.send('metadata-extracting', { modelPath, name: fn, status: 'done' })
+                }
+              })
+            }
             return result
           }
           // If chatTemplate is missing but everything else is found, try the JS fallback for just that.
@@ -2413,7 +2519,11 @@ export function registerIpcHandlers(): void {
       if (!result.fileTypeValue) {
         const ftv = resolve('file_type')
         result.fileTypeValue = ftv
-        if (ftv !== null) result.fileType = ggufFileTypeName(ftv)
+        if (ftv !== null) (result as any).fileTypeInternal = ggufFileTypeName(ftv)
+      }
+      // Bug fix (item 2): same filename-preference as the native-tool path above.
+      if (!result.fileType) {
+        result.fileType = parseQuantFromFilename(modelPath) || (result as any).fileTypeInternal || null
       }
       // vocab size: count of tokenizer.ggml.tokens array (the JS parser stores
       // arrays as [] so we can't get the length here; best-effort via vocab_size key).
@@ -2595,6 +2705,7 @@ export function registerIpcHandlers(): void {
       // Task 1: cache the extracted metadata + broadcast so the renderer updates
       // its store (and any open CmdParamsEditor) without a second fetch.
       if (modelPath && !result.error) {
+        result.schemaVersion = METADATA_SCHEMA_VERSION
         metadataCache[modelPath] = result
         saveMetadataCache()
         const fn = basename(modelPath)
@@ -2748,11 +2859,15 @@ export function registerIpcHandlers(): void {
     const s = await loadSettings()
     s.modelDefaults = {
       autoFitEnabled: !!defaults.autoFitEnabled,
-      autoFitContextLength: Math.max(2048, Math.min(200000, Number(defaults.autoFitContextLength) || 60000)),
+      // Item 5: bumped ceiling from 200 000 → 2 097 152 (2M context era models).
+      autoFitContextLength: Math.max(2048, Math.min(2097152, Number(defaults.autoFitContextLength) || 60000)),
       guardrailMode: (['off','relaxed','balanced','strict','custom'].includes(defaults.guardrailMode) ? defaults.guardrailMode : 'strict'),
       customMaxSizeGB: Math.max(0, Number(defaults.customMaxSizeGB) || 0),
       useCurrentMemState: !!defaults.useCurrentMemState,
-      moeOffloadStrategy: (defaults.moeOffloadStrategy === 'max' ? 'max' : 'offload')
+      moeOffloadStrategy: (defaults.moeOffloadStrategy === 'max' ? 'max' : 'offload'),
+      autoFitUse2xIncrements: !!defaults.autoFitUse2xIncrements,
+      autoFitYarnAutoScale: !!defaults.autoFitYarnAutoScale,
+      autoEnableMmproj: defaults.autoEnableMmproj !== undefined ? !!defaults.autoEnableMmproj : true
     }
     await saveSettings(s)
     return { success: true }

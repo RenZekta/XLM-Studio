@@ -186,6 +186,17 @@ export default function App() {
       })
     } catch {}
 
+    // Bug fix (item 4): register the server-log listener ONCE here at the App
+    // root (not inside LogsView, which used to only listen while mounted —
+    // losing every log line that arrived while the user was on another tab).
+    // appendLog writes into the global store, so logs now persist for the
+    // life of the app regardless of which view is active.
+    try {
+      window.api?.onServerLog?.((data) => {
+        useStore.getState().appendLog(data as any)
+      })
+    } catch {}
+
     // Task 2.2: Poll Free VRAM + Free RAM every 10s so the VRAM banner + the
     // Automatic Context Fill calculator always use the freshest memory data.
     // Without this, memory figures would be stale from the single init fetch.

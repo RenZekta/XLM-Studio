@@ -13,29 +13,32 @@ interface LogEntry {
 }
 
 // Fix 4: Logs tab — displays a live streaming window of llama-server stdout/stderr.
+// Bug fix (item 4): logs now live in the global store (populated by a listener
+// registered once at App root — see App.tsx) instead of local component state,
+// so they persist across tab navigation until the app closes or the user hits
+// Clear. This view is now a thin read-only + pause/filter layer over that
+// global log list; "Pause" just stops the local view from re-rendering on new
+// entries (the store keeps collecting them in the background either way, so
+// nothing is lost while paused — resuming shows everything that arrived).
 export default function LogsView() {
-  const { cards } = useStore()
-  const [logs, setLogs] = useState<LogEntry[]>([])
+  const { cards, logs: storeLogs, clearLogs } = useStore()
   const [paused, setPaused] = useState(false)
+  // While paused, freeze the displayed list at what it was the moment Pause
+  // was pressed, rather than dropping subsequently-arriving lines entirely.
+  const [pausedSnapshot, setPausedSnapshot] = useState<LogEntry[] | null>(null)
   const [filter, setFilter] = useState('')
   const [selectedModel, setSelectedModel] = useState<string>('all')
   const scrollRef = useRef<HTMLDivElement>(null)
-  const maxLogs = 5000  // cap to prevent memory issues
 
-  useEffect(() => {
-    const onLog = (data: { id: string; name: string; stream: string; line: string; ts: number }) => {
-      if (paused) return
-      setLogs(prev => {
-        const next = [...prev, data as LogEntry]
-        if (next.length > maxLogs) return next.slice(-maxLogs)
-        return next
-      })
-    }
-    window.api?.onServerLog?.(onLog)
-    return () => window.api?.removeServerLogListener?.()
-  }, [paused])
+  const logs = paused ? (pausedSnapshot || storeLogs) : storeLogs
 
-  // Auto-scroll to bottom when new logs arrive.
+  function togglePaused() {
+    if (!paused) setPausedSnapshot(storeLogs)
+    else setPausedSnapshot(null)
+    setPaused(!paused)
+  }
+
+  // Auto-scroll to bottom when new logs arrive (not while paused).
   useEffect(() => {
     if (!paused && scrollRef.current) {
       scrollRef.current.scrollTop = scrollRef.current.scrollHeight
@@ -52,7 +55,7 @@ export default function LogsView() {
     return result
   }, [logs, selectedModel, filter])
 
-  function handleClear() { setLogs([]) }
+  function handleClear() { clearLogs(); setPausedSnapshot(null) }
 
   function handleExport() {
     const text = filteredLogs().map(l => `[${new Date(l.ts).toISOString()}] [${l.stream}] [${l.name}] ${l.line}`).join('\n')
@@ -79,7 +82,7 @@ export default function LogsView() {
           </p>
         </div>
         <div className="page-actions">
-          <button className="btn btn-ghost btn-icon" onClick={() => setPaused(!paused)} title={paused ? 'Resume' : 'Pause'}>
+          <button className="btn btn-ghost btn-icon" onClick={togglePaused} title={paused ? 'Resume' : 'Pause'}>
             {paused ? <Play size={15} /> : <Pause size={15} />}
           </button>
           <button className="btn btn-ghost btn-icon" onClick={handleExport} title="Export logs" disabled={logs.length === 0}>

@@ -315,7 +315,7 @@ export default function ModelCard({ card }: Props) {
       </div>
       <div className={`card-expanded ${isExpanded ? 'open' : ''}`}>
         <div className="expanded-inner">
-          <CmdParamsEditor templateId={card.template.id} args={card.template.args} />
+          <CmdParamsEditor templateId={card.template.id} args={card.template.args} launchMode={card.template.launchMode} />
         </div>
       </div>
     </div>

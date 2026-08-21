@@ -295,9 +295,10 @@ function ModelGroupCard({ group, onDeleted }: { group: ModelGroup; onDeleted: ()
 }
 
 export default function ModelsView() {
-  const { models, setModels, modelDownloads, upsertModelDownload, paths } = useStore()
+  const { models, setModels, modelDownloads, upsertModelDownload, paths, clearGgufMetadataAll } = useStore()
   const [showUrlModal, setShowUrlModal] = useState(false)
   const [loading, setLoading] = useState(false)
+  const [reextracting, setReextracting] = useState(false)
   const [filter, setFilter] = useState('')
 
   const totalModelFiles = useMemo(() => models.reduce((a, g) => a + g.models.length, 0), [models])
@@ -318,6 +319,36 @@ export default function ModelsView() {
     setModels(m)
     setLoading(false)
   }, [setModels])
+
+  // Item 3: "Reextract model data" — wipes BOTH the persisted (main-process)
+  // and in-memory (renderer store) metadata caches, then re-triggers
+  // extraction for every currently-detected model, exactly like the app-launch
+  // parallel scan does for uncached models (see App.tsx's init effect) — the
+  // only difference is this one is unconditional (every model gets rescanned,
+  // not just ones missing from the cache), and mmproj files are naturally
+  // skipped since they were never included in `g.models` to begin with.
+  const reextractAll = useCallback(async () => {
+    if (reextracting) return
+    if (!confirm('This deletes all stored model metadata and re-extracts it from scratch for every detected model. This can take a while for large libraries. Continue?')) return
+    setReextracting(true)
+    try {
+      await window.api.clearMetadataCache?.()
+      clearGgufMetadataAll()
+      const fresh = await window.api.listModels()
+      setModels(fresh)
+      const allPaths: string[] = []
+      for (const g of fresh) for (const m of g.models) allPaths.push(m.path)
+      // Fire-and-forget in parallel, same as the startup scan — the
+      // onMetadataExtracting/onGgufMetadataUpdated listeners registered in
+      // App.tsx handle the notification + populating the store as results
+      // stream back in, so we don't need to await each one here.
+      for (const p of allPaths) {
+        window.api?.getGgufMetadata?.(p).catch(() => {})
+      }
+    } finally {
+      setReextracting(false)
+    }
+  }, [reextracting, clearGgufMetadataAll, setModels])
 
   useEffect(() => {
     refresh()
@@ -343,6 +374,16 @@ export default function ModelsView() {
         <div className="page-actions">
           <button className="btn btn-ghost btn-icon" onClick={refresh} title="Refresh" disabled={loading}>
             <RefreshCw size={15} className={loading ? 'spin' : ''} />
+          </button>
+          {/* Item 3: manual full re-extraction — clears stored metadata for every
+              detected model and re-runs extraction from scratch. */}
+          <button
+            className="btn btn-ghost btn-icon"
+            onClick={reextractAll}
+            disabled={reextracting}
+            title="Reextract model data — delete all stored metadata and re-extract it from every detected model"
+          >
+            <Layers size={15} className={reextracting ? 'spin' : ''} />
           </button>
           <button className="btn btn-secondary" onClick={() => paths && window.api.openFolder(paths.mainModelFolder || paths.models)} disabled={!paths}>
             <FolderOpen size={15} /> Open Folder

@@ -9,6 +9,7 @@ import CommandsEditor from './CommandsEditor'
 import ExternalFolderList from './ExternalFolderList'
 import { changeTheme } from '../hooks/useTheme'
 import { formatBytes } from '../utils/format'
+import { formatWithSpaces, parseSpacedNumber, CONTEXT_POWER_OF_TWO_STEPS, snapToNearestPowerOfTwo, indexOnLadder } from '../utils/contextFormat'
 import type { ThemePref, TrackedBackend, TrackedBackendRelease } from '../../../shared/types'
 
 const NOTIF_KEY = 'hexllama_update_notify'
@@ -313,26 +314,89 @@ export default function SettingsView() {
           </div>
           {modelDefaults.autoFitEnabled && (
             <div style={{ width: '100%' }}>
-              <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 6 }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 6, flexWrap: 'wrap' }}>
                 <span style={{ fontSize: 12, fontWeight: 600, color: 'var(--text-secondary)' }}>Minimum AutoFit context length</span>
-                <input type="number" className="form-input" style={{ width: 100 }} min={2048} max={200000} value={modelDefaults.autoFitContextLength}
+                <input
+                  type="text"
+                  inputMode="numeric"
+                  className="form-input"
+                  style={{ width: 110 }}
+                  value={formatWithSpaces(modelDefaults.autoFitContextLength)}
+                  onChange={async (e) => {
+                    const raw = parseSpacedNumber(e.target.value)
+                    const clamped = Math.max(2048, Math.min(2097152, raw))
+                    const value = modelDefaults.autoFitUse2xIncrements ? snapToNearestPowerOfTwo(clamped) : clamped
+                    const d = { ...modelDefaults, autoFitContextLength: value }
+                    setModelDefaults(d); try { await window.api?.setModelDefaults?.(d) } catch {}
+                  }} />
+                {/* Item 5: bumped ceiling 200 000 → 2 097 152 (2M-context models). */}
+                <span style={{ fontSize: 11, color: 'var(--text-muted)' }}>tokens (2 048 – 2 097 152)</span>
+                <label style={{ display: 'flex', alignItems: 'center', gap: 5, fontSize: 11, color: 'var(--text-muted)', marginLeft: 'auto', cursor: 'pointer' }}>
+                  <input type="checkbox" checked={!!modelDefaults.autoFitUse2xIncrements} onChange={async (e) => {
+                    const use2x = e.target.checked
+                    const d = {
+                      ...modelDefaults,
+                      autoFitUse2xIncrements: use2x,
+                      // Snap the current value onto the ladder immediately so the
+                      // slider and the number field agree the moment this is checked.
+                      autoFitContextLength: use2x ? snapToNearestPowerOfTwo(modelDefaults.autoFitContextLength) : modelDefaults.autoFitContextLength
+                    }
+                    setModelDefaults(d); try { await window.api?.setModelDefaults?.(d) } catch {}
+                  }} />
+                  Use 2x increments
+                </label>
+              </div>
+              {modelDefaults.autoFitUse2xIncrements ? (
+                <input
+                  type="range"
+                  min={0}
+                  max={CONTEXT_POWER_OF_TWO_STEPS.length - 1}
+                  step={1}
+                  value={indexOnLadder(modelDefaults.autoFitContextLength)}
+                  style={{ width: '100%' }}
+                  onChange={async (e) => {
+                    const value = CONTEXT_POWER_OF_TWO_STEPS[Number(e.target.value)]
+                    const d = { ...modelDefaults, autoFitContextLength: value }
+                    setModelDefaults(d); try { await window.api?.setModelDefaults?.(d) } catch {}
+                  }} />
+              ) : (
+                <input type="range" min={2048} max={2097152} step={1024} value={modelDefaults.autoFitContextLength} style={{ width: '100%' }}
                   onChange={async (e) => {
                     const d = { ...modelDefaults, autoFitContextLength: Number(e.target.value) }
                     setModelDefaults(d); try { await window.api?.setModelDefaults?.(d) } catch {}
                   }} />
-                <span style={{ fontSize: 11, color: 'var(--text-muted)' }}>tokens (2048–200000)</span>
+              )}
+              {/* Item 5: "Automatic YaRN scaling control override and upscale to
+                  AutoFit" — when on, every template's effective max context can be
+                  upscaled via YaRN to reach this AutoFit floor even if the model's
+                  native context is smaller. See item 8 for the per-template switch
+                  this mirrors/drives. */}
+              <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', width: '100%', marginTop: 12 }}>
+                <div>
+                  <div className="settings-row-label" style={{ fontSize: 12 }}>Automatic YaRN scaling control override and upscale to AutoFit</div>
+                  <div className="settings-row-sub" style={{ fontSize: 11 }}>
+                    When a model's native context is below the Minimum AutoFit override above, automatically apply YaRN RoPE scaling to reach it, instead of capping at the model's native maximum.
+                  </div>
+                </div>
+                <div className="toggle-wrap">
+                  <label className="toggle">
+                    <input type="checkbox" checked={!!modelDefaults.autoFitYarnAutoScale} onChange={async (e) => {
+                      const d = { ...modelDefaults, autoFitYarnAutoScale: e.target.checked }
+                      setModelDefaults(d); try { await window.api?.setModelDefaults?.(d) } catch {}
+                    }} />
+                    <span className="toggle-track"></span><span className="toggle-thumb"></span>
+                  </label>
+                </div>
               </div>
-              <input type="range" min={2048} max={200000} step={1024} value={modelDefaults.autoFitContextLength} style={{ width: '100%' }}
-                onChange={async (e) => {
-                  const d = { ...modelDefaults, autoFitContextLength: Number(e.target.value) }
-                  setModelDefaults(d); try { await window.api?.setModelDefaults?.(d) } catch {}
-                }} />
             </div>
           )}
           {/* Task 4: Current Memory State use in memory calculations */}
+          {/* Item 4 (rename): "Current Memory State use in memory calculations"
+              -> "Use current memory state in memory calculations" — same
+              setting, just reads better grammatically. */}
           <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', width: '100%', marginTop: 8 }}>
             <div>
-              <div className="settings-row-label">Current Memory State use in memory calculations</div>
+              <div className="settings-row-label">Use current memory state in memory calculations</div>
               <div className="settings-row-sub">
                 ON = use the currently-available Free VRAM / Free RAM (polled every 10s). OFF (default) = use the static maximum VRAM / RAM totals — more conservative and stable.
               </div>
@@ -352,6 +416,29 @@ export default function SettingsView() {
               Consider turning memory overhead on for system stability when using device alongside running model with full VRAM/RAM utilization.
             </div>
           )}
+          {/* New: "Enable Multimodal Projector automatically in new Template
+              if mmproj was detected" — ON by default. This governs whether a
+              brand-new template defaults mmproj ON when the model has one, or
+              always starts OFF (saving VRAM/RAM for users who don't need
+              vision) until manually enabled. Existing templates and manual
+              toggles are unaffected either way. */}
+          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', width: '100%', marginTop: 8 }}>
+            <div>
+              <div className="settings-row-label">Enable Multimodal Projector automatically in new Template if mmproj was detected</div>
+              <div className="settings-row-sub">
+                Save memory when you don't need vision capabilities.
+              </div>
+            </div>
+            <div className="toggle-wrap">
+              <label className="toggle">
+                <input type="checkbox" checked={modelDefaults.autoEnableMmproj !== false} onChange={async (e) => {
+                  const d = { ...modelDefaults, autoEnableMmproj: e.target.checked }
+                  setModelDefaults(d); try { await window.api?.setModelDefaults?.(d) } catch {}
+                }} />
+                <span className="toggle-track"></span><span className="toggle-thumb"></span>
+              </label>
+            </div>
+          </div>
           {/* Task 8: Strategy for MoE offloading calculations */}
           <div style={{ width: '100%', marginTop: 12 }}>
             <div className="settings-row-label" style={{ marginBottom: 4 }}>Strategy for MoE offloading calculations</div>

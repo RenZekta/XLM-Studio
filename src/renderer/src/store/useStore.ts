@@ -64,7 +64,7 @@ interface AppStore {
   metadataExtractions: Record<string, { name: string; status: 'extracting' | 'done' | 'error' }>
   vramInfo: { freeVRAMMB: number; totalVRAMMB: number; hasNvidia: boolean; gpuName: string | null; vendor?: string | null; gpuType?: string | null } | null
   systemRam: { totalRAMMB: number; freeRAMMB: number } | null
-  modelDefaults: { autoFitEnabled: boolean; autoFitContextLength: number; guardrailMode: string; customMaxSizeGB: number; useCurrentMemState?: boolean; moeOffloadStrategy?: 'offload' | 'max' }
+  modelDefaults: { autoFitEnabled: boolean; autoFitContextLength: number; guardrailMode: string; customMaxSizeGB: number; useCurrentMemState?: boolean; moeOffloadStrategy?: 'offload' | 'max'; autoFitUse2xIncrements?: boolean; autoFitYarnAutoScale?: boolean; autoEnableMmproj?: boolean }
   baseUrlOverride: { enabled: boolean; port: number; serveOnLocalNetwork: boolean; apiKeyEnabled: boolean; apiKey: string }
   samplingPresets: any[]
   paramViewMode: 'common' | 'full'  // feature 30
@@ -72,6 +72,15 @@ interface AppStore {
   // Task 5: 3-way preset mode. 'clear' = empty, 'quick' = LM Studio baselines,
   // 'fullauto' = Quick baselines + Ignore-Context-Override + Auto-Context-Fill ON.
   presetMode: 'clear' | 'quick' | 'fullauto'
+
+  // Bug fix (item 4): logs used to live in LogsView's local component state and
+  // the IPC listener was only registered while that view was mounted — so
+  // navigating away lost every log that arrived in the meantime (not just
+  // hid them). Logs now live in the global store (populated by a listener
+  // registered once at App root) so they persist for the life of the app,
+  // exactly like the user asked: "Logs must persist until the app is closed,
+  // or they are cleared manually."
+  logs: { id: string; name: string; stream: 'stdout' | 'stderr' | 'app'; line: string; ts: number }[]
 
   setCompactSidebarEnabled: (enabled: boolean) => void
   setView: (v: AppStore['view']) => void
@@ -119,6 +128,10 @@ interface AppStore {
   markSpeculationApplied: (templateId: string, applied: boolean) => void
   setGgufMetadata: (modelPath: string, meta: any) => void
   setGgufMetadataBulk: (cache: Record<string, any>) => void
+  // Item 3: wipes the renderer's in-memory metadata cache — the "Reextract
+  // models' data" button calls this right after clearing the persisted
+  // main-process cache, so nothing stale lingers in either place.
+  clearGgufMetadataAll: () => void
   setMetadataExtraction: (modelPath: string, name: string, status: 'extracting' | 'done' | 'error') => void
   clearMetadataExtraction: (modelPath: string) => void
   setVramInfo: (info: any) => void
@@ -129,6 +142,11 @@ interface AppStore {
   setParamViewMode: (mode: 'common' | 'full') => void
   setQuickBaselineActive: (active: boolean) => void
   setPresetMode: (mode: 'clear' | 'quick' | 'fullauto') => void
+  // Bug fix (item 4): global log actions — appendLog is called by the App-root
+  // listener for every incoming server-log IPC event (so logs accumulate
+  // regardless of which tab is active); clearLogs is the manual "Clear" button.
+  appendLog: (entry: { id: string; name: string; stream: 'stdout' | 'stderr' | 'app'; line: string; ts: number }) => void
+  clearLogs: () => void
 }
 
 export const useStore = create<AppStore>((set) => ({
@@ -157,12 +175,13 @@ export const useStore = create<AppStore>((set) => ({
   metadataExtractions: {},
   vramInfo: null,
   systemRam: null,
-  modelDefaults: { autoFitEnabled: true, autoFitContextLength: 60000, guardrailMode: 'strict', customMaxSizeGB: 0, useCurrentMemState: false, moeOffloadStrategy: 'offload' },
+  modelDefaults: { autoFitEnabled: true, autoFitContextLength: 60000, guardrailMode: 'strict', customMaxSizeGB: 0, useCurrentMemState: false, moeOffloadStrategy: 'max' /* item 6: default to MAX+ForceMoEtoCPU */, autoEnableMmproj: true },
   baseUrlOverride: { enabled: true, port: 1234, serveOnLocalNetwork: false, apiKeyEnabled: false, apiKey: '' },
   samplingPresets: [],
   paramViewMode: 'common',
   quickBaselineActive: true,  // Fix 5: Quick settings is the default baseline
   presetMode: 'quick',        // Task 5: default to Quick (matches quickBaselineActive)
+  logs: [],
 
   setCompactSidebarEnabled: (enabled) => {
     localStorage.setItem('compactSidebar', String(enabled))
@@ -238,6 +257,7 @@ export const useStore = create<AppStore>((set) => ({
   })),
   setGgufMetadata: (modelPath, meta) => set((s) => ({ ggufMetadata: { ...s.ggufMetadata, [modelPath]: meta } })),
   setGgufMetadataBulk: (cache) => set((s) => ({ ggufMetadata: { ...cache, ...s.ggufMetadata } })),
+  clearGgufMetadataAll: () => set({ ggufMetadata: {} }),
   setMetadataExtraction: (modelPath, name, status) => set((s) => {
     if (status === 'done' || status === 'error') {
       // Auto-clear after done/error (the notification fades).
@@ -259,5 +279,14 @@ export const useStore = create<AppStore>((set) => ({
   setSamplingPresets: (presets) => set({ samplingPresets: presets }),
   setParamViewMode: (mode) => set({ paramViewMode: mode }),
   setQuickBaselineActive: (active) => set({ quickBaselineActive: active }),
-  setPresetMode: (mode) => set({ presetMode: mode, quickBaselineActive: mode !== 'clear' })
+  setPresetMode: (mode) => set({ presetMode: mode, quickBaselineActive: mode !== 'clear' }),
+  // Bug fix (item 4): cap at 10000 entries to avoid unbounded memory growth
+  // over a long-running session (LogsView still only shows the most recent
+  // ones by default via its own filter, but the cap lives here now since this
+  // is the single persistent source of truth for the whole app lifetime).
+  appendLog: (entry) => set((s) => {
+    const next = [...s.logs, entry]
+    return { logs: next.length > 10000 ? next.slice(-10000) : next }
+  }),
+  clearLogs: () => set({ logs: [] })
 }))
