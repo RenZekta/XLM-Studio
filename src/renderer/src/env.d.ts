@@ -114,13 +114,25 @@ interface LlamaCppApi {
 
   // CPU + speculation detection
   getCpuInfo: () => Promise<CpuInfo>
-  detectSpeculation: (modelPath: string) => Promise<{ mode: SpeculationMode; reason?: string; error?: string }>
+  detectSpeculation: (modelPath: string) => Promise<import('../../../shared/types').SpecDetectionResult>
 
   // GGUF metadata + VRAM + system RAM
   getGgufMetadata: (modelPath: string) => Promise<any>
   // Task 1: metadata cache
   getMetadataCache: () => Promise<Record<string, any>>
   clearMetadataCache: () => Promise<{ success: boolean; cleared: number }>
+  // Item 4: Monitoring tab.
+  perfGetActiveSessions: () => Promise<{ sessionId: string; templateId: string; templateName: string; startedAt: number }[]>
+  perfGetActiveSessionData: (templateId: string) => Promise<any>
+  perfGetSessionHistory: () => Promise<any[]>
+  perfGetSessionData: (sessionId: string) => Promise<any>
+  perfSetMaxSessions: (n: number) => Promise<{ success: boolean }>
+  perfExportSession: (sessionId: string) => Promise<{ success: boolean; path?: string; error?: string; canceled?: boolean }>
+  perfExportAllActive: () => Promise<{ success: boolean; path?: string; error?: string; canceled?: boolean }>
+  perfImportSession: () => Promise<{ success: boolean; imported?: number; error?: string; canceled?: boolean }>
+  onPerfDataPoint: (cb: (data: { templateId: string; type: 'gen' | 'prefill'; point: any }) => void) => void
+  onPerfSessionStarted: (cb: (data: { templateId: string; sessionId: string; startedAt: number }) => void) => void
+  onPerfSessionEnded: (cb: (data: { templateId: string; sessionId: string }) => void) => void
   onMetadataExtracting: (cb: (data: { modelPath: string; name: string; status: 'extracting' | 'done' | 'error' }) => void) => void
   removeMetadataExtractingListener: () => void
   onGgufMetadataUpdated: (cb: (data: { modelPath: string; meta: any }) => void) => void

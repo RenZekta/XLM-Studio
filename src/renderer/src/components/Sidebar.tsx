@@ -1,6 +1,6 @@
 import React from 'react'
 import { useStore } from '../store/useStore'
-import { LayoutGrid, Settings, FolderOpen, HardDrive, Search, Database, Terminal } from 'lucide-react'
+import { LayoutGrid, Settings, FolderOpen, HardDrive, Search, Database, Terminal, SlidersHorizontal, Activity } from 'lucide-react'
 import { StarIcon as StarShape } from '../utils/format'
 
 export default function Sidebar() {
@@ -146,6 +146,21 @@ export default function Sidebar() {
       >
         <Terminal size={16} />
         <span className="nav-item-text">Logs</span>
+      </button>
+      <button
+        className={`nav-item ${view === 'monitoring' ? 'active' : ''}`}
+        onClick={() => setView('monitoring')}
+      >
+        <Activity size={16} />
+        <span className="nav-item-text">Monitoring</span>
+      </button>
+      {/* Item 6: Overrides tab — positioned after Monitoring, per the plan. */}
+      <button
+        className={`nav-item ${view === 'overrides' ? 'active' : ''}`}
+        onClick={() => setView('overrides')}
+      >
+        <SlidersHorizontal size={16} />
+        <span className="nav-item-text">Overrides</span>
       </button>
       <button
         className={`nav-item ${view === 'settings' ? 'active' : ''}`}

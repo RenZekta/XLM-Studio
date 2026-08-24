@@ -30,7 +30,16 @@ export default function ModelCard({ card }: Props) {
     // Task 5: global override acts as a MINIMUM (floor), not a strict override.
     // When the override is enabled and not ignored, ensure ctx >= autoFitContextLength.
     if (!ignoreCtxOverride && modelDefaults?.autoFitEnabled) {
-      const minCtx = Math.max(2048, Number(modelDefaults.autoFitContextLength) || 32768)
+      // Bug fix: was `Math.max(2048, ... || 32768)` — a hard 2048 floor plus a
+      // `||` fallback that treats 0 as falsy. Both defeated the point of
+      // allowing 0 ("no minimum, defer to the template's/model's own
+      // context") — 0 would get silently promoted to 32768 by the `||`, and
+      // even a genuinely-set low value could never go below 2048. Use isNaN
+      // for the fallback and drop the hard floor entirely: 0 now means
+      // exactly what it should, no minimum at all (Math.max(base, 0) is a
+      // no-op, leaving `base` as whatever the template/model already gives).
+      const overrideVal = Number(modelDefaults.autoFitContextLength)
+      const minCtx = Math.max(0, isNaN(overrideVal) ? 32768 : overrideVal)
       base = Math.max(base, minCtx)
     }
     return base
@@ -41,6 +50,24 @@ export default function ModelCard({ card }: Props) {
   // Task 2.1/2.2: when both Ignore-Override + AutoFill (Maximum) are ON, the
   // hint changes to "*Auto/Max Context Fill".
   const bothAutoFillOn = ignoreCtxOverride && autoCtxFill !== 'off'
+
+  // Item 6: Overrides tab → "Parallel Inference" block. Mirrors the same
+  // "global override wins" shape as the AutoFit context override above, but
+  // --parallel is a hard override (not a floor) since there's no meaningful
+  // "minimum parallel sequences" concept — either the override applies, or
+  // the template's own value is used untouched.
+  //
+  // Item (this round): "Unified/Separate" replaces the old MoE-only scoping
+  // toggle — Unified applies ONE value to both Dense and MoE; Separate lets
+  // Dense and MoE have their own independent override values.
+  const meta = ggufMetadata[card.template.modelPath || '']
+  const isMoeModel = !!meta?.isMoe || (meta?.expertCount || 0) > 0
+  const parallelOverrideActive = !!modelDefaults?.parallelOverrideEnabled
+  const effectiveParallel = parallelOverrideActive
+    ? (modelDefaults.parallelInferenceMode === 'separate'
+        ? Math.max(1, Number(isMoeModel ? modelDefaults.parallelOverrideValueMoe : modelDefaults.parallelOverrideValueDense) || 4)
+        : Math.max(1, Number(modelDefaults.parallelOverrideValue) || 4))
+    : null  // null = don't touch, use whatever's in the template's own args
   const [showMenu, setShowMenu] = useState(false)
   const menuRef = useRef<HTMLDivElement>(null)
   const isRunning = card.status === 'running'
@@ -133,6 +160,19 @@ export default function ModelCard({ card }: Props) {
       setFitArg('on')
     } else {
       setCtxArg(effectiveCtx)
+    }
+    // Item 6: Parallel Inference override — hard-overrides --parallel (not a
+    // floor like the context override; there's no "minimum parallel
+    // sequences" that makes sense), scoped to MoE-only unless that scoping
+    // is turned off in Overrides.
+    if (effectiveParallel !== null) {
+      const idx = args.indexOf('--parallel')
+      if (idx !== -1 && idx + 1 < args.length) args[idx + 1] = String(effectiveParallel)
+      else {
+        const shortIdx = args.indexOf('-np')
+        if (shortIdx !== -1 && shortIdx + 1 < args.length) args[shortIdx + 1] = String(effectiveParallel)
+        else args.push('--parallel', String(effectiveParallel))
+      }
     }
     // If not set, llama-server uses the model's native context length (ctx=0).
     if (launchMode === 'api' && !args.includes('--no-webui')) {

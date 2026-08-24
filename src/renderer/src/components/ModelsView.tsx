@@ -3,7 +3,7 @@ import { useStore } from '../store/useStore'
 import {
   HardDrive, Download, Trash, Pause, Play, X, Link, FolderOpen,
   Pencil, Check, AlertCircle, Loader2, RefreshCw, Search, FilePlus,
-  ChevronRight, Eye, Layers
+  ChevronRight, Eye, Layers, Zap
 } from 'lucide-react'
 import { formatBytes, formatSpeed } from '../utils/format'
 import type { ModelGroup } from '../../../shared/types'
@@ -288,6 +288,22 @@ function ModelGroupCard({ group, onDeleted }: { group: ModelGroup; onDeleted: ()
               </div>
             </div>
           )}
+          {/* Item 2: speculative-decoding sidecar files (draft/EAGLE3/DSpark2/
+              DFlash2 heads) — same non-interactive treatment as mmproj above:
+              shown here for visibility, but never selectable as a Model File
+              (they're excluded from `group.models` entirely on the backend). */}
+          {group.specDecodeSidecars?.map(s => (
+            <div key={s.path} className="models-file-row" style={{ opacity: 0.7 }} title={`${s.label} (Tier ${s.tier}) speculative-decoding sidecar — detected alongside this folder's model(s), not listed as a separate model.`}>
+              <div className="models-file-icon"><Zap size={16} /></div>
+              <div className="models-file-meta">
+                <span className="models-file-name" style={{ color: '#3b82f6' }}>{s.name}</span>
+                <div className="model-size-breakdown">
+                  <span className="mmproj-chip" style={{ background: 'rgba(59,130,246,.12)', color: '#3b82f6' }}>T{s.tier} · {s.label} · {formatBytes(s.size)}</span>
+                  <span style={{ fontSize: 10 }}>speculative decoding sidecar, auto-detected</span>
+                </div>
+              </div>
+            </div>
+          ))}
         </div>
       )}
     </div>

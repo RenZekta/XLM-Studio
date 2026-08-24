@@ -11,10 +11,11 @@ import { app } from 'electron'
 import extract from 'extract-zip'
 import net from 'net'
 import type {
-  ModelGroup, ModelEntry, MmprojFile, BackendVersion,
+  ModelGroup, ModelEntry, MmprojFile, SpecDecodeSidecarFile, BackendVersion,
   CommandsSchema, TrackedBackend, TrackedBackendRelease,
   ThemePref, ReleaseInfo, BaseUrlOverride
 } from '../shared/types'
+import { initPerfMonitor, registerPerfHandlers, startTracking, stopTracking, stopAllTracking } from './perfMonitor'
 
 const APP_ROOT = app.isPackaged ? join(app.getPath('userData')) : join(process.cwd())
 const MODELS_DIR    = join(APP_ROOT, 'models')
@@ -34,7 +35,7 @@ const METADATA_CACHE_PATH = join(APP_ROOT, 'metadata-cache.json')
 // whenever a field is added to the extracted metadata shape, and the cache
 // read below will treat mismatched/missing-version entries as stale and
 // transparently re-extract instead of serving the incomplete old object.
-const METADATA_SCHEMA_VERSION = 3
+const METADATA_SCHEMA_VERSION = 4
 for (const dir of [MODELS_DIR, TEMPLATES_DIR, BACKEND_DIR]) {
   if (!existsSync(dir)) mkdirSync(dir, { recursive: true })
 }
@@ -95,7 +96,7 @@ interface AppSettings {
   mainBackendFolder: string | null
   theme: ThemePref
   trackedBackends: TrackedBackend[]
-  modelDefaults?: { autoFitEnabled: boolean; autoFitContextLength: number; guardrailMode: string; customMaxSizeGB: number; useCurrentMemState?: boolean; moeOffloadStrategy?: 'offload' | 'max'; autoFitUse2xIncrements?: boolean; autoFitYarnAutoScale?: boolean; autoEnableMmproj?: boolean }
+  modelDefaults?: { autoFitEnabled: boolean; autoFitContextLength: number; guardrailMode: string; customMaxSizeGB: number; useCurrentMemState?: boolean; moeOffloadStrategy?: 'offload' | 'max'; autoFitUse2xIncrements?: boolean; autoFitYarnAutoScale?: boolean; autoEnableMmproj?: boolean; cpuThreadsOverrideEnabled?: boolean; cpuThreadsOverridePercent?: number; parallelOverrideEnabled?: boolean; parallelInferenceMode?: 'unified' | 'separate'; parallelOverrideValue?: number; parallelOverrideValueDense?: number; parallelOverrideValueMoe?: number; perfMaxSessions?: number }
   baseUrlOverride?: BaseUrlOverride
   samplingPresets?: any[]
   starredPresetId?: string
@@ -155,7 +156,7 @@ const DEFAULT_SETTINGS: AppSettings = {
   mainBackendFolder: null,
   theme: 'system',
   trackedBackends: DEFAULT_TRACKED,
-  modelDefaults: { autoFitEnabled: true, autoFitContextLength: 60000, guardrailMode: 'strict', customMaxSizeGB: 0, useCurrentMemState: false, moeOffloadStrategy: 'max' /* item 6: default to MAX+ForceMoEtoCPU */, autoFitUse2xIncrements: false, autoFitYarnAutoScale: false, autoEnableMmproj: true },
+  modelDefaults: { autoFitEnabled: true, autoFitContextLength: 60000, guardrailMode: 'strict', customMaxSizeGB: 0, useCurrentMemState: false, moeOffloadStrategy: 'max' /* item 6: default to MAX+ForceMoEtoCPU */, autoFitUse2xIncrements: false, autoFitYarnAutoScale: false, autoEnableMmproj: true, cpuThreadsOverrideEnabled: false, cpuThreadsOverridePercent: 100, parallelOverrideEnabled: false, parallelInferenceMode: 'unified', parallelOverrideValue: 4, parallelOverrideValueDense: 4, parallelOverrideValueMoe: 4, perfMaxSessions: 20 },
   baseUrlOverride: { ...DEFAULT_BASE_URL_OVERRIDE },
   samplingPresets: [],
   starredPresetId: 'lm-studio'
@@ -199,7 +200,18 @@ async function loadSettings(): Promise<AppSettings> {
         autoFitYarnAutoScale: data.modelDefaults?.autoFitYarnAutoScale ?? false,
         // New Settings toggle: "Enable Multimodal Projector automatically in
         // new Template if mmproj was detected" — ON by default.
-        autoEnableMmproj: data.modelDefaults?.autoEnableMmproj ?? true
+        autoEnableMmproj: data.modelDefaults?.autoEnableMmproj ?? true,
+        // New: "Recommended CPU Threads override" — off by default (uses the
+        // built-in 75%-of-physical-cores default), value 100% when enabled.
+        cpuThreadsOverrideEnabled: data.modelDefaults?.cpuThreadsOverrideEnabled ?? false,
+        cpuThreadsOverridePercent: data.modelDefaults?.cpuThreadsOverridePercent ?? 100,
+        // New: Overrides tab → "Parallel Inference" block.
+        parallelOverrideEnabled: data.modelDefaults?.parallelOverrideEnabled ?? false,
+        parallelInferenceMode: (data.modelDefaults?.parallelInferenceMode === 'separate') ? 'separate' : 'unified',
+        parallelOverrideValue: data.modelDefaults?.parallelOverrideValue ?? 4,
+        parallelOverrideValueDense: data.modelDefaults?.parallelOverrideValueDense ?? 4,
+        parallelOverrideValueMoe: data.modelDefaults?.parallelOverrideValueMoe ?? 4,
+        perfMaxSessions: data.modelDefaults?.perfMaxSessions ?? 20
       },
       baseUrlOverride: migrateBaseUrlOverride(data.baseUrlOverride),
       samplingPresets: Array.isArray(data.samplingPresets) ? data.samplingPresets : [],
@@ -345,6 +357,51 @@ async function waitForPortFree(port: number, timeoutMs = 8000, intervalMs = 100)
 const MODEL_EXTS = ['.gguf', '.bin', '.ggml']
 const MMPROJ_REGEX = /mmproj/i
 
+// Item 2 (Speculative Decoding rework): the full tier system, per the user's
+// comparison table. Higher tier = better/newer method, and a higher tier
+// always wins when multiple are detected (T5 > T1, T2 > T1, etc.) — see
+// classifySpecTier's ordering below, which checks the highest tiers FIRST so
+// a compound filename like "Qwen-DFlash2-mtp-draft.gguf" (containing both a
+// T5 and a T2 signal) is correctly classified as T5, not accidentally
+// matched by the more generic "draft"/"mtp" substring first.
+export type SpecMethod = 'off' | 'native-mtp' | 'draft-model' | 'eagle3' | 'dspark2' | 'dflash2'
+export interface SpecTierDef { tier: number; method: SpecMethod; label: string; flag: string | null; draftMax: number; draftMin: number; draftPMin: number }
+export const SPEC_TIER_DEFS: SpecTierDef[] = [
+  { tier: 0, method: 'off', label: 'Off', flag: null, draftMax: 0, draftMin: 0, draftPMin: 0 },
+  { tier: 1, method: 'native-mtp', label: 'Native MTP', flag: 'draft-mtp', draftMax: 3, draftMin: 0, draftPMin: 0.75 },
+  { tier: 2, method: 'draft-model', label: 'Draft Model', flag: 'draft-simple', draftMax: 5, draftMin: 0, draftPMin: 0.00 },
+  { tier: 3, method: 'eagle3', label: 'EAGLE3', flag: 'draft-eagle3', draftMax: 4, draftMin: 0, draftPMin: 0.50 },
+  { tier: 4, method: 'dspark2', label: 'DSpark2', flag: 'draft-dspark', draftMax: 6, draftMin: 0, draftPMin: 0.75 },
+  { tier: 5, method: 'dflash2', label: 'DFlash2', flag: 'draft-dflash', draftMax: 5, draftMin: 0, draftPMin: 0.80 }
+]
+
+// Classify a SIDECAR filename by its highest-tier keyword match. Checked in
+// descending tier order (5 down to 2) so a compound name matches its
+// highest-tier signal first, per the user's explicit example.
+function classifySidecarFilename(name: string): SpecTierDef | null {
+  const lower = name.toLowerCase()
+  if (/dflash2|dflash/.test(lower)) return SPEC_TIER_DEFS[5]
+  if (/dspark2|dspark/.test(lower)) return SPEC_TIER_DEFS[4]
+  if (/eagle/.test(lower)) return SPEC_TIER_DEFS[3]
+  if (/draft|mtp/.test(lower)) return SPEC_TIER_DEFS[2]
+  return null
+}
+// Bug fix (item 3): a filename keyword match alone isn't enough — a genuine
+// full-size model can legitimately have "MTP" in its OWN name to advertise
+// that it has a built-in Native MTP head (e.g. "Qwen3.6-35B-A3B-MTP.gguf"),
+// and without a size check that model would get misclassified as a T2
+// "Draft Model" SIDECAR for every other model in the same folder. Real
+// sidecar draft/speculative heads are lightweight — a small fraction of a
+// base model's size — so only trust the filename match when the file is
+// also small enough to plausibly BE a sidecar, not a full model.
+const SIDECAR_MAX_SIZE_MB = 4096  // 4 GB — generous upper bound for a draft/speculative head
+function isSpecDecodeSidecarFile(name: string, sizeBytes: number): boolean {
+  const lower = name.toLowerCase()
+  if (!MODEL_EXTS.includes(extname(lower))) return false
+  if (classifySidecarFilename(name) === null) return false
+  return sizeBytes <= SIDECAR_MAX_SIZE_MB * 1024 * 1024
+}
+
 // Feature 22: substring-based scan — detect "mmproj" ANYWHERE in the filename,
 // not just at the beginning. Allows files like "modelname-mmproj-BF16.gguf".
 function isMmprojFile(name: string): boolean {
@@ -355,10 +412,15 @@ function isMmprojFile(name: string): boolean {
 function isModelFile(name: string): boolean {
   const lower = name.toLowerCase()
   if (lower.endsWith('.tmp')) return false
+  // Bug fix (item 3): no longer excludes spec-decode sidecars here — that
+  // now needs the file's SIZE too (see isSpecDecodeSidecarFile above), which
+  // isn't available from a filename alone. scanModelFolder below does the
+  // full name+size classification itself.
   return MODEL_EXTS.includes(extname(lower)) && !isMmprojFile(lower)
 }
 
-// Scan a single folder (non-recursive): collect model files + mmproj file.
+// Scan a single folder (non-recursive): collect model files + mmproj file +
+// speculative-decoding sidecar files.
 async function scanModelFolder(folderPath: string, external: boolean): Promise<ModelGroup | null> {
   let entries: import('fs').Dirent[]
   try {
@@ -368,22 +430,34 @@ async function scanModelFolder(folderPath: string, external: boolean): Promise<M
   }
   const models: ModelEntry[] = []
   let mmproj: MmprojFile | null = null
+  // Item 2/3: sidecar speculative-decoding files — kept SEPARATE from
+  // `models` (so the Template Model File dropdown never shows them, per
+  // item 4) but still returned to the renderer (so the Models tab CAN show
+  // them, non-interactively, inside their folder — same treatment as
+  // mmproj, per item 2).
+  const specDecodeSidecars: SpecDecodeSidecarFile[] = []
   for (const e of entries) {
     if (!e.isFile()) continue
-    if (isModelFile(e.name)) {
-      try {
-        const st = await fsPromises.stat(join(folderPath, e.name))
-        models.push({ name: e.name, path: join(folderPath, e.name), size: st.size })
-      } catch {}
-    } else if (isMmprojFile(e.name)) {
+    if (isMmprojFile(e.name)) {
       try {
         const st = await fsPromises.stat(join(folderPath, e.name))
         // If multiple mmproj files exist, keep the first one.
         if (!mmproj) mmproj = { name: e.name, path: join(folderPath, e.name), size: st.size }
       } catch {}
+      continue
     }
+    if (!isModelFile(e.name)) continue
+    try {
+      const st = await fsPromises.stat(join(folderPath, e.name))
+      const tierDef = classifySidecarFilename(e.name)
+      if (tierDef && isSpecDecodeSidecarFile(e.name, st.size)) {
+        specDecodeSidecars.push({ name: e.name, path: join(folderPath, e.name), size: st.size, tier: tierDef.tier, method: tierDef.method, label: tierDef.label })
+      } else {
+        models.push({ name: e.name, path: join(folderPath, e.name), size: st.size })
+      }
+    } catch {}
   }
-  if (models.length === 0 && !mmproj) return null
+  if (models.length === 0 && !mmproj && specDecodeSidecars.length === 0) return null
   const modelSize = models.reduce((a, m) => a + m.size, 0)
   const mmprojSize = mmproj ? mmproj.size : 0
   return {
@@ -392,6 +466,7 @@ async function scanModelFolder(folderPath: string, external: boolean): Promise<M
     external,
     models,
     mmproj,
+    specDecodeSidecars,
     totalSize: modelSize + mmprojSize,
     modelSize
   }
@@ -418,14 +493,17 @@ async function scanModelRoot(rootDir: string, rootExternal: boolean): Promise<Mo
       // using the storage folder name, so it still appears in the list.
       try {
         const st = await fsPromises.stat(join(rootDir, e.name))
+        const tierDef = classifySidecarFilename(e.name)
+        const isSidecar = tierDef && isSpecDecodeSidecarFile(e.name, st.size)
         groups.push({
           folder: basename(rootDir),
           folderPath: rootDir,
           external: rootExternal,
-          models: [{ name: e.name, path: join(rootDir, e.name), size: st.size }],
+          models: isSidecar ? [] : [{ name: e.name, path: join(rootDir, e.name), size: st.size }],
           mmproj: null,
+          specDecodeSidecars: isSidecar && tierDef ? [{ name: e.name, path: join(rootDir, e.name), size: st.size, tier: tierDef.tier, method: tierDef.method, label: tierDef.label }] : [],
           totalSize: st.size,
-          modelSize: st.size
+          modelSize: isSidecar ? 0 : st.size
         })
       } catch {}
     }
@@ -611,18 +689,18 @@ const GGUF_FTYPE_NAMES: Record<number, string> = {
   32: 'BF16', 33: 'Q4_0_4_4', 34: 'Q4_0_4_8', 35: 'Q4_0_8_8',
   36: 'TQ1_0', 37: 'TQ2_0', 38: 'IQ2_XXS_NL'
 }
-// Bug fix (item 2): the internal `general.file_type` GGUF metadata field is a
-// SINGLE enum representing whatever the converter considered the "dominant"
-// quant type — but Unsloth's "Dynamic"/UD-* quants deliberately mix bit-
-// widths per-tensor (important layers upcast for quality), so that single
-// internal field can legitimately disagree with the quant label in the
-// filename/on the model card (e.g. a file named "...-UD-Q3_K_XL.gguf" can
-// have general.file_type pointing at Q4_K_S, if that happens to be the most
-// numerous individual tensor type even though "Q3_K_XL" is the correct
-// overall classification). The browser/HF file listing shows the filename-
-// derived name, which is what users actually recognize — so parse that as
-// the PREFERRED source, falling back to the internal metadata field only
-// when the filename doesn't contain a recognizable quant token.
+// Bug fix (item 2, corrected): initial hypothesis was that Unsloth's Dynamic/
+// UD-* quants have an internal general.file_type that disagrees with their
+// own filename labeling, and that the filename was therefore the more useful
+// thing to show. That was WRONG in the way that matters most: llama-server
+// itself reads and reports the INTERNAL general.file_type when it loads the
+// model — that's the actual ground truth for what's running, not the
+// filename. Preferring the filename was actively counterproductive: it made
+// our display disagree with llama-server's own logs, which is far more
+// confusing than disagreeing with a marketing label on a download page.
+// Reverted to prefer the internal metadata value; the filename-derived label
+// (when different) is now shown as clearly-labeled supplementary info, not
+// used to override the authoritative source.
 const FILENAME_QUANT_PATTERN = /(?:^|[-_.])((?:IQ|TQ)[1-4]_[A-Z0-9]+|Q[2-8]_[A-Z0-9]+(?:_[A-Z0-9]+)?|Q[4-8]_[01]|BF16|F16|F32)(?:[-_.]|$)/i
 export function parseQuantFromFilename(filePath: string): string | null {
   const base = filePath.split(/[\\/]/).pop() || filePath
@@ -1025,6 +1103,10 @@ export async function cleanupAllProcesses(): Promise<void> {
   if (runningProcesses.size === 0) return
   const entries = Array.from(runningProcesses.entries())
   runningProcesses.clear()
+  // Item 4 (Monitoring): stop polling timers + archive any still-active
+  // perf sessions before the processes actually die, so their data gets
+  // persisted to history instead of just vanishing.
+  stopAllTracking()
   await Promise.all(entries.map(([_id, e]) => killProcessTree(e.proc).catch(() => {})))
 }
 
@@ -1038,6 +1120,29 @@ export function getRunningProcessCount(): number {
 // IPC handlers
 // ==========================================================================
 export function registerIpcHandlers(): void {
+  // Item 4 (Monitoring): read a template's CURRENT name directly from disk,
+  // by id — used so session tracking always reflects live renames rather
+  // than a name snapshotted at session-start (same pattern as the Logs
+  // rename fix — see LogsView.tsx's liveName()).
+  function getLiveTemplateName(templateId: string): string | undefined {
+    try {
+      const fp = join(TEMPLATES_DIR, `${templateId}.json`)
+      if (!existsSync(fp)) return undefined
+      const t = JSON.parse(readFileSync(fp, 'utf-8'))
+      return t?.name
+    } catch { return undefined }
+  }
+  initPerfMonitor(APP_ROOT, {
+    getLiveTemplateName,
+    getMaxSessions: () => {
+      try {
+        const s = JSON.parse(readFileSync(SETTINGS_PATH, 'utf-8'))
+        const n = Number(s?.modelDefaults?.perfMaxSessions)
+        return isNaN(n) || n < 1 ? 20 : n
+      } catch { return 20 }
+    }
+  })
+  registerPerfHandlers()
 
   // ----- Models: smart grouped listing -----
   ipcMain.handle('list-models', async () => {
@@ -1552,6 +1657,11 @@ export function registerIpcHandlers(): void {
         if (idx === -1 && sIdx === -1) finalArgs.push('--ctx-size', '0')
       }
     }
+    // Item 4 (Monitoring tab): force-enable llama-server's --metrics endpoint
+    // so performance data can be polled, regardless of whether the user has
+    // it in their own template args. Doesn't change behavior other than
+    // exposing the /metrics endpoint — safe to always add.
+    if (!finalArgs.includes('--metrics')) finalArgs.push('--metrics')
     // Fix (override): Apply "Serve on local network" (--host 0.0.0.0) and
     // "API Key" (--api-key <key>) from the Base URL Override settings.
     {
@@ -1691,8 +1801,11 @@ export function registerIpcHandlers(): void {
         _e.sender.send('model-error', { id: opts.id, error: msg })
       })
       runningProcesses.set(opts.id, { proc, port: finalPort })
+      // Item 4 (Monitoring): begin polling this instance's /metrics endpoint.
+      startTracking(opts.id, finalPort, opts.name)
       proc.on('exit', () => {
         runningProcesses.delete(opts.id)
+        stopTracking(opts.id)
         const wasReady = serverReadyFlags.get(opts.id)
         serverReadyFlags.delete(opts.id)
         modelLoadingFlags.delete(opts.id)
@@ -2139,56 +2252,85 @@ export function registerIpcHandlers(): void {
     }
   })
 
-  // ----- GGUF speculation auto-detection -----
-  // Scans the first ~8 MB of a .gguf file for tensor-name / metadata-key strings
-  // that indicate native Multi-Token Prediction (MTP) or dspark draftless
-  // acceleration architectures. Returns a recommended SpeculationMode.
+  // ----- GGUF speculation auto-detection (Item 2: full tier rework) -----
+  // Returns the HIGHEST-tier speculative decoding method detected for a
+  // model, considering both:
+  //  (a) internal metadata (Tier 1, Native MTP — embedded in the model's own
+  //      GGUF, detected the same way as before: nextn tensor/metadata scan)
+  //  (b) sidecar files (Tiers 2-5 — separate .gguf files in the SAME folder
+  //      as the base model, classified by filename keyword per the tier
+  //      table), the same general pattern as mmproj sidecar detection.
+  // Also returns every OTHER candidate found (not just the winner), so the
+  // UI can offer manual selection among them — e.g. switching to a lower-
+  // tier Draft Model even when a higher-tier method was auto-selected, or
+  // choosing between multiple same-tier sidecar files.
   ipcMain.handle('detect-speculation', async (_e, modelPath: string) => {
     try {
-      if (!modelPath || !existsSync(modelPath)) return { mode: 'off' as const }
-      const fd = await fsPromises.open(modelPath, 'r')
-      const buf = Buffer.alloc(32 * 1024 * 1024) // 32 MB scan window — bumped from
-      // 8MB (item 5 investigation): large models (many tensors, big vocab)
-      // can have GGUF metadata/tensor-info headers exceeding 8MB, pushing the
-      // nextn/mtp tensor names past the old cutoff.
-      const { bytesRead } = await fd.read(buf, 0, buf.length, 0)
-      await fd.close()
-      const slice = buf.subarray(0, bytesRead).toString('latin1')
-      const lower = slice.toLowerCase()
-      // dspark detection — check first (more specific).
-      if (lower.includes('dspark') || lower.includes('draft-dspark')) {
-        return { mode: 'dspark' as const, reason: 'dspark tensors detected in model metadata' }
+      if (!modelPath || !existsSync(modelPath)) return { tier: 0, method: 'off' as const, candidates: [] }
+
+      // (a) Internal MTP scan — same nextn-tensor logic as before.
+      let internalMtpFound = false
+      let internalReason = ''
+      {
+        const fd = await fsPromises.open(modelPath, 'r')
+        const buf = Buffer.alloc(32 * 1024 * 1024) // 32 MB scan window
+        const { bytesRead } = await fd.read(buf, 0, buf.length, 0)
+        await fd.close()
+        const lower = buf.subarray(0, bytesRead).toString('latin1').toLowerCase()
+        // Bug fix history: the canonical llama.cpp naming convention for MTP
+        // is NOT the literal substring "mtp" — it's the
+        // `{arch}.nextn_predict_layers` GGUF metadata key, and tensor names
+        // use a "nextn" prefix (e.g. "blk.N.nextn.eh_proj"). Check that
+        // FIRST since it's the authoritative signal; keep "mtp" as a
+        // fallback for non-standard conversions.
+        if (
+          lower.includes('nextn_predict_layers') || lower.includes('.nextn.') ||
+          lower.includes('nextn.eh_proj') || lower.includes('nextn.enorm') ||
+          lower.includes('nextn.pre_projection') || lower.includes('mtp') ||
+          lower.includes('multi_token_prediction') || lower.includes('draft-mtp')
+        ) {
+          internalMtpFound = true
+          internalReason = 'MTP (Multi-Token Prediction / nextn) tensors detected in model metadata'
+        }
       }
-      // MTP detection.
-      // Bug fix (item 5): the canonical llama.cpp naming convention for MTP is
-      // NOT the literal substring "mtp" — it's the `{arch}.nextn_predict_layers`
-      // GGUF metadata key, and tensor names use a "nextn" prefix (e.g.
-      // "blk.N.nextn.eh_proj", "blk.N.nextn.enorm", "nextn.pre_projection").
-      // Real-world MTP GGUFs (Qwen3.5/3.6/3.8, DeepSeek V3/R1, GLM 4.5/4.6,
-      // Gemma 4) — including Unsloth's quantizations, which is what the user
-      // who reported this was using — carry these "nextn"-named tensors, NOT
-      // anything containing the literal string "mtp". The old check below
-      // (which only looked for "mtp") consequently missed every one of them,
-      // which is why detection kept silently failing even after every other
-      // fix to the React-side application logic. Check for "nextn" (and its
-      // associated metadata key / sub-tensor names) FIRST since it's the
-      // authoritative, standardized signal; keep the older "mtp" substring
-      // checks as a fallback for any non-standard/older conversions.
-      if (
-        lower.includes('nextn_predict_layers') ||
-        lower.includes('.nextn.') ||
-        lower.includes('nextn.eh_proj') ||
-        lower.includes('nextn.enorm') ||
-        lower.includes('nextn.pre_projection') ||
-        lower.includes('mtp') ||
-        lower.includes('multi_token_prediction') ||
-        lower.includes('draft-mtp')
-      ) {
-        return { mode: 'mtp' as const, reason: 'MTP (Multi-Token Prediction / nextn) tensors detected in model metadata' }
+
+      // (b) Sidecar scan — every OTHER .gguf-family file in the same folder,
+      // classified by filename. Collect every match (not just the best) so
+      // the UI can offer manual selection among all of them.
+      const folder = dirname(modelPath)
+      const baseName = basename(modelPath)
+      const sidecarCandidates: { tier: number; method: SpecMethod; label: string; path: string; name: string }[] = []
+      try {
+        const entries = await fsPromises.readdir(folder, { withFileTypes: true })
+        for (const e of entries) {
+          if (!e.isFile() || e.name === baseName) continue
+          const cls = classifySidecarFilename(e.name)
+          if (!cls) continue
+          try {
+            const st = await fsPromises.stat(join(folder, e.name))
+            if (!isSpecDecodeSidecarFile(e.name, st.size)) continue
+            sidecarCandidates.push({ tier: cls.tier, method: cls.method, label: cls.label, path: join(folder, e.name), name: e.name })
+          } catch {}
+        }
+      } catch {}
+      sidecarCandidates.sort((a, b) => b.tier - a.tier)
+
+      const candidates: { tier: number; method: SpecMethod; label: string; path: string | null; name: string | null; reason: string }[] = []
+      if (internalMtpFound) {
+        candidates.push({ tier: 1, method: 'native-mtp', label: 'Native MTP', path: null, name: null, reason: internalReason })
       }
-      return { mode: 'off' as const }
+      for (const c of sidecarCandidates) {
+        candidates.push({ tier: c.tier, method: c.method, label: c.label, path: c.path, name: c.name, reason: `${c.label} sidecar detected: ${c.name}` })
+      }
+
+      if (candidates.length === 0) return { tier: 0, method: 'off' as const, candidates: [] }
+      // Winner = highest tier (ties broken by whichever was found first —
+      // internal MTP, if tied with a sidecar somehow, since tiers are
+      // distinct integers this practically never ties in normal use).
+      const winner = [...candidates].sort((a, b) => b.tier - a.tier)[0]
+      return { tier: winner.tier, method: winner.method, path: winner.path, reason: winner.reason, candidates }
     } catch (err) {
-      return { mode: 'off' as const, error: String(err) }
+      return { tier: 0, method: 'off' as const, candidates: [], error: String(err) }
     }
   })
 
@@ -2225,7 +2367,7 @@ export function registerIpcHandlers(): void {
       headCount: null, headCountKv: null, keyLength: null, valueLength: null,
       slidingWindow: null, kvLoraRank: null, qkRopeHeadDim: null,
       expertUsedCount: null, expertSharedCount: null,
-      fileType: null, fileTypeValue: null, fileTypeInternal: null, vocabSize: null, fullAttentionInterval: null
+      fileType: null, fileTypeValue: null, fileTypeInternal: null, fileTypeFilenameHint: null, vocabSize: null, fullAttentionInterval: null
     }
     try {
       if (!modelPath || !existsSync(modelPath)) return { ...result, error: 'File not found' }
@@ -2288,10 +2430,13 @@ export function registerIpcHandlers(): void {
           const ftVal = resolve('file_type')
           result.fileTypeValue = ftVal
           result.fileTypeInternal = ftVal !== null ? ggufFileTypeName(ftVal) : null
-          // Bug fix (item 2): prefer the filename-derived quant label — see
-          // parseQuantFromFilename comment for why the internal metadata
-          // field can disagree with it for Unsloth Dynamic/mixed quants.
-          result.fileType = parseQuantFromFilename(modelPath) || result.fileTypeInternal
+          result.fileTypeFilenameHint = parseQuantFromFilename(modelPath)
+          // Bug fix (item 2, corrected): fileType now PRIMARILY reflects the
+          // internal metadata (matches what llama-server itself reports when
+          // loading the model) — see parseQuantFromFilename comment above.
+          // The filename-derived label is only used as a fallback when the
+          // internal field is missing entirely.
+          result.fileType = result.fileTypeInternal || result.fileTypeFilenameHint
           // vocab size: count of tokenizer.ggml.tokens array (if present).
           const vocabArrLen = (() => {
             // The native tool may print "tokenizer.ggml.tokens" as a count or array.
@@ -2521,9 +2666,13 @@ export function registerIpcHandlers(): void {
         result.fileTypeValue = ftv
         if (ftv !== null) (result as any).fileTypeInternal = ggufFileTypeName(ftv)
       }
-      // Bug fix (item 2): same filename-preference as the native-tool path above.
+      // Bug fix (item 2, corrected): prefer internal metadata (matches
+      // llama-server's own reporting) — see native-tool path above.
+      if (!(result as any).fileTypeFilenameHint) {
+        (result as any).fileTypeFilenameHint = parseQuantFromFilename(modelPath)
+      }
       if (!result.fileType) {
-        result.fileType = parseQuantFromFilename(modelPath) || (result as any).fileTypeInternal || null
+        result.fileType = (result as any).fileTypeInternal || (result as any).fileTypeFilenameHint || null
       }
       // vocab size: count of tokenizer.ggml.tokens array (the JS parser stores
       // arrays as [] so we can't get the length here; best-effort via vocab_size key).
@@ -2860,14 +3009,31 @@ export function registerIpcHandlers(): void {
     s.modelDefaults = {
       autoFitEnabled: !!defaults.autoFitEnabled,
       // Item 5: bumped ceiling from 200 000 → 2 097 152 (2M context era models).
-      autoFitContextLength: Math.max(2048, Math.min(2097152, Number(defaults.autoFitContextLength) || 60000)),
+      // Item: allow 0 (no minimum — defers entirely to the template's own
+      // context). Use isNaN, not `|| 60000`, for the fallback — `0 || 60000`
+      // would silently discard a deliberately-set 0 (falsy in JS).
+      autoFitContextLength: (() => {
+        const n = Number(defaults.autoFitContextLength)
+        return Math.max(0, Math.min(2097152, isNaN(n) ? 60000 : n))
+      })(),
       guardrailMode: (['off','relaxed','balanced','strict','custom'].includes(defaults.guardrailMode) ? defaults.guardrailMode : 'strict'),
       customMaxSizeGB: Math.max(0, Number(defaults.customMaxSizeGB) || 0),
       useCurrentMemState: !!defaults.useCurrentMemState,
       moeOffloadStrategy: (defaults.moeOffloadStrategy === 'max' ? 'max' : 'offload'),
       autoFitUse2xIncrements: !!defaults.autoFitUse2xIncrements,
       autoFitYarnAutoScale: !!defaults.autoFitYarnAutoScale,
-      autoEnableMmproj: defaults.autoEnableMmproj !== undefined ? !!defaults.autoEnableMmproj : true
+      autoEnableMmproj: defaults.autoEnableMmproj !== undefined ? !!defaults.autoEnableMmproj : true,
+      cpuThreadsOverrideEnabled: !!defaults.cpuThreadsOverrideEnabled,
+      // Clamp 0-100, and snap to a whole-core-equivalent isn't possible here
+      // (this handler doesn't know physicalCores) — the renderer already
+      // snaps before calling this, so just clamp defensively.
+      cpuThreadsOverridePercent: Math.max(0, Math.min(100, Number(defaults.cpuThreadsOverridePercent) || 100)),
+      parallelOverrideEnabled: !!defaults.parallelOverrideEnabled,
+      parallelInferenceMode: (defaults.parallelInferenceMode === 'separate') ? 'separate' : 'unified',
+      parallelOverrideValue: Math.max(1, Math.min(256, Number(defaults.parallelOverrideValue) || 4)),
+      parallelOverrideValueDense: Math.max(1, Math.min(256, Number(defaults.parallelOverrideValueDense) || 4)),
+      parallelOverrideValueMoe: Math.max(1, Math.min(256, Number(defaults.parallelOverrideValueMoe) || 4)),
+      perfMaxSessions: Math.max(1, Math.min(500, Number(defaults.perfMaxSessions) || 20))
     }
     await saveSettings(s)
     return { success: true }

@@ -435,6 +435,10 @@ input[type="number"] {
   margin-top: 12px;
 }
 .cmd-preview .arg { color: #86efac; }
+/* Item 5: stacked (vertical) preview reuses .cmd-preview's look but renders
+   as a <pre> tag (plain text, not spans) — reset the browser's default <pre>
+   margin/font so it matches the continuous view exactly. */
+.cmd-preview-stacked { margin: 12px 0 0 0; font-family: var(--font-mono); }
 .cmd-preview .val { color: #93c5fd; }
 /* Item 8: highlight command-preview values that differ from what's literally
    stored in the template (currently: --ctx-size raised by the global Minimum
@@ -1398,6 +1402,39 @@ input[type="number"] {
   border: 1px solid rgba(22,163,74,.25);
 }
 .spec-detected-info svg { flex-shrink: 0; }
+/* Item 1/2: manual candidate picker for detected speculative-decoding
+   sources (native MTP + every sidecar file found), so the user can switch
+   away from the auto-detected highest-tier winner. */
+.spec-candidate-btn {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 6px 10px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border);
+  background: var(--surface-2, transparent);
+  color: var(--text);
+  font-size: 12px;
+  cursor: pointer;
+  text-align: left;
+  transition: background 120ms ease, border-color 120ms ease;
+}
+.spec-candidate-btn:hover:not(:disabled) { background: rgba(59,130,246,.08); border-color: rgba(59,130,246,.35); }
+.spec-candidate-btn.active { background: rgba(59,130,246,.14); border-color: #3b82f6; }
+.spec-candidate-btn:disabled { opacity: 0.5; cursor: not-allowed; }
+.spec-candidate-tier {
+  flex-shrink: 0;
+  font-family: var(--font-mono);
+  font-weight: 700;
+  font-size: 10px;
+  color: #3b82f6;
+  background: rgba(59,130,246,.12);
+  border-radius: 4px;
+  padding: 2px 5px;
+}
+.spec-candidate-label { flex-shrink: 0; font-weight: 600; }
+.spec-candidate-file { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text-muted); font-family: var(--font-mono); font-size: 11px; }
 
 /* ==========================================================================
    FEATURE 10: PRESET TOGGLE (Quick / Clear)

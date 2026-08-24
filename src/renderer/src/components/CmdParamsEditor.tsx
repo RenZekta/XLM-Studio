@@ -7,13 +7,13 @@ import {
   Image as ImageIcon, RotateCcw, Gauge, Sparkles, Layers, AlertTriangle,
   MessageSquare, Copy, Check
 } from 'lucide-react'
-import type { CommandParam, SpeculationMode } from '../../../shared/types'
+import type { CommandParam, SpecMethod } from '../../../shared/types'
 import HybridSlider from './HybridSlider'
 import SegmentedToggle from './SegmentedToggle'
 import SamplingPresets from './SamplingPresets'
 import { useVramBudget, computeAutoFillContext, estimateMoeDefaultContext } from '../hooks/useVramBudget'
 import { formatWithSpaces, CONTEXT_POWER_OF_TWO_STEPS, snapToNearestPowerOfTwo } from '../utils/contextFormat'
-import { buildQuickEngineBaseline } from '../utils/presetBaselines'
+import { buildQuickEngineBaseline, computeRecommendedThreads } from '../utils/presetBaselines'
 
 const iconMap: Record<string, React.ReactNode> = {
   Box: <Box size={14} />, Cpu: <Cpu size={14} />, Zap: <Zap size={14} />,
@@ -24,7 +24,9 @@ const iconMap: Record<string, React.ReactNode> = {
 const FEATURED_ARGS = ['--ctx-size', '--gpu-layers', '--threads', '--batch-size', '--flash-attn']
 const HYBRID_PARAMS = ['--threads', '--gpu-layers', '--temperature', '--top-p', '--top-k', '--min-p', '--ctx-size', '--moe-cpu-layers']
 // Params that get a custom widget (excluded from the regular command grid).
-const CUSTOM_PARAMS = ['--model', '--port', '--host', '--api-key', '--mmproj', '--spec-type', '--chat-template', '--reasoning-budget', '--reasoning-budget-message', '--moe-cpu-layers']
+const CUSTOM_PARAMS = ['--model', '--port', '--host', '--api-key', '--mmproj', '--spec-type', '--spec-draft-model', '--chat-template', '--reasoning-budget', '--reasoning-budget-message', '--moe-cpu-layers',
+  '--spec-ngram-map-k4v-size-n', '--spec-ngram-map-k4v-size-m', '--spec-ngram-map-k4v-min-hits',
+  '--spec-ngram-mod-n-match', '--spec-ngram-mod-n-min', '--spec-ngram-mod-n-max', '--ctx-size-dft']
 // Bug fix (item 1.2): sampling values are per-model/user-preferred, set once
 // at template creation from the starred sampling preset, and must NEVER be
 // touched by the Quick/FullAuto/Clear engine presets. Shared list so every
@@ -54,12 +56,20 @@ interface Props {
   launchMode?: 'chat' | 'api'
 }
 
-// Speculative decoding options and their CLI flag mappings (feature 9/26).
-const SPEC_OPTIONS: { mode: SpeculationMode; label: string; flag: string | null }[] = [
-  { mode: 'off', label: 'Off', flag: null },
-  { mode: 'mtp', label: 'MTP', flag: 'draft-mtp' },
-  { mode: 'draft', label: 'Draft Model', flag: 'draft-simple' },
-  { mode: 'dspark', label: 'dspark', flag: 'draft-dspark' }
+// Item 2 (Speculative Decoding rework): the full tier system, per the user's
+// comparison table — mirrors src/main/perfMonitor... no, mirrors the backend
+// definitions in src/main/ipc.ts (SPEC_TIER_DEFS/classifySidecarFilename).
+// Duplicated here (not imported from main) since main-process modules can't
+// be imported into the renderer bundle; kept in sync manually — the tier
+// numbers, methods, and flags are a stable, rarely-changing reference table.
+interface SpecTierDef { tier: number; method: SpecMethod; label: string; flag: string | null; draftMax: number; draftMin: number; draftPMin: number }
+const SPEC_TIER_DEFS: SpecTierDef[] = [
+  { tier: 0, method: 'off', label: 'Off', flag: null, draftMax: 0, draftMin: 0, draftPMin: 0 },
+  { tier: 1, method: 'native-mtp', label: 'Native MTP', flag: 'draft-mtp', draftMax: 3, draftMin: 0, draftPMin: 0.75 },
+  { tier: 2, method: 'draft-model', label: 'Draft Model', flag: 'draft-simple', draftMax: 5, draftMin: 0, draftPMin: 0.00 },
+  { tier: 3, method: 'eagle3', label: 'EAGLE3', flag: 'draft-eagle3', draftMax: 4, draftMin: 0, draftPMin: 0.50 },
+  { tier: 4, method: 'dspark2', label: 'DSpark2', flag: 'draft-dspark', draftMax: 6, draftMin: 0, draftPMin: 0.75 },
+  { tier: 5, method: 'dflash2', label: 'DFlash2', flag: 'draft-dflash', draftMax: 5, draftMin: 0, draftPMin: 0.80 }
 ]
 
 // Params visible in "Common" view mode (feature 30).
@@ -67,8 +77,53 @@ const COMMON_VISIBLE = new Set([
   '--ctx-size', '--threads', '--gpu-layers', '--batch-size', '--ubatch-size',
   '--parallel', '--flash-attn', '--temperature', '--top-p', '--min-p', '--top-k',
   '--mmap', '--mlock', '--cache-type-k', '--cache-type-v', '--kv-offload',
-  '--keep', '--seed'
+  '--kv-unified', '--keep', '--seed'
 ])
+
+// Item 4: reusable on/off block for a stackable n-gram speculative-decoding
+// modifier (ngram-map-k4v, ngram-mod) — a toggle that, when on, reveals a
+// slider+input row per llama.cpp flag, each seeded with llama.cpp's own
+// documented default the first time it's turned on.
+function NgramModifierBlock({ title, flagPrefix, enabled, onToggle, disabled, fields, extraField, args, handleUpdate }: {
+  title: string
+  flagPrefix: string
+  enabled: boolean
+  onToggle: (on: boolean) => void
+  disabled?: boolean
+  fields: { key: string; label: string; def: number }[]
+  extraField?: { arg: string; label: string; def: number }
+  args: Record<string, any>
+  handleUpdate: (arg: string, value: any) => void
+}) {
+  return (
+    <div style={{ marginBottom: 10 }}>
+      <label style={{ display: 'flex', alignItems: 'center', gap: 8, cursor: disabled ? 'not-allowed' : 'pointer' }}>
+        <input type="checkbox" checked={enabled} disabled={disabled} onChange={e => onToggle(e.target.checked)} />
+        <span style={{ fontSize: 12, fontWeight: 600 }}>{title}</span>
+        <span style={{ fontSize: 10, color: 'var(--text-muted)', fontFamily: 'var(--font-mono)' }}>{flagPrefix}...</span>
+      </label>
+      {enabled && (
+        <div style={{ marginTop: 4, marginLeft: 22 }}>
+          {fields.map(f => {
+            const arg = `${flagPrefix}-${f.key}`
+            return (
+              <div key={arg} className="cmd-row cmd-row-hybrid" style={{ padding: '4px 0', border: 'none', background: 'transparent' }}>
+                <div className="cmd-label-group"><div className="cmd-label">{f.label}</div><div className="cmd-arg">{arg}</div></div>
+                <HybridSlider value={args[arg] ?? f.def} min={0} max={Math.max(256, f.def * 4)} step={1} onChange={v => handleUpdate(arg, v)} defaultVal={f.def} disabled={disabled} />
+              </div>
+            )
+          })}
+          {extraField && (
+            <div className="cmd-row cmd-row-hybrid" style={{ padding: '4px 0', border: 'none', background: 'transparent' }}>
+              <div className="cmd-label-group"><div className="cmd-label">{extraField.label}</div><div className="cmd-arg">{extraField.arg}</div></div>
+              <HybridSlider value={args[extraField.arg] ?? extraField.def} min={0} max={2097152} step={1} onChange={v => handleUpdate(extraField.arg, v)} defaultVal={extraField.def} allowAuto placeholder="0 = same as main context" disabled={disabled} />
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  )
+}
 
 export default function CmdParamsEditor({ templateId, args, onChange, modelPathFallback, serverPortFallback, disabled: disabledProp, headerPortalTarget, launchMode }: Props) {
   const {
@@ -80,6 +135,8 @@ export default function CmdParamsEditor({ templateId, args, onChange, modelPathF
   } = useStore()
   const [searchQuery, setSearchQuery] = useState('')
   const [previewCopied, setPreviewCopied] = useState(false)  // Task 5: preview copy button
+  // Item 5: vertical-stack command preview toggle.
+  const [stackedPreview, setStackedPreview] = useState(false)
 
   const card = templateId ? cards.find(c => c.template.id === templateId) : null
   const isRunning = card?.status === 'running'
@@ -147,9 +204,12 @@ export default function CmdParamsEditor({ templateId, args, onChange, modelPathF
   const isMoe = meta?.isMoe || expertCount > 0
   const nativeChatTemplate = meta?.chatTemplate || null
 
-  // CPU info: physical cores for thread slider max + recommended (3/4, rounded down).
+  // CPU info: physical cores for thread slider max + recommended (3/4 by
+  // default, or the Settings "Recommended CPU Threads override" percentage
+  // if enabled — both go through computeRecommendedThreads for consistency).
   const physicalCores = cpuInfo?.physicalCores || 8
-  const recommendedThreads = Math.max(1, Math.floor(physicalCores * 0.75))
+  const cpuThreadsOverridePercent = modelDefaults.cpuThreadsOverrideEnabled ? modelDefaults.cpuThreadsOverridePercent : null
+  const recommendedThreads = computeRecommendedThreads(cpuInfo, cpuThreadsOverridePercent)
 
   // Bug fix (item 1 — toggle "stuck" on last-selected preset): `presetMode`
   // is a SINGLE GLOBAL store field shared across every open template/card, so
@@ -158,20 +218,25 @@ export default function CmdParamsEditor({ templateId, args, onChange, modelPathF
   // currently being viewed. Opening a different template (or a fresh new
   // one, whose args were seeded synchronously without ever calling
   // setPresetMode) left the toggle showing a stale leftover value. Derive the
-  // displayed/effective mode straight from THIS template's actual `args`
-  // every render instead — a value that can never go stale, because it isn't
-  // stored anywhere.
-  //   - 'clear': no engine preset has been applied — Clear wipes ALL engine
-  //     args (see handleClearPreset), so the tell is simply "--threads unset".
-  //     Quick/FullAuto both always set --threads as part of their shared
-  //     baseline (see buildQuickEngineBaseline), so its presence reliably
-  //     means "some engine preset is active".
-  //   - 'fullauto' vs 'quick': both set --threads identically, but only
-  //     FullAuto turns on __ignoreCtxOverride (Quick explicitly turns it
-  //     off) — a reliable, cheap discriminator between the two.
-  const derivedPresetMode: 'quick' | 'fullauto' | 'clear' = args['--threads'] === undefined
-    ? 'clear'
-    : (args['__ignoreCtxOverride'] === true ? 'fullauto' : 'quick')
+  // displayed/effective mode from THIS template's own args instead — scoped
+  // per-template so it can't leak across cards, unlike the old global field.
+  //
+  // Bug fix (this round): the FIRST version of this derivation used
+  // `__ignoreCtxOverride === true` as the Quick-vs-FullAuto discriminator —
+  // but that flag is ALSO an independent, directly user-toggleable checkbox
+  // ("Ignore Context Length Override"), not something exclusive to FULL
+  // AUTO. So manually turning that checkbox on (with no preset button
+  // clicked at all) made the toggle jump to showing FULL AUTO — backwards
+  // from the intended relationship ("FULL AUTO turns ON Ignore Override",
+  // not "Ignore Override implies FULL AUTO"). Track an explicit per-template
+  // marker instead (`__lastPreset`, set by the three preset handlers when
+  // actually clicked) as the primary source of truth; only fall back to the
+  // "--threads unset → clear" heuristic for templates that predate this
+  // marker (e.g. edited before this fix, so never had it set at all).
+  const derivedPresetMode: 'quick' | 'fullauto' | 'clear' =
+    (args['__lastPreset'] === 'quick' || args['__lastPreset'] === 'fullauto' || args['__lastPreset'] === 'clear')
+      ? args['__lastPreset']
+      : (args['--threads'] === undefined ? 'clear' : 'quick')
 
   // Feature 12: GPU layers slider max = block_count (fallback 120).
   const gpuLayersMax = blockCount > 0 ? blockCount : 120
@@ -248,26 +313,33 @@ export default function CmdParamsEditor({ templateId, args, onChange, modelPathF
   // turn themselves on/off (per the user's earlier directive), so Quick no
   // longer forces --gpu-layers either.
 
-  // Item 7 (this round): for Dense models, Quick/FullAuto set --gpu-layers to
-  // vramBudget.recommendedLayers at the moment the preset button is clicked
-  // (or, for a brand-new template, synchronously at creation via
-  // buildQuickEngineBaseline) — but vramBudget needs GGUF metadata, which
-  // usually ISN'T available yet at either of those moments (no model has
-  // been picked yet, or its metadata is still being fetched). The
-  // recommendation was then simply never backfilled once that data actually
-  // arrived, leaving Dense models sitting on an unset/"auto" --gpu-layers
-  // under a preset that's supposed to guarantee a concrete recommended value.
-  // This effect fills it in retroactively, without needing the user to
-  // re-click the preset button.
+  // Item 7 (backfill) — updated for item 5: Dense models under Quick/FullAuto
+  // now just get "all layers" (gpuLayersMax), known synchronously the moment
+  // GGUF metadata (blockCount) is available — no need to wait on a VRAM
+  // budget calculation at all. This still needs to be a backfill (not just
+  // the button click / buildQuickEngineBaseline) because for a brand-new
+  // template metadata usually isn't loaded yet at either of those moments.
+  //
+  // Bug fix (residual dynamic control): this used to re-fire and FORCE
+  // --gpu-layers back to gpuLayersMax on ANY divergence — including a value
+  // the user had deliberately set manually. Since `disabled` is one of this
+  // effect's dependencies, it also re-evaluated every time the server
+  // stopped (disabled flips true→false), which could silently overwrite a
+  // manual edit right after closing the server, with no visible trigger.
+  // A backfill must only ever fill in a genuinely UNSET value — never
+  // re-enforce a value that's already present, whatever it is. Per the
+  // explicit requirement that recommended offload layers only ever get
+  // applied by clicking the Apply button (or the preset buttons), this now
+  // strictly does nothing once --gpu-layers has any value at all.
   useEffect(() => {
     if (disabled || derivedPresetMode === 'clear' || isMoe) return
-    if (!vramBudget || vramBudget.recommendedLayers <= 0) return
+    if (!blockCount || blockCount <= 0) return
     const curArgs = argsRef.current
-    if (curArgs['--gpu-layers'] !== vramBudget.recommendedLayers) {
-      commit({ ...curArgs, '--gpu-layers': vramBudget.recommendedLayers })
+    if (curArgs['--gpu-layers'] === undefined || curArgs['--gpu-layers'] === '') {
+      commit({ ...curArgs, '--gpu-layers': gpuLayersMax })
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [disabled, derivedPresetMode, isMoe, vramBudget?.recommendedLayers])
+  }, [disabled, derivedPresetMode, isMoe, blockCount, gpuLayersMax])
 
   // Item 3: the equivalent backfill for --ctx-size — Quick/FullAuto set it
   // at click/creation time based on model metadata (native context length,
@@ -524,9 +596,9 @@ export default function CmdParamsEditor({ templateId, args, onChange, modelPathF
     if (f) setMmprojManualPath(f)
   }
 
-  // ----- Speculation auto-detection (feature 9/Task 2.2) -----
-  // Task 2.2: detection runs AND auto-applies the detected mode (MTP/draft/etc.)
-  // so the user doesn't have to manually enable it. If not detected, stays off.
+  // ----- Speculation auto-detection (Item 2: full tier rework) -----
+  // Task 2.2: detection runs AND auto-applies the detected method so the
+  // user doesn't have to manually enable it. If not detected, stays off.
   //
   // Bug fix (this round): previously the "trigger the scan" and "apply the
   // result" logic were combined into ONE effect that only ever attempted to
@@ -540,38 +612,143 @@ export default function CmdParamsEditor({ templateId, args, onChange, modelPathF
     if (!effectiveModelPath || disabled) return
     if (detectedSpeculation[effectiveModelPath]) return  // already scanned/cached
     window.api?.detectSpeculation?.(effectiveModelPath).then(res => {
-      if (res) setDetectedSpeculation(effectiveModelPath, res.mode, res.reason)
+      if (res) setDetectedSpeculation(effectiveModelPath, res)
     }).catch(() => {})
   }, [effectiveModelPath, disabled, detectedSpeculation, setDetectedSpeculation])
 
-  // Bug fix (this round): applying the detected mode is now a fully separate,
-  // continuously-reactive effect (the same self-correcting "backfill" pattern
-  // used for --gpu-layers and --ctx-size above) — it re-evaluates on every
-  // render where the detected result, this template's args, or the disabled
-  // state change, rather than only at the single moment the scan happened to
-  // resolve. Once --spec-type is set (by this effect, or manually by the
-  // user), the condition below is naturally false forever after, so this
-  // can't loop or fight a manual choice — it just means a transient failure
-  // to apply on the "first attempt" is no longer permanent.
+  // Item 2: parse the current primary method out of --spec-type. It's now a
+  // comma-separated list (primary draft method + stackable n-gram
+  // modifiers), so this specifically looks for whichever segment matches one
+  // of the mutually-exclusive PRIMARY method flags (draft-mtp/draft-simple/
+  // draft-eagle3/draft-dspark/draft-dflash) — ngram-map-k4v/ngram-mod are
+  // handled completely separately below since they're additive, not
+  // exclusive with the primary method or each other.
+  const specTypeSegments: string[] = useMemo(() => {
+    const v = args['--spec-type']
+    return typeof v === 'string' && v.length > 0 ? v.split(',').map(s => s.trim()).filter(Boolean) : []
+  }, [args])
+  const currentSpecTierDef: SpecTierDef = useMemo(() => {
+    for (const seg of specTypeSegments) {
+      const match = SPEC_TIER_DEFS.find(t => t.flag === seg)
+      if (match) return match
+    }
+    return SPEC_TIER_DEFS[0]  // off
+  }, [specTypeSegments])
+  const ngramMapK4vOn = specTypeSegments.includes('ngram-map-k4v')
+  const ngramModOn = specTypeSegments.includes('ngram-mod')
+
+  function buildSpecTypeValue(primaryFlag: string | null, mapK4v: boolean, mod: boolean): string {
+    const parts: string[] = []
+    if (primaryFlag) parts.push(primaryFlag)
+    if (mapK4v) parts.push('ngram-map-k4v')
+    if (mod) parts.push('ngram-mod')
+    return parts.join(',')
+  }
+
+  // Bug fix (item — MTP can't be turned off / can't manually switch method):
+  // applying the detected method is a continuously-reactive effect (see
+  // above), which is great for resilience against transient failures — but
+  // it meant choosing "Off" (or any OTHER method) in the dropdown looked
+  // identical to "never touched" the moment the primary segment changed, so
+  // this effect kept reapplying the detected method over any manual choice,
+  // including switching to a lower-tier method or a different sidecar file
+  // of the SAME tier. Track an explicit __spec_manual flag (same pattern as
+  // mmproj's manual-override tracking) the moment the user picks ANY primary
+  // method — including Off — so auto-apply only ever fires before the user
+  // has made their own explicit choice, exactly once, at template creation.
   useEffect(() => {
     if (!effectiveModelPath || disabled) return
+    if (argsRef.current['__spec_manual'] === true) return  // user already made an explicit choice
     const detected = detectedSpeculation[effectiveModelPath]
-    if (!detected || detected.mode === 'off') return
+    if (!detected || detected.tier === 0) return
     const curArgs = argsRef.current
-    if (curArgs['--spec-type'] !== undefined) return  // already set (by us or the user)
-    const flag = SPEC_OPTIONS.find(o => o.mode === detected.mode)?.flag
-    if (flag) commit({ ...curArgs, '--spec-type': flag })
+    if (curArgs['--spec-type'] !== undefined) return  // already set (shouldn't happen without __spec_manual, but stay safe)
+    const tierDef = SPEC_TIER_DEFS.find(t => t.method === detected.method)
+    if (!tierDef?.flag) return
+    const newArgs = { ...curArgs, '--spec-type': tierDef.flag }
+    // For sidecar-based tiers (2-5), also point --spec-draft-model at the
+    // detected file, and seed the draft-max/min/p-min from the tier's own
+    // "preset" values (see the table this whole rework is based on).
+    if (detected.path) newArgs['--spec-draft-model'] = detected.path
+    newArgs['--spec-draft-n-max'] = tierDef.draftMax
+    newArgs['--spec-draft-n-min'] = tierDef.draftMin
+    newArgs['--spec-draft-p-min'] = tierDef.draftPMin
+    commit(newArgs)
   }, [effectiveModelPath, disabled, detectedSpeculation, args])
-  const currentSpecMode: SpeculationMode = useMemo(() => {
-    const v = args['--spec-type']; if (!v) return 'off'
-    return SPEC_OPTIONS.find(o => o.flag === v)?.mode || 'off'
-  }, [args])
-  function setSpecMode(mode: SpeculationMode) {
-    const flag = SPEC_OPTIONS.find(o => o.mode === mode)?.flag ?? null
+
+  // Selecting a primary method (Off / Native MTP / Draft Model / EAGLE3 /
+  // DSpark2 / DFlash2) — mutually exclusive with each other, but preserves
+  // whichever n-gram modifiers were already stacked on top.
+  function setSpecTier(tierDef: SpecTierDef, sidecarPath?: string | null) {
     const newArgs = { ...args }
-    if (flag === null) delete newArgs['--spec-type']
-    else newArgs['--spec-type'] = flag
+    newArgs['__spec_manual'] = true
+    newArgs['--spec-type'] = buildSpecTypeValue(tierDef.flag, ngramMapK4vOn, ngramModOn) || undefined
+    if (!newArgs['--spec-type']) delete newArgs['--spec-type']
+    if (tierDef.tier === 0) {
+      // Bug fix (item 1, same principle): also clear the draft-tuning
+      // params when switching to Off — they only mean anything paired with
+      // an active primary method, so leaving them behind is the same class
+      // of "settings survive after their toggle turns off" bug.
+      delete newArgs['--spec-draft-model']
+      delete newArgs['--spec-draft-n-max']
+      delete newArgs['--spec-draft-n-min']
+      delete newArgs['--spec-draft-p-min']
+    } else {
+      // Item 2: draft-max/min/p-min act as this tier's own "preset" — apply
+      // them whenever switching TO this tier (matching the comparison table).
+      newArgs['--spec-draft-n-max'] = tierDef.draftMax
+      newArgs['--spec-draft-n-min'] = tierDef.draftMin
+      newArgs['--spec-draft-p-min'] = tierDef.draftPMin
+      if (tierDef.tier >= 2) {
+        // Sidecar-based tier — use the given path (from manual candidate
+        // picking) or fall back to whatever was already there.
+        if (sidecarPath !== undefined) newArgs['--spec-draft-model'] = sidecarPath || ''
+        else if (!newArgs['--spec-draft-model']) newArgs['--spec-draft-model'] = ''
+      } else {
+        delete newArgs['--spec-draft-model']  // Native MTP is embedded, no sidecar file
+      }
+    }
     commit(newArgs); if (templateId) markSpeculationApplied(templateId, true)
+  }
+  function setNgramModifier(which: 'map-k4v' | 'mod', on: boolean) {
+    const newArgs = { ...args }
+    newArgs['__spec_manual'] = true
+    const nextMapK4v = which === 'map-k4v' ? on : ngramMapK4vOn
+    const nextMod = which === 'mod' ? on : ngramModOn
+    const value = buildSpecTypeValue(currentSpecTierDef.flag, nextMapK4v, nextMod)
+    if (value) newArgs['--spec-type'] = value
+    else delete newArgs['--spec-type']
+    // Seed each modifier's own llama.cpp defaults the first time it's turned
+    // on. Bug fix (item 1): turning a modifier OFF must delete its flags too
+    // — previously only the "ngram-map-k4v"/"ngram-mod" segment was removed
+    // from --spec-type, but the individual --spec-ngram-* / --ctx-size-dft
+    // values stayed in args and kept getting passed to the actual launch
+    // command even though the modifier itself was off.
+    if (which === 'map-k4v') {
+      if (on) {
+        setIfAbsent(newArgs, '--spec-ngram-map-k4v-size-n', 12)
+        setIfAbsent(newArgs, '--spec-ngram-map-k4v-size-m', 48)
+        setIfAbsent(newArgs, '--spec-ngram-map-k4v-min-hits', 1)
+      } else {
+        delete newArgs['--spec-ngram-map-k4v-size-n']
+        delete newArgs['--spec-ngram-map-k4v-size-m']
+        delete newArgs['--spec-ngram-map-k4v-min-hits']
+      }
+    }
+    if (which === 'mod') {
+      if (on) {
+        setIfAbsent(newArgs, '--spec-ngram-mod-n-match', 24)
+        setIfAbsent(newArgs, '--spec-ngram-mod-n-min', 48)
+        setIfAbsent(newArgs, '--spec-ngram-mod-n-max', 64)
+        setIfAbsent(newArgs, '--ctx-size-dft', 0)
+      } else {
+        delete newArgs['--spec-ngram-mod-n-match']
+        delete newArgs['--spec-ngram-mod-n-min']
+        delete newArgs['--spec-ngram-mod-n-max']
+        delete newArgs['--ctx-size-dft']
+      }
+    }
+    commit(newArgs)
   }
 
   // ----- Jinja Chat Template (feature 13/Fix 5/Task 6) -----
@@ -721,22 +898,19 @@ export default function CmdParamsEditor({ templateId, args, onChange, modelPathF
       return String(val) !== String(target)
     }
     if (derivedPresetMode === 'clear') return false
-    // Bug fix (item 6): --gpu-layers isn't a static baseline value — Quick/
-    // FullAuto set it dynamically based on Dense-vs-MoE (see the identical
-    // isMoe branch in handleQuickPreset/handleFullAutoPreset): MoE leaves it
-    // unset ("auto"), Dense sets it to vramBudget.recommendedLayers. The
-    // generic quickBaselines lookup below has no entry for it at all, so it
-    // was falling through to comparing against the schema's raw numeric
-    // default — which doesn't understand "auto" — and lighting up as
-    // "changed" for a MoE model sitting at its own correct baseline (auto vs
-    // auto). Handle it explicitly, mirroring the actual preset logic exactly.
+    // Bug fix (item 6, updated for item 5): --gpu-layers isn't a static
+    // baseline value — Quick/FullAuto set it dynamically based on Dense-vs-
+    // MoE (see the identical isMoe branch in handleQuickPreset/
+    // handleFullAutoPreset): MoE leaves it unset ("auto"), Dense sets it to
+    // gpuLayersMax (item 5: "just request all layers", not a computed VRAM
+    // recommendation). Handle it explicitly, mirroring the actual preset logic.
     if (cmd.arg === '--gpu-layers') {
-      const expectedUnset = isMoe || !vramBudget || vramBudget.recommendedLayers <= 0
+      const expectedUnset = isMoe || !blockCount || blockCount <= 0
       const currentUnset = val === undefined || val === '' || val === false
       if (expectedUnset) return !currentUnset
-      return currentUnset || String(val) !== String(vramBudget!.recommendedLayers)
+      return currentUnset || String(val) !== String(gpuLayersMax)
     }
-    const quickBaselines: Record<string, any> = buildQuickEngineBaseline({ cpuInfo, backendKey: activeBackend?.backendKey })
+    const quickBaselines: Record<string, any> = buildQuickEngineBaseline({ cpuInfo, backendKey: activeBackend?.backendKey, cpuThreadsOverridePercent })
     // Fix 2: ctx-size baseline = model's native context (or 32768 if unknown).
     if (meta?.contextLength && meta.contextLength > 0) {
       quickBaselines['--ctx-size'] = Math.min(meta.contextLength, 32768)
@@ -775,13 +949,13 @@ export default function CmdParamsEditor({ templateId, args, onChange, modelPathF
       }
     }
     // Bug fix (item 6): mirror the same explicit --gpu-layers handling as
-    // isChanged() above — reset to "unset/auto" for MoE, or the VRAM-
-    // recommended layer count for Dense.
+    // isChanged() above — reset to "unset/auto" for MoE, or gpuLayersMax
+    // (item 5: "all layers", not a computed VRAM recommendation) for Dense.
     if (cmd.arg === '--gpu-layers' && derivedPresetMode !== 'clear') {
-      if (isMoe || !vramBudget || vramBudget.recommendedLayers <= 0) {
+      if (isMoe || !blockCount || blockCount <= 0) {
         delete newArgs[cmd.arg]
       } else {
-        newArgs[cmd.arg] = vramBudget.recommendedLayers
+        newArgs[cmd.arg] = gpuLayersMax
       }
       commit(newArgs)
       return
@@ -789,7 +963,7 @@ export default function CmdParamsEditor({ templateId, args, onChange, modelPathF
     // Fix 5: Reset to the current preset baseline, not the schema default.
     // Bug fix (items 1.6/1.7): same unification as isChanged() above.
     if (derivedPresetMode !== 'clear' && !SAMPLING_KEYS.includes(cmd.arg)) {
-      const quickBaselines: Record<string, any> = buildQuickEngineBaseline({ cpuInfo, backendKey: activeBackend?.backendKey })
+      const quickBaselines: Record<string, any> = buildQuickEngineBaseline({ cpuInfo, backendKey: activeBackend?.backendKey, cpuThreadsOverridePercent })
       // Fix 2: ctx-size baseline = model's native context (or 32768 if unknown).
       if (meta?.contextLength && meta.contextLength > 0) {
         quickBaselines['--ctx-size'] = Math.min(meta.contextLength, 32768)
@@ -820,7 +994,7 @@ export default function CmdParamsEditor({ templateId, args, onChange, modelPathF
     // Item 1.1 refactor: engine baseline now comes from the same pure
     // function CreateModal's lazy initializer uses, so the button and the
     // "apply on template creation" path can never drift apart.
-    Object.assign(newArgs, buildQuickEngineBaseline({ cpuInfo, backendKey: activeBackend?.backendKey }))
+    Object.assign(newArgs, buildQuickEngineBaseline({ cpuInfo, backendKey: activeBackend?.backendKey, cpuThreadsOverridePercent }))
     // ctx-size needs model metadata, which the shared baseline function
     // doesn't have access to — set it here only if not already present.
     // Item 3: MoE gets a memory-aware default (VRAM+RAM leftover after model
@@ -852,25 +1026,23 @@ export default function CmdParamsEditor({ templateId, args, onChange, modelPathF
     // unconditionally overwrote them with LM Studio's hardcoded defaults
     // every time it was clicked, even over a value the user had deliberately
     // set.)
-    // Task 2: llama.cpp's built-in "auto" GPU-layers heuristic does a good job
-    // splitting MoE layers between GPU/RAM (it's designed for that — offload
-    // whole expert blocks, keep hot tensors on GPU), but a POOR job with Dense
-    // models: it still splits them across GPU/CPU to squeeze out more context,
-    // even though dense models suffer badly from any CPU-resident layers (every
-    // token has to cross the PCIe bus for every single layer, not just the
-    // active experts). So:
-    //   - MoE   → leave --gpu-layers unset, llama-server's 'auto' handles it.
-    //   - Dense → set --gpu-layers explicitly to the VRAM-recommended layer
-    //             count so llama.cpp doesn't try to split it further.
-    // Only applies once we actually know the model (meta) and have a VRAM
-    // budget; otherwise (no model picked yet) leave it unset either way.
+    // Item 5 (superseding the note above): rather than computing a specific
+    // "how many layers fit" recommendation for Dense models, just request
+    // ALL layers on GPU (llama.cpp clamps to the model's actual layer count,
+    // and — especially combined with FULL AUTO's --fit below — figures out
+    // itself how much actually ends up GPU-resident to fit the requested
+    // context, no separate VRAM-budget calculation needed on our end). MoE
+    // still leaves --gpu-layers unset entirely so llama.cpp's own MoE-aware
+    // auto-split heuristic decides layer placement.
     if (isMoe) {
       delete newArgs['--gpu-layers']
-    } else if (vramBudget && vramBudget.recommendedLayers > 0) {
-      newArgs['--gpu-layers'] = vramBudget.recommendedLayers
     } else {
-      delete newArgs['--gpu-layers']
+      newArgs['--gpu-layers'] = gpuLayersMax
     }
+    // Bug fix (preset toggle showing wrong mode): explicit per-template
+    // marker for derivedPresetMode above — see its comment for why this
+    // replaced the old __ignoreCtxOverride-based heuristic.
+    newArgs['__lastPreset'] = 'quick'
     commit(newArgs)
     // Feature 25: mark Quick as the active baseline so blue lines DON'T appear.
     setPresetMode('quick')
@@ -892,6 +1064,7 @@ export default function CmdParamsEditor({ templateId, args, onChange, modelPathF
     newArgs['__autoCtxFill'] = 'off'
     // Task 5: Memory Overhead off by default in Clear.
     newArgs['__memOverheadEnabled'] = false
+    newArgs['__lastPreset'] = 'clear'
     commit(newArgs)
     setPresetMode('clear')
   }
@@ -902,7 +1075,7 @@ export default function CmdParamsEditor({ templateId, args, onChange, modelPathF
     // Item 1.1 refactor: same shared baseline as Quick, then override the
     // two advanced context toggles for FULL AUTO's "set it and forget it" behavior.
     const newArgs: Record<string, any> = { ...args }
-    Object.assign(newArgs, buildQuickEngineBaseline({ cpuInfo, backendKey: activeBackend?.backendKey }))
+    Object.assign(newArgs, buildQuickEngineBaseline({ cpuInfo, backendKey: activeBackend?.backendKey, cpuThreadsOverridePercent }))
     // Item 3: same MoE-aware default as Quick (see the identical note there).
     if (meta?.contextLength && meta.contextLength > 0) {
       if (isMoe && vramBudget) {
@@ -921,22 +1094,21 @@ export default function CmdParamsEditor({ templateId, args, onChange, modelPathF
     // unconditionally overwrote temperature/top-p/top-k/min-p/repeat-penalty
     // with hardcoded defaults every time, clobbering the user's/model's own
     // values — removed entirely.
-    // Task 3: mirror Quick's Dense-vs-MoE GPU offload split (see the identical
-    // logic + rationale in handleQuickPreset above) — previously FULL AUTO
-    // always applied the recommended layer count to BOTH dense and MoE models,
-    // which fights llama.cpp's own (good) MoE auto-split heuristic.
+    // Item 5: same "just request all layers" approach as Quick above — for
+    // FULL AUTO this combines with --fit (autoCtxFill='auto' below) so
+    // llama.cpp determines actual GPU-resident layer count AND context
+    // together in one pass, genuinely one-click "best achievable" behavior.
     if (isMoe) {
       delete newArgs['--gpu-layers']
-    } else if (vramBudget && vramBudget.recommendedLayers > 0) {
-      newArgs['--gpu-layers'] = vramBudget.recommendedLayers
     } else {
-      delete newArgs['--gpu-layers']
+      newArgs['--gpu-layers'] = gpuLayersMax
     }
     // Task 2.1/2.2: enable the advanced context-fill toggles.
     // FULL AUTO defaults to 'auto' (llama-server --fit handles offloading + ctx)
     // for both dense and MoE — the user can manually switch to Maximum if desired.
     newArgs['__ignoreCtxOverride'] = true
     newArgs['__autoCtxFill'] = 'auto'
+    newArgs['__lastPreset'] = 'fullauto'
     commit(newArgs)
     setPresetMode('fullauto')
   }
@@ -1055,6 +1227,41 @@ export default function CmdParamsEditor({ templateId, args, onChange, modelPathF
     const finalPort = card?.template.serverPort || serverPortFallback
     if (finalPort && runtimeArgs['--port'] === undefined) parts.push('--port', String(finalPort))
     return parts.join(' ')
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [args, ignoreCtxOverride, autoCtxFill, cards, templateId, modelPathFallback, serverPortFallback, previewEffectiveCtx, launchMode])
+
+  // Item 5: vertical-stack preview — same underlying runtime-accurate args as
+  // cmdPreviewText above, just formatted one flag per line with backslash
+  // line-continuations (shell-script style), for readability with long
+  // commands (e.g. stacked speculative-decoding flags).
+  const cmdPreviewStackedText = useMemo(() => {
+    const finalModelPath = card?.template.modelPath || modelPathFallback
+    const isAutoFitAuto = ignoreCtxOverride && autoCtxFill === 'auto'
+    const runtimeArgs: Record<string, any> = {}
+    for (const [k, v] of Object.entries(args)) {
+      if (k.startsWith('__')) continue
+      if (k === '--ctx-size' || k === '-c') continue
+      if (k === '--fit' || k === '-fit') { if (isAutoFitAuto) { runtimeArgs[k] = 'on'; continue } }
+      runtimeArgs[k] = v
+    }
+    if (isAutoFitAuto && runtimeArgs['--fit'] === undefined && runtimeArgs['-fit'] === undefined) {
+      runtimeArgs['--fit'] = 'on'
+    }
+    if (!isAutoFitAuto) runtimeArgs['--ctx-size'] = previewEffectiveCtx
+    if (launchMode === 'api' && runtimeArgs['--no-webui'] === undefined) runtimeArgs['--no-webui'] = true
+    const argLines: string[] = []
+    if (finalModelPath) argLines.push(`-m "${finalModelPath}"`)
+    Object.entries(runtimeArgs).forEach(([key, val]) => {
+      if (val === true) argLines.push(key)
+      else if (val !== false && val !== null && val !== '') argLines.push(`${key} ${val}`)
+    })
+    const finalPort = card?.template.serverPort || serverPortFallback
+    if (finalPort && runtimeArgs['--port'] === undefined) argLines.push(`--port ${finalPort}`)
+    const allLines = ['llama-server', ...argLines]
+    return allLines.map((l, i) => {
+      const isLast = i === allLines.length - 1
+      return `${i === 0 ? '' : '  '}${l}${isLast ? '' : ' \\'}`
+    }).join('\n')
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [args, ignoreCtxOverride, autoCtxFill, cards, templateId, modelPathFallback, serverPortFallback, previewEffectiveCtx, launchMode])
 
@@ -1312,42 +1519,173 @@ export default function CmdParamsEditor({ templateId, args, onChange, modelPathF
     </div>
   )
 
-  // ----- Speculative Decoding widget (feature 9/26) -----
+  // ----- Speculative Decoding widget (Item 2: full tier rework) -----
   const renderSpecWidget = () => {
     const detected = effectiveModelPath ? detectedSpeculation[effectiveModelPath] : null
+    const candidates = detected?.candidates || []
+    // Bug fix (item 1 — can't manually pick a different method/sidecar):
+    // draft-max/min/p-min act as each tier's own "preset" (per the user's
+    // comparison table) — diff-highlight them against the CURRENTLY
+    // SELECTED tier's own values, not a fixed hardcoded baseline, and offer
+    // a reset-to-tier-default button, matching how every other preset-diff
+    // in this app works.
+    const draftMaxVal = args['--spec-draft-n-max']
+    const draftMinVal = args['--spec-draft-n-min']
+    const draftPMinVal = args['--spec-draft-p-min']
+    const draftMaxChanged = currentSpecTierDef.tier > 0 && draftMaxVal !== undefined && draftMaxVal !== '' && Number(draftMaxVal) !== currentSpecTierDef.draftMax
+    const draftMinChanged = currentSpecTierDef.tier > 0 && draftMinVal !== undefined && draftMinVal !== '' && Number(draftMinVal) !== currentSpecTierDef.draftMin
+    const draftPMinChanged = currentSpecTierDef.tier > 0 && draftPMinVal !== undefined && draftPMinVal !== '' && Number(draftPMinVal) !== currentSpecTierDef.draftPMin
     return (
       <div className="spec-widget">
         <div className="mmproj-widget-title"><Sparkles size={15} /> Speculative Decoding</div>
         <div className="mmproj-widget-arg">--spec-type · Accelerate generation using draft tokens</div>
         <div className="spec-widget-row">
-          <span className="mmproj-widget-label">Mode</span>
-          <select className="cmd-select" value={currentSpecMode} onChange={e => setSpecMode(e.target.value as SpeculationMode)} disabled={disabled}>
-            {SPEC_OPTIONS.map(o => <option key={o.mode} value={o.mode}>{o.label}</option>)}
+          <span className="mmproj-widget-label">Method</span>
+          <select
+            className="cmd-select"
+            value={currentSpecTierDef.method}
+            onChange={e => {
+              const t = SPEC_TIER_DEFS.find(td => td.method === e.target.value) || SPEC_TIER_DEFS[0]
+              // If we have exactly one detected candidate for this tier, use
+              // its path automatically; otherwise leave the existing/empty
+              // path for the user to fill in via the candidate list or
+              // manual browse below.
+              const matchingCandidate = candidates.find(c => c.method === t.method)
+              setSpecTier(t, matchingCandidate ? matchingCandidate.path : undefined)
+            }}
+            disabled={disabled}
+          >
+            {SPEC_TIER_DEFS.map(t => <option key={t.method} value={t.method}>{t.label}{t.tier > 0 ? ` (T${t.tier})` : ''}</option>)}
           </select>
         </div>
-        {detected && detected.mode !== 'off' && (
-          <div className="spec-detected-info"><Gauge size={12} /> Auto-detected: {detected.reason} (applied automatically)</div>
+        {detected && detected.tier > 0 && (
+          <div className="spec-detected-info"><Gauge size={12} /> Auto-detected: {detected.reason} (applied automatically — highest tier found)</div>
         )}
-        {/* Task 2: draft params shown whenever a spec mode is picked (not 'off').
-            Values fall back to LM Studio defaults (3/0/0.75) so the boxes are
-            never empty even if MTP wasn't detected. */}
-        {currentSpecMode !== 'off' && (
+        {/* Item 1: manual candidate picker — every sidecar file (and native
+            MTP, if present) found alongside this model, so the user can
+            switch to a LOWER tier, or a different file of the same tier,
+            without fighting the auto-detected winner. */}
+        {candidates.length > 1 && (
           <div style={{ marginTop: 8 }}>
-            <div className="cmd-row cmd-row-hybrid" style={{ padding: '6px 0', border: 'none', background: 'transparent' }}>
-              <div className="cmd-label-group"><div className="cmd-label">Max Draft Tokens <span style={{ fontSize: 10, color: 'var(--text-muted)' }}>(2-3 is recommended)</span></div><div className="cmd-arg">--spec-draft-n-max</div></div>
-              <HybridSlider value={args['--spec-draft-n-max'] ?? 3} min={0} max={128} step={1} onChange={v => handleUpdate('--spec-draft-n-max', v)} defaultVal={3} disabled={disabled} />
-            </div>
-            <div className="cmd-row cmd-row-hybrid" style={{ padding: '6px 0', border: 'none', background: 'transparent' }}>
-              <div className="cmd-label-group"><div className="cmd-label">Min Draft Tokens</div><div className="cmd-arg">--spec-draft-n-min</div></div>
-              <HybridSlider value={args['--spec-draft-n-min'] ?? 0} min={0} max={128} step={1} onChange={v => handleUpdate('--spec-draft-n-min', v)} defaultVal={0} disabled={disabled} />
-            </div>
-            <div className="cmd-row cmd-row-hybrid" style={{ padding: '6px 0', border: 'none', background: 'transparent' }}>
-              <div className="cmd-label-group"><div className="cmd-label">Draft Probability</div><div className="cmd-arg">--spec-draft-p-min</div></div>
-              <HybridSlider value={args['--spec-draft-p-min'] ?? 0.75} min={0} max={1} step={0.01} onChange={v => handleUpdate('--spec-draft-p-min', v)} defaultVal={0.75} disabled={disabled} />
+            <div style={{ fontSize: 11, color: 'var(--text-muted)', marginBottom: 4 }}>All detected speculative decoding sources for this model:</div>
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+              {candidates.map(c => {
+                const tierDef = SPEC_TIER_DEFS.find(t => t.method === c.method)
+                if (!tierDef) return null
+                const isActive = currentSpecTierDef.method === c.method && (tierDef.tier < 2 || args['--spec-draft-model'] === c.path)
+                return (
+                  <button
+                    type="button"
+                    key={`${c.method}-${c.path || 'internal'}`}
+                    className={`spec-candidate-btn ${isActive ? 'active' : ''}`}
+                    onClick={() => setSpecTier(tierDef, c.path)}
+                    disabled={disabled}
+                  >
+                    <span className="spec-candidate-tier">T{c.tier}</span>
+                    <span className="spec-candidate-label">{c.label}</span>
+                    <span className="spec-candidate-file">{c.name || '(embedded)'}</span>
+                  </button>
+                )
+              })}
             </div>
           </div>
         )}
-        {currentSpecMode === 'draft' && <div style={{ fontSize: 11, color: 'var(--text-muted)', marginTop: 6 }}>A draft model path (--spec-draft-model) is required for this mode.</div>}
+        {currentSpecTierDef.tier >= 2 && (
+          <div className="spec-widget-row" style={{ marginTop: 8 }}>
+            <span className="mmproj-widget-label">Sidecar file</span>
+            <input
+              type="text"
+              className="cmd-input mono"
+              style={{ flex: 1, fontSize: 12 }}
+              value={args['--spec-draft-model'] || ''}
+              placeholder="/path/to/draft-model.gguf"
+              onChange={e => handleUpdate('--spec-draft-model', e.target.value)}
+              disabled={disabled}
+            />
+            <button type="button" className="btn btn-ghost btn-icon" title="Browse" disabled={disabled} onClick={async () => {
+              const f = await window.api?.pickAnyFile?.()
+              if (f) handleUpdate('--spec-draft-model', f)
+            }}>
+              <FolderOpen size={14} />
+            </button>
+          </div>
+        )}
+        {/* Item 2: draft-max/min/p-min are each tier's own "preset" — shown
+            whenever a method is picked (not Off), diffed against the
+            SELECTED tier's own values, with a reset button. */}
+        {currentSpecTierDef.tier > 0 && (
+          <div style={{ marginTop: 8 }}>
+            <div className={`cmd-row cmd-row-hybrid ${draftMaxChanged ? 'changed-param' : ''}`} style={{ padding: '6px 0', border: 'none', background: 'transparent', position: 'relative' }}>
+              {draftMaxChanged && <div className="changed-indicator" />}
+              <div className="cmd-label-group">
+                <div className="cmd-label">Max Draft Tokens</div>
+                <div className="cmd-arg">--spec-draft-n-max</div>
+              </div>
+              <HybridSlider value={draftMaxVal ?? currentSpecTierDef.draftMax} min={0} max={128} step={1} onChange={v => handleUpdate('--spec-draft-n-max', v)} defaultVal={currentSpecTierDef.draftMax} disabled={disabled} />
+              {draftMaxChanged && <button type="button" className="cmd-reset-btn" onClick={() => handleUpdate('--spec-draft-n-max', currentSpecTierDef.draftMax)} disabled={disabled} title={`Reset to ${currentSpecTierDef.label} default (${currentSpecTierDef.draftMax})`}><RotateCcw size={12} /></button>}
+            </div>
+            <div className={`cmd-row cmd-row-hybrid ${draftMinChanged ? 'changed-param' : ''}`} style={{ padding: '6px 0', border: 'none', background: 'transparent', position: 'relative' }}>
+              {draftMinChanged && <div className="changed-indicator" />}
+              <div className="cmd-label-group">
+                <div className="cmd-label">Min Draft Tokens</div>
+                <div className="cmd-arg">--spec-draft-n-min</div>
+              </div>
+              <HybridSlider value={draftMinVal ?? currentSpecTierDef.draftMin} min={0} max={128} step={1} onChange={v => handleUpdate('--spec-draft-n-min', v)} defaultVal={currentSpecTierDef.draftMin} disabled={disabled} />
+              {draftMinChanged && <button type="button" className="cmd-reset-btn" onClick={() => handleUpdate('--spec-draft-n-min', currentSpecTierDef.draftMin)} disabled={disabled} title={`Reset to ${currentSpecTierDef.label} default (${currentSpecTierDef.draftMin})`}><RotateCcw size={12} /></button>}
+            </div>
+            <div className={`cmd-row cmd-row-hybrid ${draftPMinChanged ? 'changed-param' : ''}`} style={{ padding: '6px 0', border: 'none', background: 'transparent', position: 'relative' }}>
+              {draftPMinChanged && <div className="changed-indicator" />}
+              <div className="cmd-label-group">
+                <div className="cmd-label">Draft Probability</div>
+                <div className="cmd-arg">--spec-draft-p-min</div>
+              </div>
+              <HybridSlider value={draftPMinVal ?? currentSpecTierDef.draftPMin} min={0} max={1} step={0.01} onChange={v => handleUpdate('--spec-draft-p-min', v)} defaultVal={currentSpecTierDef.draftPMin} disabled={disabled} />
+              {draftPMinChanged && <button type="button" className="cmd-reset-btn" onClick={() => handleUpdate('--spec-draft-p-min', currentSpecTierDef.draftPMin)} disabled={disabled} title={`Reset to ${currentSpecTierDef.label} default (${currentSpecTierDef.draftPMin})`}><RotateCcw size={12} /></button>}
+            </div>
+          </div>
+        )}
+        {currentSpecTierDef.method === 'draft-model' && !args['--spec-draft-model'] && (
+          <div style={{ fontSize: 11, color: 'var(--warning)', marginTop: 6 }}>A draft model path (--spec-draft-model) is required for this method.</div>
+        )}
+
+        {/* Item 4: stackable n-gram modifiers — these ADD to --spec-type
+            (comma-separated) alongside whatever primary method is selected
+            above (including "Off" — n-gram-only speculative decoding is
+            valid), per llama.cpp's stacking support. */}
+        <div style={{ marginTop: 14, paddingTop: 10, borderTop: '1px solid var(--border)' }}>
+          <div style={{ fontSize: 11, fontWeight: 600, color: 'var(--text-muted)', textTransform: 'uppercase', letterSpacing: 0.4, marginBottom: 8 }}>
+            Stackable modifiers — combine with the method above
+          </div>
+          <NgramModifierBlock
+            title="N-gram Map (K4V)"
+            flagPrefix="--spec-ngram-map-k4v"
+            enabled={ngramMapK4vOn}
+            onToggle={(on) => setNgramModifier('map-k4v', on)}
+            disabled={disabled}
+            fields={[
+              { key: 'size-n', label: 'Match Window Size', def: 12 },
+              { key: 'size-m', label: 'Map Table Size', def: 48 },
+              { key: 'min-hits', label: 'Minimum Hits', def: 1 }
+            ]}
+            args={args}
+            handleUpdate={handleUpdate}
+          />
+          <NgramModifierBlock
+            title="N-gram Modifier"
+            flagPrefix="--spec-ngram-mod"
+            enabled={ngramModOn}
+            onToggle={(on) => setNgramModifier('mod', on)}
+            disabled={disabled}
+            fields={[
+              { key: 'n-match', label: 'Match Length', def: 24 },
+              { key: 'n-min', label: 'Minimum N-gram Size', def: 48 },
+              { key: 'n-max', label: 'Maximum N-gram Size', def: 64 }
+            ]}
+            extraField={{ arg: '--ctx-size-dft', label: 'Draft Context Size', def: 0 }}
+            args={args}
+            handleUpdate={handleUpdate}
+          />
+        </div>
       </div>
     )
   }
@@ -1743,23 +2081,27 @@ export default function CmdParamsEditor({ templateId, args, onChange, modelPathF
           <span>{meta.modelName || 'Unknown model'}</span>
           {meta.blockCount && <span className="cpu-info-cores">{meta.blockCount} layers</span>}
           {meta.contextLength && <span className="cpu-info-cores">Model supports up to {meta.contextLength.toLocaleString()} tokens</span>}
-          {meta.fileType && (
-            <span
-              className="cpu-info-cores"
-              title={
-                // Bug fix (item 2): explain the source, and flag it when the
-                // filename-derived label (what's shown) disagrees with the
-                // internal general.file_type metadata (which can happen for
-                // Unsloth Dynamic/mixed quants — see parseQuantFromFilename
-                // in ipc.ts).
-                (meta as any).fileTypeInternal && (meta as any).fileTypeInternal !== meta.fileType
-                  ? `From filename. Internal general.file_type metadata says "${(meta as any).fileTypeInternal}" — Dynamic/mixed quants intentionally use different bit-widths per tensor, so this can legitimately differ.`
-                  : 'Quantization (from filename, or general.file_type if the filename has no recognizable quant label)'
-              }
-            >
-              Quant: <strong>{meta.fileType}</strong>
-            </span>
-          )}
+          {meta.fileType && (() => {
+            const filenameLabel = (meta as any).fileTypeFilenameHint as string | null | undefined
+            // Bug fix (item 2, corrected): `meta.fileType` is now the
+            // internal general.file_type value whenever available — this is
+            // what llama-server itself reports/uses when loading the model,
+            // so our display matches llama-server's own logs. Unsloth
+            // Dynamic/mixed quants (e.g. "UD-Q3_K_XL" in the filename) mix
+            // bit-widths per-tensor, so the internal "dominant type" enum can
+            // legitimately differ from that marketing label — when it does,
+            // show BOTH, clearly labeled, instead of silently picking one.
+            return (
+              <span className="cpu-info-cores" title="Dominant quantization (general.file_type) — matches what llama-server itself reports when loading this model">
+                Quant: <strong>{meta.fileType}</strong>
+                {filenameLabel && filenameLabel !== meta.fileType && (
+                  <span style={{ opacity: 0.7 }} title={`Filename says "${filenameLabel}". Dynamic/mixed quants intentionally use different bit-widths per tensor, so this can legitimately differ from the internal dominant-type metadata above — llama-server itself will report "${meta.fileType}", not "${filenameLabel}".`}>
+                    {' '}(filename: {filenameLabel})
+                  </span>
+                )}
+              </span>
+            )
+          })()}
           {meta.kvLoraRank ? (
             <span className="cpu-info-cores" title="MLA attention: kv_lora_rank + qk_rope_head_dim">
               MLA: {meta.kvLoraRank}+{meta.qkRopeHeadDim || 0} latent dims
@@ -1831,22 +2173,36 @@ export default function CmdParamsEditor({ templateId, args, onChange, modelPathF
       <div className="cmd-section" style={{ marginBottom: 0, marginTop: 16 }}>
         <div className="cmd-section-header" style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
           <span>Preview</span>
-          <button
-            type="button"
-            className="btn btn-ghost btn-icon"
-            onClick={() => {
-              navigator.clipboard.writeText(cmdPreviewText).then(() => {
-                setPreviewCopied(true)
-                setTimeout(() => setPreviewCopied(false), 1500)
-              })
-            }}
-            title="Copy command to clipboard"
-            style={{ width: 26, height: 26 }}
-          >
-            {previewCopied ? <Check size={13} style={{ color: 'var(--success)' }} /> : <Copy size={13} />}
-          </button>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+            {/* Item 5: vertical-stack toggle — flips the preview between a
+                continuous flag string and one flag per line (shell-script
+                style with backslash continuations), for readability with
+                long/stacked commands. */}
+            <label style={{ display: 'flex', alignItems: 'center', gap: 5, fontSize: 11, color: 'var(--text-muted)', cursor: 'pointer' }} title="Show as a vertical stack of flags instead of one continuous line">
+              <input type="checkbox" checked={stackedPreview} onChange={e => setStackedPreview(e.target.checked)} />
+              Stacked view
+            </label>
+            <button
+              type="button"
+              className="btn btn-ghost btn-icon"
+              onClick={() => {
+                navigator.clipboard.writeText(stackedPreview ? cmdPreviewStackedText : cmdPreviewText).then(() => {
+                  setPreviewCopied(true)
+                  setTimeout(() => setPreviewCopied(false), 1500)
+                })
+              }}
+              title="Copy command to clipboard"
+              style={{ width: 26, height: 26 }}
+            >
+              {previewCopied ? <Check size={13} style={{ color: 'var(--success)' }} /> : <Copy size={13} />}
+            </button>
+          </div>
         </div>
-        <div className="cmd-preview" style={{ userSelect: 'text', WebkitUserSelect: 'text', cursor: 'text' }}>{cmdPreview}</div>
+        {stackedPreview ? (
+          <pre className="cmd-preview cmd-preview-stacked" style={{ userSelect: 'text', WebkitUserSelect: 'text', cursor: 'text' }}>{cmdPreviewStackedText}</pre>
+        ) : (
+          <div className="cmd-preview" style={{ userSelect: 'text', WebkitUserSelect: 'text', cursor: 'text' }}>{cmdPreview}</div>
+        )}
       </div>
     </div>
   )

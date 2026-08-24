@@ -26,8 +26,18 @@ export interface CpuInfoLike {
   physicalCores?: number
 }
 
-export function computeRecommendedThreads(cpuInfo: CpuInfoLike | null | undefined): number {
+export function computeRecommendedThreads(
+  cpuInfo: CpuInfoLike | null | undefined,
+  // New: "Recommended CPU Threads override" (Settings) — when provided,
+  // replaces the built-in 75% default with a user-chosen percentage of
+  // physical cores, always rounded to a whole core count (never "1.5 cores").
+  overridePercent?: number | null
+): number {
   const physicalCores = cpuInfo?.physicalCores || 8
+  if (overridePercent !== undefined && overridePercent !== null) {
+    const pct = Math.max(0, Math.min(100, overridePercent))
+    return Math.max(1, Math.round((pct / 100) * physicalCores))
+  }
   return Math.max(1, Math.floor(physicalCores * 0.75))
 }
 
@@ -40,22 +50,37 @@ export function defaultKvQuantFor(backendKey: string | undefined | null): string
 export function buildQuickEngineBaseline(opts: {
   cpuInfo?: CpuInfoLike | null
   backendKey?: string | null
+  cpuThreadsOverridePercent?: number | null
 }): Record<string, any> {
-  const recommendedThreads = computeRecommendedThreads(opts.cpuInfo)
+  const recommendedThreads = computeRecommendedThreads(opts.cpuInfo, opts.cpuThreadsOverridePercent)
   const kvQuant = defaultKvQuantFor(opts.backendKey)
   return {
     '--threads': recommendedThreads,
     '--batch-size': 2048,
     '--ubatch-size': 512,
-    // Single-user desktop app: --parallel only pays off serving multiple
-    // simultaneous API clients. --ctx-size is llama-server's TOTAL KV pool
-    // split evenly across --parallel slots, so leaving this at >1 silently
-    // divides the context the user actually gets in their one chat tab.
-    '--parallel': 1,
+    // Bug fix history: this used to default to 4, which silently quartered
+    // the context a single-user desktop chat tab actually got (llama-
+    // server's --ctx-size is the TOTAL KV pool split evenly across
+    // --parallel slots). Was changed to 1 to fix that. Now reverted back to
+    // 4 — with --kv-unified ON by default (below), a single unified KV
+    // buffer is shared across all slots instead of splitting the context
+    // window between them, so the original problem this "fix" addressed no
+    // longer applies, and 4 parallel slots (llama.cpp's own default) is
+    // safe again.
+    '--parallel': 4,
     '--flash-attn': 'on',
     '--mmap': true,
     '--mlock': true,
     '--kv-offload': true,
+    // New: "Unified KV Cache" — ON by default (matches the established
+    // pattern for boolean flags here: an unset boolean always displays as
+    // OFF regardless of the schema's own `default`, so flags meant to
+    // default ON for a new template must be explicitly set true here).
+    // With unified KV, --parallel no longer splits the context window across
+    // slots, so the single-user-app rationale for defaulting --parallel to 1
+    // (see above) no longer applies — safe to leave llama.cpp's own default
+    // of 4 parallel sequences.
+    '--kv-unified': true,
     '--cache-type-k': kvQuant,
     '--cache-type-v': kvQuant,
     '--keep': 32,

@@ -2,7 +2,7 @@ import { contextBridge, ipcRenderer } from 'electron'
 import { electronAPI } from '@electron-toolkit/preload'
 import type {
   ModelGroup, BackendVersion, TrackedBackend,
-  TrackedBackendRelease, ThemePref, ReleaseInfo, CpuInfo, SpeculationMode
+  TrackedBackendRelease, ThemePref, ReleaseInfo, CpuInfo, SpecDetectionResult
 } from '../shared/types'
 
 const api = {
@@ -124,13 +124,34 @@ const api = {
   getCpuInfo: () => ipcRenderer.invoke('get-cpu-info') as Promise<CpuInfo>,
 
   // ----- GGUF speculation auto-detection -----
-  detectSpeculation: (modelPath: string) => ipcRenderer.invoke('detect-speculation', modelPath) as Promise<{ mode: SpeculationMode; reason?: string; error?: string }>,
+  detectSpeculation: (modelPath: string) => ipcRenderer.invoke('detect-speculation', modelPath) as Promise<SpecDetectionResult>,
 
   // ----- GGUF metadata parser (features 12/13/14/16/29) -----
   getGgufMetadata: (modelPath: string) => ipcRenderer.invoke('get-gguf-metadata', modelPath) as Promise<any>,
   // Task 1: metadata cache (bulk-load + live updates)
   getMetadataCache: () => ipcRenderer.invoke('get-metadata-cache') as Promise<Record<string, any>>,
   clearMetadataCache: () => ipcRenderer.invoke('clear-metadata-cache') as Promise<{ success: boolean; cleared: number }>,
+  // Item 4: Monitoring tab.
+  perfGetActiveSessions: () => ipcRenderer.invoke('perf-get-active-sessions') as Promise<{ sessionId: string; templateId: string; templateName: string; startedAt: number }[]>,
+  perfGetActiveSessionData: (templateId: string) => ipcRenderer.invoke('perf-get-active-session-data', templateId) as Promise<any>,
+  perfGetSessionHistory: () => ipcRenderer.invoke('perf-get-session-history') as Promise<any[]>,
+  perfGetSessionData: (sessionId: string) => ipcRenderer.invoke('perf-get-session-data', sessionId) as Promise<any>,
+  perfSetMaxSessions: (n: number) => ipcRenderer.invoke('perf-set-max-sessions', n) as Promise<{ success: boolean }>,
+  perfExportSession: (sessionId: string) => ipcRenderer.invoke('perf-export-session', sessionId) as Promise<{ success: boolean; path?: string; error?: string; canceled?: boolean }>,
+  perfExportAllActive: () => ipcRenderer.invoke('perf-export-all-active') as Promise<{ success: boolean; path?: string; error?: string; canceled?: boolean }>,
+  perfImportSession: () => ipcRenderer.invoke('perf-import-session') as Promise<{ success: boolean; imported?: number; error?: string; canceled?: boolean }>,
+  onPerfDataPoint: (cb: (data: { templateId: string; type: 'gen' | 'prefill'; point: any }) => void) => {
+    ipcRenderer.removeAllListeners('perf-data-point')
+    ipcRenderer.on('perf-data-point', (_e, data) => cb(data))
+  },
+  onPerfSessionStarted: (cb: (data: { templateId: string; sessionId: string; startedAt: number }) => void) => {
+    ipcRenderer.removeAllListeners('perf-session-started')
+    ipcRenderer.on('perf-session-started', (_e, data) => cb(data))
+  },
+  onPerfSessionEnded: (cb: (data: { templateId: string; sessionId: string }) => void) => {
+    ipcRenderer.removeAllListeners('perf-session-ended')
+    ipcRenderer.on('perf-session-ended', (_e, data) => cb(data))
+  },
   onMetadataExtracting: (cb: (data: { modelPath: string; name: string; status: 'extracting' | 'done' | 'error' }) => void) => {
     ipcRenderer.removeAllListeners('metadata-extracting')
     ipcRenderer.on('metadata-extracting', (_e, data) => cb(data))

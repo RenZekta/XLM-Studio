@@ -8,6 +8,8 @@ import HuggingFaceView from './components/HuggingFaceView'
 import ModelsView from './components/ModelsView'
 import AboutView from './components/AboutView'
 import LogsView from './components/LogsView'
+import OverridesView from './components/OverridesView'
+import MonitoringView from './components/MonitoringView'
 import CreateModal from './components/CreateModal'
 import UpdateBanner from './components/UpdateBanner'
 import ChatWindow from './components/ChatWindow'
@@ -305,6 +307,8 @@ export default function App() {
     if (view === 'settings') return <SettingsView />
     if (view === 'models') return <ModelsView />
     if (view === 'logs') return <LogsView />
+    if (view === 'monitoring') return <MonitoringView />
+    if (view === 'overrides') return <OverridesView />
     if (view === 'about') return <AboutView />
     return <CardsView />
   }

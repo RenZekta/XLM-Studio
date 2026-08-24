@@ -1,7 +1,7 @@
 import { create } from 'zustand'
 import type {
   Template, BackendVersion, CommandsSchema, ReleaseInfo, RunningStatus,
-  ModelGroup, TrackedBackend, TrackedBackendRelease, ThemePref
+  ModelGroup, TrackedBackend, TrackedBackendRelease, ThemePref, SpecDetectionResult
 } from '../../../shared/types'
 
 interface CardState {
@@ -27,7 +27,7 @@ interface AppStore {
   commandsSchema: CommandsSchema | null
   releaseInfo: ReleaseInfo | null
   paths: { models: string; templates: string; backend: string; mainModelFolder: string; mainBackendFolder: string } | null
-  view: 'cards' | 'settings' | 'hub' | 'models' | 'about' | 'logs'
+  view: 'cards' | 'settings' | 'hub' | 'models' | 'about' | 'logs' | 'overrides' | 'monitoring'
   showCreateModal: boolean
   editingTemplate: Template | null
   prefillModelPath: string | null
@@ -56,7 +56,7 @@ interface AppStore {
   systemTheme: 'dark' | 'light'
   expandedModelGroups: Record<string, boolean>
   cpuInfo: { physicalCores: number; logicalCores: number; modelName: string } | null
-  detectedSpeculation: Record<string, { mode: 'off' | 'mtp' | 'draft' | 'dspark'; reason?: string }>
+  detectedSpeculation: Record<string, SpecDetectionResult>
   speculationApplied: Record<string, boolean>
   // New state for features 12-34
   ggufMetadata: Record<string, any>  // keyed by modelPath
@@ -64,7 +64,7 @@ interface AppStore {
   metadataExtractions: Record<string, { name: string; status: 'extracting' | 'done' | 'error' }>
   vramInfo: { freeVRAMMB: number; totalVRAMMB: number; hasNvidia: boolean; gpuName: string | null; vendor?: string | null; gpuType?: string | null } | null
   systemRam: { totalRAMMB: number; freeRAMMB: number } | null
-  modelDefaults: { autoFitEnabled: boolean; autoFitContextLength: number; guardrailMode: string; customMaxSizeGB: number; useCurrentMemState?: boolean; moeOffloadStrategy?: 'offload' | 'max'; autoFitUse2xIncrements?: boolean; autoFitYarnAutoScale?: boolean; autoEnableMmproj?: boolean }
+  modelDefaults: { autoFitEnabled: boolean; autoFitContextLength: number; guardrailMode: string; customMaxSizeGB: number; useCurrentMemState?: boolean; moeOffloadStrategy?: 'offload' | 'max'; autoFitUse2xIncrements?: boolean; autoFitYarnAutoScale?: boolean; autoEnableMmproj?: boolean; cpuThreadsOverrideEnabled?: boolean; cpuThreadsOverridePercent?: number; parallelOverrideEnabled?: boolean; parallelInferenceMode?: 'unified' | 'separate'; parallelOverrideValue?: number; parallelOverrideValueDense?: number; parallelOverrideValueMoe?: number; perfMaxSessions?: number }
   baseUrlOverride: { enabled: boolean; port: number; serveOnLocalNetwork: boolean; apiKeyEnabled: boolean; apiKey: string }
   samplingPresets: any[]
   paramViewMode: 'common' | 'full'  // feature 30
@@ -124,7 +124,7 @@ interface AppStore {
   setSystemTheme: (t: 'dark' | 'light') => void
   toggleModelGroup: (folderPath: string) => void
   setCpuInfo: (info: { physicalCores: number; logicalCores: number; modelName: string } | null) => void
-  setDetectedSpeculation: (modelPath: string, mode: 'off' | 'mtp' | 'draft' | 'dspark', reason?: string) => void
+  setDetectedSpeculation: (modelPath: string, result: SpecDetectionResult) => void
   markSpeculationApplied: (templateId: string, applied: boolean) => void
   setGgufMetadata: (modelPath: string, meta: any) => void
   setGgufMetadataBulk: (cache: Record<string, any>) => void
@@ -175,7 +175,7 @@ export const useStore = create<AppStore>((set) => ({
   metadataExtractions: {},
   vramInfo: null,
   systemRam: null,
-  modelDefaults: { autoFitEnabled: true, autoFitContextLength: 60000, guardrailMode: 'strict', customMaxSizeGB: 0, useCurrentMemState: false, moeOffloadStrategy: 'max' /* item 6: default to MAX+ForceMoEtoCPU */, autoEnableMmproj: true },
+  modelDefaults: { autoFitEnabled: true, autoFitContextLength: 60000, guardrailMode: 'strict', customMaxSizeGB: 0, useCurrentMemState: false, moeOffloadStrategy: 'max' /* item 6: default to MAX+ForceMoEtoCPU */, autoEnableMmproj: true, cpuThreadsOverrideEnabled: false, cpuThreadsOverridePercent: 100, parallelOverrideEnabled: false, parallelInferenceMode: 'unified', parallelOverrideValue: 4, parallelOverrideValueDense: 4, parallelOverrideValueMoe: 4, perfMaxSessions: 20 },
   baseUrlOverride: { enabled: true, port: 1234, serveOnLocalNetwork: false, apiKeyEnabled: false, apiKey: '' },
   samplingPresets: [],
   paramViewMode: 'common',
@@ -249,8 +249,8 @@ export const useStore = create<AppStore>((set) => ({
     expandedModelGroups: { ...s.expandedModelGroups, [folderPath]: !s.expandedModelGroups[folderPath] }
   })),
   setCpuInfo: (info) => set({ cpuInfo: info }),
-  setDetectedSpeculation: (modelPath, mode, reason) => set((s) => ({
-    detectedSpeculation: { ...s.detectedSpeculation, [modelPath]: { mode, reason } }
+  setDetectedSpeculation: (modelPath, result) => set((s) => ({
+    detectedSpeculation: { ...s.detectedSpeculation, [modelPath]: result }
   })),
   markSpeculationApplied: (templateId, applied) => set((s) => ({
     speculationApplied: { ...s.speculationApplied, [templateId]: applied }

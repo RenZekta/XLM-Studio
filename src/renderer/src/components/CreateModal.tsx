@@ -84,8 +84,15 @@ export default function CreateModal() {
     }
     Object.assign(seeded, buildQuickEngineBaseline({
       cpuInfo: useStore.getState().cpuInfo,
-      backendKey: activeBackend?.backendKey
+      backendKey: activeBackend?.backendKey,
+      cpuThreadsOverridePercent: useStore.getState().modelDefaults.cpuThreadsOverrideEnabled
+        ? useStore.getState().modelDefaults.cpuThreadsOverridePercent
+        : null
     }))
+    // Bug fix (preset toggle showing wrong mode): mark this as Quick
+    // explicitly, matching handleQuickPreset's own marker — see
+    // derivedPresetMode's comment in CmdParamsEditor.tsx.
+    seeded['__lastPreset'] = 'quick'
     return seeded
   })
   const [tagsStr, setTagsStr] = useState('')
@@ -149,8 +156,12 @@ export default function CreateModal() {
         // should also reapply the Quick engine baseline, not just sampling.
         Object.assign(seeded, buildQuickEngineBaseline({
           cpuInfo: useStore.getState().cpuInfo,
-          backendKey: activeBackend?.backendKey
+          backendKey: activeBackend?.backendKey,
+          cpuThreadsOverridePercent: useStore.getState().modelDefaults.cpuThreadsOverrideEnabled
+            ? useStore.getState().modelDefaults.cpuThreadsOverridePercent
+            : null
         }))
+        seeded['__lastPreset'] = 'quick'
         setArgs(seeded)
         setTagsStr('')
         setLaunchMode('chat')
@@ -381,7 +392,7 @@ export default function CreateModal() {
                 >
                   <option value="">-- Select a model --</option>
                   {models.map(g => (
-                    <optgroup key={g.folderPath} label={`${g.folder}${g.external ? ' (external)' : ''}${g.mmproj ? ' · mmproj' : ''}`}>
+                    <optgroup key={g.folderPath} label={`${g.folder}${g.external ? ' (external)' : ''}${g.mmproj ? ' [has mmproj]' : ''}`}>
                       {g.models.map(m => (
                         <option key={m.path} value={m.path}>{m.name}</option>
                       ))}

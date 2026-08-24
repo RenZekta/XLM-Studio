@@ -21,14 +21,28 @@ export interface MmprojFile {
   size: number
 }
 
+// Item 2/3 (Speculative Decoding rework): a sidecar draft/speculative-head
+// file detected alongside models in the same folder — same treatment as
+// MmprojFile (shown non-interactively in the Models tab, excluded from the
+// Template Model File dropdown), but tagged with its detected tier.
+export interface SpecDecodeSidecarFile {
+  name: string
+  path: string
+  size: number
+  tier: number
+  method: string
+  label: string
+}
+
 // LM-Studio style grouping: one folder may hold several .gguf model files plus
 // (optionally) a single shared mmproj file. All models in the folder share it.
 export interface ModelGroup {
   folder: string        // display name (folder basename)
   folderPath: string    // absolute path to the folder
   external: boolean     // true when the folder is under an external model folder
-  models: ModelEntry[]  // .gguf/.bin/.ggml files excluding mmproj
+  models: ModelEntry[]  // .gguf/.bin/.ggml files excluding mmproj and spec-decode sidecars
   mmproj: MmprojFile | null
+  specDecodeSidecars: SpecDecodeSidecarFile[]
   totalSize: number     // sum of models + mmproj
   modelSize: number     // sum of models only
 }
@@ -143,7 +157,11 @@ export interface CpuInfo {
 }
 
 // Speculative decoding mode exposed in the Advanced Parameters UI.
-export type SpeculationMode = 'off' | 'mtp' | 'draft' | 'dspark'
+export type SpeculationMode = 'off' | 'mtp' | 'draft' | 'dspark'  // legacy, kept for the stored-detection-cache shape compatibility
+// Item 2 (Speculative Decoding rework): the full tier system.
+export type SpecMethod = 'off' | 'native-mtp' | 'draft-model' | 'eagle3' | 'dspark2' | 'dflash2'
+export interface SpecCandidate { tier: number; method: SpecMethod; label: string; path: string | null; name: string | null; reason: string }
+export interface SpecDetectionResult { tier: number; method: SpecMethod; path?: string | null; reason?: string; candidates: SpecCandidate[]; error?: string }
 
 // GGUF model metadata extracted from the file header. Used by features 12/13/14/16/29.
 export interface GgufMetadata {
@@ -177,6 +195,11 @@ export interface GgufMetadata {
   // lookups (which need the ACTUAL dominant per-tensor type, not the
   // marketing label, for an accurate weight-memory estimate).
   fileTypeInternal: string | null
+  // Bug fix (item 2, corrected): the filename-derived quant label, kept
+  // separately (never used to override fileType above) purely so the UI can
+  // show it alongside the authoritative internal value when they disagree —
+  // see the Quant display in CmdParamsEditor.tsx.
+  fileTypeFilenameHint: string | null
   vocabSize: number | null         // tokenizer vocabulary size — logits buffer estimate
   // Task 6: hybrid SSM/attention models (Qwen3-Next, Qwen3.5/3.8, gpt-oss) —
   // only every Nth layer (N = full_attention_interval) carries a KV cache.

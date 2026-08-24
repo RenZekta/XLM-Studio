@@ -57,8 +57,20 @@ export default function LogsView() {
 
   function handleClear() { clearLogs(); setPausedSnapshot(null) }
 
+  // Bug fix (item 3): each log entry's `name` field is a SNAPSHOT taken at
+  // the moment that line was emitted (see App.tsx's server-log listener) —
+  // if the template gets renamed later, old (and even new) log lines kept
+  // showing the stale name baked in at emission time, while `id` (the
+  // template's stable ID) never changes. Look up the CURRENT name from
+  // `cards` by id at display/export time instead, falling back to the
+  // frozen snapshot only if the template no longer exists (e.g. deleted).
+  function liveName(l: LogEntry): string {
+    const card = cards.find(c => c.template.id === l.id)
+    return card?.template.name || l.name
+  }
+
   function handleExport() {
-    const text = filteredLogs().map(l => `[${new Date(l.ts).toISOString()}] [${l.stream}] [${l.name}] ${l.line}`).join('\n')
+    const text = filteredLogs().map(l => `[${new Date(l.ts).toISOString()}] [${l.stream}] [${liveName(l)}] ${l.line}`).join('\n')
     const blob = new Blob([text], { type: 'text/plain' })
     const url = URL.createObjectURL(blob)
     const a = document.createElement('a')
@@ -125,7 +137,14 @@ export default function LogsView() {
           fontFamily: "var(--font-mono)",
           fontSize: 13,
           lineHeight: 1.5,
-          minHeight: 0
+          minHeight: 0,
+          // Item 5: the app disables text selection globally by default
+          // (body { user-select: none }), opted back in only for form
+          // inputs — logs need it too, so users can select/copy a snippet
+          // without exporting the whole file.
+          userSelect: 'text',
+          WebkitUserSelect: 'text',
+          cursor: 'text'
         }}
       >
         {displayed.length === 0 ? (
@@ -157,7 +176,7 @@ export default function LogsView() {
                 <span style={{ color: 'var(--text)', fontSize: 11 }}>
                   [{new Date(l.ts).toLocaleTimeString()}]
                 </span>{' '}
-                <span style={{ color: 'var(--info-blue)', fontSize: 11, fontWeight: 600 }}>[{l.name}]</span>{' '}
+                <span style={{ color: 'var(--info-blue)', fontSize: 11, fontWeight: 600 }}>[{liveName(l)}]</span>{' '}
                 {l.line}
               </div>
             )
