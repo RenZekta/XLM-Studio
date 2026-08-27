@@ -271,7 +271,13 @@ export default function CmdParamsEditor({ templateId, args, onChange, modelPathF
   const currentCtx = args['--ctx-size'] !== undefined && args['--ctx-size'] !== '' ? Number(args['--ctx-size']) : 32768
   // Default KV cache quant depends on the backend (TurboQuant fork → turbo3,
   // otherwise q8_0). The user can override per-template via --cache-type-k/v.
-  const defaultKvQuant = activeBackend?.backendKey === 'atomic-llama-cpp-turboquant' ? 'turbo3' : 'q8_0'
+  // Bug fix (item 4): llama.cpp silently upgrades K to q8_0 when K/V
+  // quant types are too asymmetric (a quality-preserving safety fallback),
+  // which was quietly happening with turbo3 all along — wasting the context
+  // headroom the user actually wanted turboquant for, without any visible
+  // indication it had happened. turbo4 doesn't trigger that fallback and
+  // works cleanly, so it's now the default for this backend instead.
+  const defaultKvQuant = activeBackend?.backendKey === 'atomic-llama-cpp-turboquant' ? 'turbo4' : 'q8_0'
   const kvQuantK = (typeof args['--cache-type-k'] === 'string' && args['--cache-type-k']) ? String(args['--cache-type-k']) : defaultKvQuant
   const kvQuantV = (typeof args['--cache-type-v'] === 'string' && args['--cache-type-v']) ? String(args['--cache-type-v']) : kvQuantK
   // Task 2.1/2.2/2.3/5: per-preset context-fill toggle + memory overhead.

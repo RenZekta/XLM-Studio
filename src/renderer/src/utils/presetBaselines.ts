@@ -42,7 +42,10 @@ export function computeRecommendedThreads(
 }
 
 export function defaultKvQuantFor(backendKey: string | undefined | null): string {
-  return backendKey === 'atomic-llama-cpp-turboquant' ? 'turbo3' : 'q8_0'
+  // Bug fix (item 4): see the identical note in CmdParamsEditor.tsx —
+  // turbo3 was silently getting K upgraded to q8_0 by llama.cpp's own
+  // asymmetry safety fallback; turbo4 avoids that and is the better default.
+  return backendKey === 'atomic-llama-cpp-turboquant' ? 'turbo4' : 'q8_0'
 }
 
 // The engine-only baseline (no sampling, no ctx-size/gpu-layers — see notes

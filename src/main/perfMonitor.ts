@@ -155,11 +155,29 @@ function poll(templateId: string) {
     if (dPromptTokens > 0 && dPromptSeconds > 0) {
       const promptTps = dPromptTokens / dPromptSeconds
       // Heuristic cold/warm classification — see module header comment.
+      // Bug fix: with very few samples, a single noisy early poll becomes
+      // the "median" outright, and normal poll-to-poll timing variance can
+      // easily look like a big jump — spuriously flagging an otherwise
+      // perfectly normal COLD burst as "cached". Require a minimum number
+      // of genuine cold samples before ever classifying anything as cached,
+      // so early-session noise can't trigger a false positive.
+      //
+      // Bug fix (follow-up): the original 4x threshold turned out to never
+      // fire in practice. A real cache hit only skips compute for the
+      // REUSED prefix — a typical chat turn reuses most of the previous
+      // context but still has to cold-process the new user message, so the
+      // BLENDED throughput for that request is nowhere near 4x faster than
+      // pure-cold, even though a meaningful chunk of it genuinely was
+      // cached. Lowered to a more realistic 2x, which is still comfortably
+      // above normal poll-to-poll variance but low enough to actually catch
+      // partial-cache-hit turns.
+      const MIN_COLD_SAMPLES_BEFORE_CLASSIFYING = 3
+      const CACHE_HIT_THRESHOLD_MULTIPLIER = 2
       const coldSamples = stillActive.coldThroughputSamples
-      const coldMedian = coldSamples.length
+      const coldMedian = coldSamples.length >= MIN_COLD_SAMPLES_BEFORE_CLASSIFYING
         ? [...coldSamples].sort((a, b) => a - b)[Math.floor(coldSamples.length / 2)]
         : null
-      const cached = coldMedian !== null && promptTps > coldMedian * 4
+      const cached = coldMedian !== null && promptTps > coldMedian * CACHE_HIT_THRESHOLD_MULTIPLIER
       if (!cached) {
         coldSamples.push(promptTps)
         if (coldSamples.length > 20) coldSamples.shift()

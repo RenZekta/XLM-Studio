@@ -245,13 +245,16 @@ input[type="number"] {
 .card-expand-btn svg { width: 16px; height: 16px; transition: transform var(--transition); }
 .card-expand-btn.open svg { transform: rotate(180deg); }
 .card-expanded {
-  border-top: 1.5px solid var(--border);
+  /* Bug fix: border-top used to be on the base class, so it stayed visible
+     as a thin line even while collapsed (max-height:0 clips the CONTENT
+     height, but the border is part of the box itself and isn't clipped by
+     that). Moved to .open only, below. */
   background: var(--bg);
   max-height: 0;
   overflow: hidden;
   transition: max-height 350ms cubic-bezier(.4,0,.2,1);
 }
-.card-expanded.open { max-height: 1200px; overflow-y: auto; }
+.card-expanded.open { max-height: 1200px; overflow-y: auto; border-top: 1.5px solid var(--border); }
 .expanded-inner { padding: 16px 18px 20px; }
 .cmd-section { margin-bottom: 20px; }
 .cmd-section-header {

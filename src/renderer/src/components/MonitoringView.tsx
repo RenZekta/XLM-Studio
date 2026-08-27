@@ -405,11 +405,20 @@ function TsChart({ sessions, onFullscreen, fullscreen, heightPx }: { sessions: {
       </div>
       <div style={{ width: '100%', height: heightPx ?? 320 }}>
         <ResponsiveContainer>
-          {/* Bug fix (item 1): switched from ScatterChart (unconnected dots)
-              to ComposedChart + <Line>, which connects points of the same
-              session with a line in that session's color (in the order they
-              were recorded — i.e. over time as the session progressed),
-              while still showing a dot at each actual data point. */}
+          {/* Bug fix (item 1, then item 2's follow-up): switched from
+              ScatterChart (unconnected dots) to ComposedChart + <Line>, which
+              connects points of the same session with a line in that
+              session's color. The line initially connected points in the
+              order they were RECORDED (chronological) — but the X axis here
+              is context size, not time, so if a later point happened to have
+              a SMALLER context size than an earlier one (e.g. a shorter
+              follow-up prompt after a longer one), the line would visibly
+              double back leftward, producing the "backwards" crisscrossing
+              the user reported. Sorting each session's points by X (context
+              size) before drawing fixes this by construction — the line can
+              only ever move left-to-right, tracing out speed-vs-size as a
+              proper function curve, which is also the more conventional way
+              to read a "Y vs X" chart in the first place. */}
           <ComposedChart margin={{ top: 10, right: 20, bottom: 10, left: 0 }}>
             <CartesianGrid strokeDasharray="3 3" stroke="var(--border)" />
             <XAxis type="number" dataKey="contextTokens" name="Context size" unit=" tok" stroke="var(--text-muted)" tick={{ fontSize: 11 }} />
@@ -418,11 +427,13 @@ function TsChart({ sessions, onFullscreen, fullscreen, heightPx }: { sessions: {
             {sessions.length > 1 && <Legend wrapperStyle={{ fontSize: 11 }} />}
             {sessions.map((s, i) => {
               const color = SERIES_COLORS[i % SERIES_COLORS.length]
-              const data = s.data.genPoints.map(p => ({ ...p, __seriesLabel: s.data.templateNameSnapshot }))
+              const data = [...s.data.genPoints]
+                .sort((a, b) => a.contextTokens - b.contextTokens)
+                .map(p => ({ ...p, __seriesLabel: s.data.templateNameSnapshot }))
               return (
                 <Line
                   key={keyId(s.key)}
-                  type="monotone"
+                  type="linear"
                   name={s.data.templateNameSnapshot}
                   data={data}
                   dataKey="genTps"
@@ -463,43 +474,72 @@ function PrefillChart({ sessions, onFullscreen, fullscreen, heightPx }: { sessio
             alone (same per session) no longer differs between cold/warm. */}
         {' '}Solid line = cold, dashed line = cached (warm) — hover any point for the exact value.
       </div>
-      <div style={{ width: '100%', height: heightPx ?? 320 }}>
-        <ResponsiveContainer>
-          <ComposedChart margin={{ top: 10, right: 20, bottom: 10, left: 0 }}>
-            <CartesianGrid strokeDasharray="3 3" stroke="var(--border)" />
-            <XAxis type="number" dataKey="promptSize" name="Prompt size" unit=" tok" scale="log" domain={['auto', 'auto']} stroke="var(--text-muted)" tick={{ fontSize: 11 }} />
-            <YAxis type="number" dataKey="promptTps" name="Throughput" unit=" t/s" stroke="var(--text-muted)" tick={{ fontSize: 11 }} />
-            <Tooltip content={<ChartTooltip />} />
-            <Legend wrapperStyle={{ fontSize: 11 }} />
-            {sessions.map((s, i) => {
-              const base = SERIES_COLORS[i % SERIES_COLORS.length]
-              // Bug fix (item 3): previously both cold/warm points used the
-              // SAME color (just different opacity/shape), and the tooltip
-              // never actually said which was which — indistinguishable at a
-              // glance and on hover. Now cold is a SOLID line in the
-              // session's color, warm is a DASHED line in the same color
-              // (so you can still tell which SESSION it belongs to), and the
-              // shared ChartTooltip explicitly labels "Cold" vs "Cached (warm)".
-              const cold = s.data.prefillPoints.filter(p => !p.cached).map(p => ({ ...p, __seriesLabel: `${s.data.templateNameSnapshot} — cold` }))
-              const warm = s.data.prefillPoints.filter(p => p.cached).map(p => ({ ...p, __seriesLabel: `${s.data.templateNameSnapshot} — warm` }))
-              return (
-                <React.Fragment key={keyId(s.key)}>
-                  <Line
-                    type="monotone" name={`${s.data.templateNameSnapshot} — cold`} data={cold} dataKey="promptTps"
-                    stroke={base} strokeWidth={2} dot={{ r: 3, fill: base, strokeWidth: 0 }} activeDot={{ r: 5 }}
-                    connectNulls isAnimationActive={false}
-                  />
-                  <Line
-                    type="monotone" name={`${s.data.templateNameSnapshot} — warm`} data={warm} dataKey="promptTps"
-                    stroke={base} strokeWidth={2} strokeDasharray="5 4" dot={{ r: 3, fill: base, strokeWidth: 1, stroke: 'var(--surface)' }} activeDot={{ r: 5 }}
-                    connectNulls isAnimationActive={false}
-                  />
-                </React.Fragment>
-              )
-            })}
-          </ComposedChart>
-        </ResponsiveContainer>
-      </div>
+      {(() => {
+        // Bug fix: log scale needs the plotted values to span a wide ratio
+        // to generate sensible tick marks — with only a narrow range of
+        // prompt sizes seen so far (e.g. early in a session), recharts'
+        // log-scale tick generator could produce just ONE tick (or none),
+        // which is what "x-axis labels disappeared" actually was. Only use
+        // log scale once the range genuinely warrants it (>10x between
+        // smallest and largest prompt size seen); otherwise use a normal
+        // linear scale, which always ticks sensibly regardless of range.
+        const allSizes = sessions.flatMap(s => s.data.prefillPoints.map(p => p.promptSize)).filter(n => n > 0)
+        const minSize = allSizes.length ? Math.min(...allSizes) : 1
+        const maxSize = allSizes.length ? Math.max(...allSizes) : 1
+        const useLog = allSizes.length >= 2 && maxSize / Math.max(1, minSize) >= 10
+        return (
+          <div style={{ width: '100%', height: heightPx ?? 320 }}>
+            <ResponsiveContainer>
+              <ComposedChart margin={{ top: 10, right: 20, bottom: 10, left: 0 }}>
+                <CartesianGrid strokeDasharray="3 3" stroke="var(--border)" />
+                <XAxis
+                  type="number" dataKey="promptSize" name="Prompt size" unit=" tok"
+                  scale={useLog ? 'log' : 'linear'}
+                  domain={useLog ? ['auto', 'auto'] : [0, 'auto']}
+                  allowDecimals={false}
+                  tickCount={6}
+                  stroke="var(--text-muted)" tick={{ fontSize: 11 }}
+                />
+                <YAxis type="number" dataKey="promptTps" name="Throughput" unit=" t/s" stroke="var(--text-muted)" tick={{ fontSize: 11 }} />
+                <Tooltip content={<ChartTooltip />} />
+                <Legend wrapperStyle={{ fontSize: 11 }} />
+                {sessions.map((s, i) => {
+                  const base = SERIES_COLORS[i % SERIES_COLORS.length]
+                  // Bug fix (item 3): previously both cold/warm points used the
+                  // SAME color (just different opacity/shape), and the tooltip
+                  // never actually said which was which — indistinguishable at a
+                  // glance and on hover. Now cold is a SOLID line in the
+                  // session's color, warm is a DASHED line in the same color
+                  // (so you can still tell which SESSION it belongs to), and the
+                  // shared ChartTooltip explicitly labels "Cold" vs "Cached (warm)".
+                  const cold = s.data.prefillPoints.filter(p => !p.cached)
+                    .sort((a, b) => a.promptSize - b.promptSize)
+                    .map(p => ({ ...p, __seriesLabel: `${s.data.templateNameSnapshot} — cold` }))
+                  const warm = s.data.prefillPoints.filter(p => p.cached)
+                    .sort((a, b) => a.promptSize - b.promptSize)
+                    .map(p => ({ ...p, __seriesLabel: `${s.data.templateNameSnapshot} — warm` }))
+                  return (
+                    <React.Fragment key={keyId(s.key)}>
+                      <Line
+                        type="linear" name={`${s.data.templateNameSnapshot} — cold`} data={cold} dataKey="promptTps"
+                        stroke={base} strokeWidth={2} dot={{ r: 3, fill: base, strokeWidth: 0 }} activeDot={{ r: 5 }}
+                        connectNulls isAnimationActive={false}
+                      />
+                      {warm.length > 0 && (
+                        <Line
+                          type="linear" name={`${s.data.templateNameSnapshot} — warm`} data={warm} dataKey="promptTps"
+                          stroke={base} strokeWidth={2} strokeDasharray="5 4" dot={{ r: 3, fill: base, strokeWidth: 1, stroke: 'var(--surface)' }} activeDot={{ r: 5 }}
+                          connectNulls isAnimationActive={false}
+                        />
+                      )}
+                    </React.Fragment>
+                  )
+                })}
+              </ComposedChart>
+            </ResponsiveContainer>
+          </div>
+        )
+      })()}
       {sessions.every(s => s.data.prefillPoints.length === 0) && (
         <div style={{ fontSize: 12, color: 'var(--text-muted)', textAlign: 'center', marginTop: 8 }}>
           No prompt-processing activity recorded yet for the selected session(s).

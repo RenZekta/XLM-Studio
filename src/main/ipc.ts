@@ -402,6 +402,125 @@ function isSpecDecodeSidecarFile(name: string, sizeBytes: number): boolean {
   return sizeBytes <= SIDECAR_MAX_SIZE_MB * 1024 * 1024
 }
 
+// Bug fix (item 3 — false-positive Native MTP detection): the original MTP
+// scanner read a fixed N-MB window from the start of the file and searched
+// it as raw latin1 text for substrings like "mtp". For any model whose
+// metadata+tensor-name section is smaller than that window (the vast
+// majority, especially smaller/heavily-quantized ones), most of that window
+// is actually raw QUANTIZED TENSOR WEIGHT DATA — high-entropy binary noise,
+// not text — and over enough megabytes of it, short substrings like "mtp"
+// can and do appear by pure chance, exactly as happened here. The fix is to
+// stop guessing a byte window entirely and instead properly parse the GGUF
+// binary structure (magic/version/counts, then each metadata KV pair, then
+// each tensor's name) — reusing the same well-tested parsing approach as
+// the JS-fallback metadata extractor elsewhere in this file — so the search
+// text is built ONLY from genuine structural strings (metadata keys,
+// string-typed metadata values, and tensor names), and NEVER touches a
+// single byte of actual tensor weight data. This can't produce a false
+// positive from quantized noise, no matter how large the file is.
+async function readGgufStructuralText(modelPath: string, maxKv = 2000, maxTensors = 200000): Promise<string> {
+  const fd = await fsPromises.open(modelPath, 'r')
+  try {
+    const header = Buffer.alloc(24)
+    await fd.read(header, 0, 24, 0)
+    if (header.toString('ascii', 0, 4) !== 'GGUF') return ''
+    const version = header.readUInt32LE(4)
+    let fileOffset: number
+    let tensorCount: number
+    let kvCount: number
+    if (version >= 3) {
+      tensorCount = Number(readU64(header, 8))
+      kvCount = Number(readU64(header, 16))
+      fileOffset = 24
+    } else {
+      tensorCount = header.readUInt32LE(8)
+      kvCount = header.readUInt32LE(12)
+      fileOffset = 16
+    }
+
+    const chunkSize = 512 * 1024
+    const readBuf = Buffer.alloc(chunkSize)
+    async function readBytes(n: number): Promise<Buffer> {
+      const out = Buffer.alloc(n)
+      let read = 0
+      while (read < n) {
+        const start = Math.floor(fileOffset / chunkSize) * chunkSize
+        const offInChunk = fileOffset % chunkSize
+        const avail = Math.min(chunkSize - offInChunk, n - read)
+        await fd.read(readBuf, 0, chunkSize, start)
+        readBuf.copy(out, read, offInChunk, offInChunk + avail)
+        fileOffset += avail
+        read += avail
+      }
+      return out
+    }
+    async function readString(): Promise<string> {
+      const lenBytes = version >= 3 ? 8 : 4
+      const lenBuf = await readBytes(lenBytes)
+      const len = version >= 3 ? Number(readU64(lenBuf, 0)) : lenBuf.readUInt32LE(0)
+      if (len < 0 || len > 10 * 1024 * 1024) throw new Error('implausible string length')
+      const strBuf = await readBytes(len)
+      return strBuf.toString('utf-8')
+    }
+    async function skipOrCollectValue(type: number, collect: string[]): Promise<void> {
+      switch (type) {
+        case 0: case 1: case 7: await readBytes(1); return
+        case 2: case 3: await readBytes(2); return
+        case 4: case 5: case 6: await readBytes(4); return
+        case 10: case 11: case 12: await readBytes(8); return
+        case 8: { const s = await readString(); collect.push(s); return }
+        case 9: {
+          const arrTypeBuf = await readBytes(4)
+          const arrType = arrTypeBuf.readUInt32LE(0)
+          const arrLenBytes = version >= 3 ? 8 : 4
+          const lBuf = await readBytes(arrLenBytes)
+          const arrLen = version >= 3 ? Number(readU64(lBuf, 0)) : lBuf.readUInt32LE(0)
+          // String arrays (e.g. tokenizer vocab) can be huge and aren't
+          // relevant to speculative-decoding detection — skip their
+          // CONTENTS without collecting, but still must advance the file
+          // offset correctly by reading through them.
+          for (let i = 0; i < Math.min(arrLen, 2_000_000); i++) {
+            await skipOrCollectValue(arrType, [])
+          }
+          return
+        }
+        default: throw new Error('unknown GGUF value type ' + type)
+      }
+    }
+
+    const textParts: string[] = []
+    for (let i = 0; i < kvCount && i < maxKv; i++) {
+      const key = await readString()
+      textParts.push(key)
+      const typeBuf = await readBytes(4)
+      const valueType = typeBuf.readUInt32LE(0)
+      await skipOrCollectValue(valueType, textParts)
+    }
+    // Tensor names — each tensor info is: name(string) + n_dims(u32) +
+    // dims(u64 * n_dims) + ggml_type(u32) + offset(u64). We only need the
+    // name; skip the rest by their fixed/known sizes.
+    for (let i = 0; i < tensorCount && i < maxTensors; i++) {
+      const name = await readString()
+      textParts.push(name)
+      const nDimsBuf = await readBytes(4)
+      const nDims = nDimsBuf.readUInt32LE(0)
+      if (nDims < 0 || nDims > 8) throw new Error('implausible tensor dim count')
+      await readBytes(nDims * 8)  // dims (u64 each)
+      await readBytes(4)          // ggml_type (u32)
+      await readBytes(8)          // offset (u64)
+    }
+    return textParts.join(' ').toLowerCase()
+  } catch {
+    // Any parse error (corrupt/unusual file, unexpected structure) — return
+    // whatever we've got is not tracked here for simplicity; safest to
+    // signal "nothing reliably found" rather than risk a partial/garbled
+    // read producing a false match.
+    return ''
+  } finally {
+    await fd.close().catch(() => {})
+  }
+}
+
 // Feature 22: substring-based scan — detect "mmproj" ANYWHERE in the filename,
 // not just at the beginning. Allows files like "modelname-mmproj-BF16.gguf".
 function isMmprojFile(name: string): boolean {
@@ -2000,34 +2119,65 @@ export function registerIpcHandlers(): void {
       isNewer: undefined, assets: []
     }
     try {
-      const release = await fetchJson(`https://api.github.com/repos/${tracked.repo}/releases/latest`) as any
-      if (!release || !release.assets) {
-        return { ...base, error: 'Invalid response from GitHub' }
-      }
       const isMac = process.platform === 'darwin'
       const isLinux = process.platform === 'linux'
       const arch = process.arch
-      const platformAssets = release.assets.filter((a: any) => {
-        const n = a.name.toLowerCase()
-        if (n.startsWith('cudart-')) return false
-        if (isMac) {
-          if (!n.endsWith('.tar.gz') || !n.includes('macos')) return false
-          if (arch === 'arm64' && !n.includes('arm64')) return false
-          if (arch === 'x64' && !n.includes('x64')) return false
-          return true
-        }
-        if (isLinux) {
-          if (!n.endsWith('.tar.gz') || !n.includes('ubuntu')) return false
-          if (arch === 'arm64' && !n.includes('arm64')) return false
+      function platformAssetsFor(rel: any): any[] {
+        return (rel.assets || []).filter((a: any) => {
+          const n = a.name.toLowerCase()
+          if (n.startsWith('cudart-')) return false
+          if (isMac) {
+            if (!n.endsWith('.tar.gz') || !n.includes('macos')) return false
+            if (arch === 'arm64' && !n.includes('arm64')) return false
+            if (arch === 'x64' && !n.includes('x64')) return false
+            return true
+          }
+          if (isLinux) {
+            if (!n.endsWith('.tar.gz') || !n.includes('ubuntu')) return false
+            if (arch === 'arm64' && !n.includes('arm64')) return false
+            if (arch === 'x64' && n.includes('arm64')) return false
+            return true
+          }
+          if (!n.endsWith('.zip')) return false
+          if (!(n.includes('win') || n.includes('windows'))) return false
           if (arch === 'x64' && n.includes('arm64')) return false
+          if (arch === 'arm64' && n.includes('x64')) return false
           return true
-        }
-        if (!n.endsWith('.zip')) return false
-        if (!(n.includes('win') || n.includes('windows'))) return false
-        if (arch === 'x64' && n.includes('arm64')) return false
-        if (arch === 'arm64' && n.includes('x64')) return false
-        return true
-      })
+        })
+      }
+      // Bug fix: llama.cpp started publishing periodic semantic-version
+      // milestone tags (e.g. "v0.3.0") ALONGSIDE the continuous per-commit
+      // "bNNNNN" builds it's always used. The milestone tags are SOURCE-ONLY
+      // (no built binaries attached at all) — but /releases/latest just
+      // returns whichever release is chronologically newest, so the moment
+      // a milestone tag lands, update-checking pointed at a release with
+      // nothing to actually download. Worse, a tag like "v0.3.0" also never
+      // numerically or exactly matches an installed "bNNNNN" folder name, so
+      // it kept reporting "update available" permanently, with no way to
+      // ever resolve it. Fetch the releases LIST instead and use the first
+      // one (most recent first, GitHub's default ordering) that actually
+      // has a real platform binary attached — this skips source-only tags
+      // automatically, including any future ones, without hardcoding a
+      // specific tag name/pattern to ignore.
+      const releases = await fetchJson(`https://api.github.com/repos/${tracked.repo}/releases?per_page=10`) as any
+      if (!Array.isArray(releases) || releases.length === 0) {
+        return { ...base, error: 'Invalid response from GitHub' }
+      }
+      let release: any = null
+      let platformAssets: any[] = []
+      for (const rel of releases) {
+        if (rel.draft || rel.prerelease) continue
+        const assets = platformAssetsFor(rel)
+        if (assets.length > 0) { release = rel; platformAssets = assets; break }
+      }
+      if (!release) {
+        // Nothing in the recent history has a matching binary for this
+        // platform at all — fall back to the newest release so we still
+        // surface SOMETHING (with an empty asset list) rather than silently
+        // reporting nothing at all.
+        release = releases[0]
+        platformAssets = platformAssetsFor(release)
+      }
       const latestNum = parseInt((release.tag_name || '').replace(/^b/, ''), 10)
       let isNewer = true
       // Feature 20/21: Determine if a version of this tracked backend is already
@@ -2268,26 +2418,27 @@ export function registerIpcHandlers(): void {
     try {
       if (!modelPath || !existsSync(modelPath)) return { tier: 0, method: 'off' as const, candidates: [] }
 
-      // (a) Internal MTP scan — same nextn-tensor logic as before.
+      // (a) Internal MTP scan.
+      // Bug fix (item 3): switched from a raw N-MB byte scan (which was
+      // scanning mostly-random quantized TENSOR WEIGHT DATA, not text, and
+      // could false-positive on "mtp" appearing by pure chance in enough
+      // binary noise — exactly what happened here) to a proper structural
+      // GGUF parse that only ever looks at metadata keys/values and tensor
+      // NAMES — see readGgufStructuralText's comment for the full rationale.
+      // Also dropped the loose bare "mtp"/"draft-mtp" substring checks
+      // entirely — the canonical, unambiguous signal is the "nextn" naming
+      // convention (`{arch}.nextn_predict_layers` metadata key, or tensor
+      // names with a "nextn" component); a bare "mtp" substring is too easy
+      // to false-positive on even within legitimate structural text (e.g. a
+      // license string, a URL, or an unrelated key/tensor name).
       let internalMtpFound = false
       let internalReason = ''
       {
-        const fd = await fsPromises.open(modelPath, 'r')
-        const buf = Buffer.alloc(32 * 1024 * 1024) // 32 MB scan window
-        const { bytesRead } = await fd.read(buf, 0, buf.length, 0)
-        await fd.close()
-        const lower = buf.subarray(0, bytesRead).toString('latin1').toLowerCase()
-        // Bug fix history: the canonical llama.cpp naming convention for MTP
-        // is NOT the literal substring "mtp" — it's the
-        // `{arch}.nextn_predict_layers` GGUF metadata key, and tensor names
-        // use a "nextn" prefix (e.g. "blk.N.nextn.eh_proj"). Check that
-        // FIRST since it's the authoritative signal; keep "mtp" as a
-        // fallback for non-standard conversions.
+        const lower = await readGgufStructuralText(modelPath)
         if (
           lower.includes('nextn_predict_layers') || lower.includes('.nextn.') ||
           lower.includes('nextn.eh_proj') || lower.includes('nextn.enorm') ||
-          lower.includes('nextn.pre_projection') || lower.includes('mtp') ||
-          lower.includes('multi_token_prediction') || lower.includes('draft-mtp')
+          lower.includes('nextn.pre_projection') || lower.includes('multi_token_prediction')
         ) {
           internalMtpFound = true
           internalReason = 'MTP (Multi-Token Prediction / nextn) tensors detected in model metadata'
