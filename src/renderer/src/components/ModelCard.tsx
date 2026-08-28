@@ -105,14 +105,30 @@ export default function ModelCard({ card }: Props) {
     // Helper to check if a key is an internal UI flag (not a real CLI arg).
     const isInternal = (k: string) => k.startsWith('__')
     if (commandsSchema) {
+      const knownArgs = new Set<string>()
       for (const cat of commandsSchema.categories) {
         for (const cmd of cat.commands) {
+          knownArgs.add(cmd.arg)
           const val = tArgs[cmd.arg]
           if (val !== undefined && val !== null && val !== '') {
             if (cmd.type === 'boolean') { if (val === true) args.push(cmd.arg) }
             else args.push(cmd.arg, String(val))
           }
         }
+      }
+      // Safety net: a key can exist in a template's saved `args` without (yet)
+      // existing in the loaded schema — e.g. a per-backend commands.json that
+      // predates a newly-added flag, before the healing migration in
+      // get-commands has had a chance to run. Rather than silently dropping
+      // it from the actual launch command (which is how --kv-unified went
+      // missing from real runs while still showing correctly in the command
+      // preview, which is built straight from `args` rather than the schema),
+      // fall back to passing any unrecognized, non-internal key straight
+      // through.
+      for (const [k, v] of Object.entries(tArgs)) {
+        if (isInternal(k) || knownArgs.has(k)) continue
+        if (v === true) args.push(k)
+        else if (v !== false && v !== null && v !== '') args.push(k, String(v))
       }
     } else {
       for (const [k, v] of Object.entries(tArgs)) {

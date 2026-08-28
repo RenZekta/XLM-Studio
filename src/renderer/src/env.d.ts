@@ -114,7 +114,7 @@ interface LlamaCppApi {
 
   // CPU + speculation detection
   getCpuInfo: () => Promise<CpuInfo>
-  detectSpeculation: (modelPath: string) => Promise<import('../../../shared/types').SpecDetectionResult>
+  detectSpeculation: (modelPath: string, hasNativeMtp?: boolean) => Promise<import('../../../shared/types').SpecDetectionResult>
 
   // GGUF metadata + VRAM + system RAM
   getGgufMetadata: (modelPath: string) => Promise<any>

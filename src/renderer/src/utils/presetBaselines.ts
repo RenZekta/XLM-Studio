@@ -48,6 +48,16 @@ export function defaultKvQuantFor(backendKey: string | undefined | null): string
   return backendKey === 'atomic-llama-cpp-turboquant' ? 'turbo4' : 'q8_0'
 }
 
+// K and V are allowed to (and, for the atomic/TurboQuant backend, should)
+// differ: Keys are more sensitive to quantization than Values, so the
+// atomic backend's own recommendation is K=turbo4 / V=turbo3 — turbo4 keeps
+// the K cache safely above llama.cpp's asymmetry-fallback threshold (see the
+// note above) while turbo3 on V gets the extra context/VRAM headroom
+// TurboQuant is there for. Other backends keep a single q8_0 for both.
+export function defaultKvQuantVFor(backendKey: string | undefined | null): string {
+  return backendKey === 'atomic-llama-cpp-turboquant' ? 'turbo3' : 'q8_0'
+}
+
 // The engine-only baseline (no sampling, no ctx-size/gpu-layers — see notes
 // above). Returns a plain object safe to spread directly into `args`.
 export function buildQuickEngineBaseline(opts: {
@@ -56,7 +66,8 @@ export function buildQuickEngineBaseline(opts: {
   cpuThreadsOverridePercent?: number | null
 }): Record<string, any> {
   const recommendedThreads = computeRecommendedThreads(opts.cpuInfo, opts.cpuThreadsOverridePercent)
-  const kvQuant = defaultKvQuantFor(opts.backendKey)
+  const kvQuantK = defaultKvQuantFor(opts.backendKey)
+  const kvQuantV = defaultKvQuantVFor(opts.backendKey)
   return {
     '--threads': recommendedThreads,
     '--batch-size': 2048,
@@ -72,8 +83,14 @@ export function buildQuickEngineBaseline(opts: {
     // safe again.
     '--parallel': 4,
     '--flash-attn': 'on',
-    '--mmap': true,
-    '--mlock': true,
+    // Migrated from the old independent '--mmap'/'--mlock' booleans to the
+    // single '--load-mode' select (llama.cpp deprecated the two flags in
+    // favor of this — see the migration note in ipc.ts for the full story).
+    // llama.cpp supports mmap and mlock together as their own explicit mode
+    // ('mmap+mlock', not just 'mlock') — that's the one that preserves this
+    // baseline's original intent (both memory-mapping and locking pages in
+    // RAM by default).
+    '--load-mode': 'mmap+mlock',
     '--kv-offload': true,
     // New: "Unified KV Cache" — ON by default (matches the established
     // pattern for boolean flags here: an unset boolean always displays as
@@ -84,8 +101,8 @@ export function buildQuickEngineBaseline(opts: {
     // (see above) no longer applies — safe to leave llama.cpp's own default
     // of 4 parallel sequences.
     '--kv-unified': true,
-    '--cache-type-k': kvQuant,
-    '--cache-type-v': kvQuant,
+    '--cache-type-k': kvQuantK,
+    '--cache-type-v': kvQuantV,
     '--keep': 32,
     '--spec-draft-n-max': 3,
     '--spec-draft-n-min': 0,

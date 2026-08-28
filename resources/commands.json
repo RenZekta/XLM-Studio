@@ -1,5 +1,5 @@
 {
-  "version": "default",
+  "version": "2026.08.28-load-mode",
   "categories": [
     {
       "name": "Model",
@@ -26,8 +26,8 @@
         { "arg": "--ubatch-size", "short": "-ub", "label": "Micro-Batch Size", "description": "Physical maximum batch size", "type": "number", "default": 512, "min": 1, "max": 65536, "env": "LLAMA_ARG_UBATCH" },
         { "arg": "--parallel", "short": "-np", "label": "Parallel Sequences", "description": "Number of parallel sequences to decode", "type": "number", "default": 1, "min": 1, "max": 64, "env": "LLAMA_ARG_N_PARALLEL" },
         { "arg": "--keep", "label": "Keep Tokens", "description": "Tokens to keep from initial prompt (-1 = all)", "type": "number", "default": 0, "min": -1, "max": 65536 },
-        { "arg": "--mlock", "label": "Memory Lock", "description": "Force system to keep model in RAM (no swap)", "type": "boolean", "default": false, "env": "LLAMA_ARG_MLOCK" },
-        { "arg": "--mmap", "label": "Memory Map", "description": "Memory-map the model file (faster load)", "type": "boolean", "default": true, "env": "LLAMA_ARG_MMAP" },
+        { "arg": "--load-mode", "label": "Model Load Mode", "description": "How the model file is loaded into memory. 'auto' (default): mmap, unless the device doesn't support it. 'none': no special loading mode. 'mmap': memory-map the file (if disabled, slower load but may reduce page-outs when not also using mlock). 'mlock': force the system to keep the model in RAM rather than swapping or compressing it. 'mmap+mlock': memory-map AND lock the mapped pages in RAM. 'dio': use DirectIO if available.", "type": "select", "options": ["auto", "none", "mmap", "mlock", "mmap+mlock", "dio"], "default": "auto", "requireValue": true, "env": "LLAMA_ARG_LOAD_MODE" },
+        { "arg": "--kv-unified", "short": "-kvu", "label": "Unified KV Cache", "description": "Use a single unified KV cache buffer shared across parallel sequences, instead of splitting the context window evenly between them", "type": "boolean", "default": true, "env": "LLAMA_ARG_KV_UNIFIED" },
         { "arg": "--flash-attn", "short": "-fa", "label": "Flash Attention", "description": "Flash Attention mode", "type": "select", "options": ["auto", "on", "off"], "default": "auto", "env": "LLAMA_ARG_FLASH_ATTN" },
         { "arg": "--swa-full", "label": "Full SWA Cache", "description": "Use full-size SWA cache", "type": "boolean", "default": false, "env": "LLAMA_ARG_SWA_FULL" },
         { "arg": "--check-tensors", "label": "Check Tensors", "description": "Check model tensor data for invalid values", "type": "boolean", "default": false },
@@ -57,7 +57,6 @@
       "commands": [
         { "arg": "--cache-type-k", "short": "-ctk", "label": "KV Cache Type (K)", "description": "KV cache data type for Keys", "type": "select", "options": ["f16", "f32", "bf16", "q8_0", "q4_0", "q4_1", "iq4_nl", "q5_0", "q5_1"], "default": "f16", "env": "LLAMA_ARG_CACHE_TYPE_K" },
         { "arg": "--cache-type-v", "short": "-ctv", "label": "KV Cache Type (V)", "description": "KV cache data type for Values", "type": "select", "options": ["f16", "f32", "bf16", "q8_0", "q4_0", "q4_1", "iq4_nl", "q5_0", "q5_1"], "default": "f16", "env": "LLAMA_ARG_CACHE_TYPE_V" },
-        { "arg": "--kv-unified", "short": "-kvu", "label": "Unified KV Cache", "description": "Use a single unified KV cache buffer shared across parallel sequences, instead of splitting the context window evenly between them", "type": "boolean", "default": true, "env": "LLAMA_ARG_KV_UNIFIED" },
         { "arg": "--repack", "label": "Weight Repacking", "description": "Enable weight repacking for performance", "type": "boolean", "default": true, "env": "LLAMA_ARG_REPACK" }
       ]
     },
@@ -114,6 +113,7 @@
         { "arg": "--chat-template", "label": "Chat Template", "description": "Custom Jinja chat template name or path", "type": "string", "placeholder": "llama3", "env": "LLAMA_ARG_CHAT_TEMPLATE" },
         { "arg": "--system-prompt", "short": "-sys", "label": "System Prompt", "description": "System prompt to use with model", "type": "text", "placeholder": "You are a helpful assistant." },
         { "arg": "--jinja", "label": "Use Jinja Templating", "description": "Enable Jinja template engine for chat", "type": "boolean", "default": true, "env": "LLAMA_ARG_JINJA" },
+        { "arg": "--reasoning-preserve", "label": "Preserve Reasoning", "description": "Preserve previous turns' reasoning/thinking content across multi-turn chat, when the chat template supports re-injecting it", "type": "boolean", "default": true, "env": "LLAMA_ARG_REASONING_PRESERVE" },
         { "arg": "--reasoning-format", "label": "Reasoning Format", "description": "Format for model reasoning output", "type": "select", "options": ["auto", "none", "deepseek", "deepseek-legacy"], "default": "auto", "env": "LLAMA_ARG_THINK" },
         { "arg": "--reasoning", "short": "-rea", "label": "Reasoning Mode", "description": "Enable reasoning/thinking in chat", "type": "select", "options": ["auto", "on", "off"], "default": "auto", "env": "LLAMA_ARG_REASONING" },
         { "arg": "--reasoning-budget", "label": "Reasoning Budget (tokens)", "description": "Token budget for thinking (-1 = unlimited)", "type": "number", "default": -1, "min": -1, "max": 65536, "env": "LLAMA_ARG_THINK_BUDGET" }

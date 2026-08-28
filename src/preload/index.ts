@@ -124,7 +124,7 @@ const api = {
   getCpuInfo: () => ipcRenderer.invoke('get-cpu-info') as Promise<CpuInfo>,
 
   // ----- GGUF speculation auto-detection -----
-  detectSpeculation: (modelPath: string) => ipcRenderer.invoke('detect-speculation', modelPath) as Promise<SpecDetectionResult>,
+  detectSpeculation: (modelPath: string, hasNativeMtp?: boolean) => ipcRenderer.invoke('detect-speculation', modelPath, hasNativeMtp) as Promise<SpecDetectionResult>,
 
   // ----- GGUF metadata parser (features 12/13/14/16/29) -----
   getGgufMetadata: (modelPath: string) => ipcRenderer.invoke('get-gguf-metadata', modelPath) as Promise<any>,

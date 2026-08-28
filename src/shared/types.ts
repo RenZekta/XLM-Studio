@@ -73,6 +73,12 @@ export interface CommandParam {
   placeholder?: string
   env?: string
   deprecated?: boolean
+  // When true, the select widget for this param omits the synthetic empty
+  // "Default" choice — used for params (like --load-mode) whose own option
+  // list already includes an explicit value equivalent to "don't override
+  // this" (e.g. 'auto'), so a separate blank placeholder would just be a
+  // confusing duplicate of one of the real choices.
+  requireValue?: boolean
 }
 export interface CommandCategory {
   name: string
@@ -206,6 +212,12 @@ export interface GgufMetadata {
   // The rest use linear-attention/RNN with constant-size state. Dividing the
   // layer count by this fixes the 3-4x KV overshoot for these architectures.
   fullAttentionInterval: number | null
+  // Speculative decoding Tier 1 — whether this model's own GGUF metadata
+  // declares an embedded Multi-Token-Prediction head (the
+  // `{arch}.nextn_predict_layers` convention). A static fact of the model
+  // file, extracted once as part of this same metadata parse/cache — never
+  // re-scanned separately by the Speculative Decoding widget.
+  hasNativeMtp: boolean
   error?: string
 }
 

@@ -13,7 +13,7 @@ import SegmentedToggle from './SegmentedToggle'
 import SamplingPresets from './SamplingPresets'
 import { useVramBudget, computeAutoFillContext, estimateMoeDefaultContext } from '../hooks/useVramBudget'
 import { formatWithSpaces, CONTEXT_POWER_OF_TWO_STEPS, snapToNearestPowerOfTwo } from '../utils/contextFormat'
-import { buildQuickEngineBaseline, computeRecommendedThreads } from '../utils/presetBaselines'
+import { buildQuickEngineBaseline, computeRecommendedThreads, defaultKvQuantFor, defaultKvQuantVFor } from '../utils/presetBaselines'
 
 const iconMap: Record<string, React.ReactNode> = {
   Box: <Box size={14} />, Cpu: <Cpu size={14} />, Zap: <Zap size={14} />,
@@ -24,7 +24,7 @@ const iconMap: Record<string, React.ReactNode> = {
 const FEATURED_ARGS = ['--ctx-size', '--gpu-layers', '--threads', '--batch-size', '--flash-attn']
 const HYBRID_PARAMS = ['--threads', '--gpu-layers', '--temperature', '--top-p', '--top-k', '--min-p', '--ctx-size', '--moe-cpu-layers']
 // Params that get a custom widget (excluded from the regular command grid).
-const CUSTOM_PARAMS = ['--model', '--port', '--host', '--api-key', '--mmproj', '--spec-type', '--spec-draft-model', '--chat-template', '--reasoning-budget', '--reasoning-budget-message', '--moe-cpu-layers',
+const CUSTOM_PARAMS = ['--model', '--port', '--host', '--api-key', '--mmproj', '--spec-type', '--spec-draft-model', '--chat-template', '--reasoning-budget', '--reasoning-budget-message', '--moe-cpu-layers', '--reasoning-preserve',
   '--spec-ngram-map-k4v-size-n', '--spec-ngram-map-k4v-size-m', '--spec-ngram-map-k4v-min-hits',
   '--spec-ngram-mod-n-match', '--spec-ngram-mod-n-min', '--spec-ngram-mod-n-max', '--ctx-size-dft']
 // Bug fix (item 1.2): sampling values are per-model/user-preferred, set once
@@ -33,6 +33,25 @@ const CUSTOM_PARAMS = ['--model', '--port', '--host', '--api-key', '--mmproj', '
 // place that needs to check "is this a sampling key" (the initial-args
 // detection, Clear's wipe, etc.) agrees on exactly the same set.
 const SAMPLING_KEYS = ['--temperature', '--top-p', '--top-k', '--min-p', '--repeat-penalty', '--presence-penalty']
+
+// Item (this round): --reasoning-preserve support detection. There's no GGUF
+// metadata field that directly says "this template supports preserving
+// reasoning across turns" — the only signal available is the chat template's
+// own Jinja source. Templates that support carrying a previous turn's
+// reasoning/thinking forward (Qwen3, DeepSeek-R1/V3, GLM-4.5, Kimi K2, etc.)
+// all do it the same way: the per-message rendering loop reads a
+// `reasoning_content` field off past assistant messages (not just generates
+// one for the newest turn) so it can re-inject it into the prompt. Templates
+// that only produce/strip a <think> block for the CURRENT turn never
+// reference `reasoning_content` on prior messages at all. Checking for that
+// token in the template source is therefore a reliable, low-cost proxy for
+// "this template has reasoning-preserve logic to turn on" without needing to
+// actually parse/execute the Jinja.
+function templateSupportsReasoningPreserve(template: string | null | undefined): boolean {
+  if (!template) return false
+  return /reasoning_content/i.test(template)
+}
+
 
 interface Props {
   templateId?: string
@@ -76,7 +95,7 @@ const SPEC_TIER_DEFS: SpecTierDef[] = [
 const COMMON_VISIBLE = new Set([
   '--ctx-size', '--threads', '--gpu-layers', '--batch-size', '--ubatch-size',
   '--parallel', '--flash-attn', '--temperature', '--top-p', '--min-p', '--top-k',
-  '--mmap', '--mlock', '--cache-type-k', '--cache-type-v', '--kv-offload',
+  '--load-mode', '--cache-type-k', '--cache-type-v', '--kv-offload',
   '--kv-unified', '--keep', '--seed'
 ])
 
@@ -131,7 +150,7 @@ export default function CmdParamsEditor({ templateId, args, onChange, modelPathF
     detectedSpeculation, setDetectedSpeculation, markSpeculationApplied,
     ggufMetadata, setGgufMetadata, activeBackend,
     paramViewMode, setParamViewMode,
-    setPresetMode, modelDefaults, samplingPresets
+    setPresetMode, modelDefaults, samplingPresets, baseUrlOverride
   } = useStore()
   const [searchQuery, setSearchQuery] = useState('')
   const [previewCopied, setPreviewCopied] = useState(false)  // Task 5: preview copy button
@@ -152,7 +171,27 @@ export default function CmdParamsEditor({ templateId, args, onChange, modelPathF
   // settings mysteriously disappear. Reading argsRef.current at commit time
   // instead always bases the patch on the latest known args.
   const argsRef = useRef(args)
+  const saveTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   useEffect(() => { argsRef.current = args }, [args])
+
+  // Flush safeguard for the debounced inline-edit save in commit() above:
+  // if the card collapses or this editor unmounts while a save is still
+  // pending (within its 400ms debounce window), fire it immediately instead
+  // of letting the stale timeout resolve on its own later — and definitely
+  // instead of losing it if the app quits before the timeout ever fires.
+  useEffect(() => {
+    return () => {
+      if (saveTimeoutRef.current) {
+        clearTimeout(saveTimeoutRef.current)
+        if (templateId) {
+          const latestCard = useStore.getState().cards.find(c => c.template.id === templateId)
+          if (latestCard) window.api?.saveTemplate?.(latestCard.template).catch(() => {})
+        }
+      }
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [templateId])
+
 
   // Task 1+3: On mount, for a NEW template (no templateId, args empty or only
   // sampling-seeded), auto-apply the Quick preset so the engine baselines
@@ -269,17 +308,19 @@ export default function CmdParamsEditor({ templateId, args, onChange, modelPathF
   const mmprojEnabled = args['--mmproj'] !== undefined && args['--mmproj'] !== '' && args['--mmproj'] !== false
   const mmprojSizeMB = detectedMmproj ? Math.round(detectedMmproj.size / (1024 * 1024)) : 0
   const currentCtx = args['--ctx-size'] !== undefined && args['--ctx-size'] !== '' ? Number(args['--ctx-size']) : 32768
-  // Default KV cache quant depends on the backend (TurboQuant fork → turbo3,
-  // otherwise q8_0). The user can override per-template via --cache-type-k/v.
+  // Default KV cache quant depends on the backend (TurboQuant fork →
+  // K=turbo4 / V=turbo3, otherwise q8_0/q8_0). The user can override per-
+  // template via --cache-type-k/v.
   // Bug fix (item 4): llama.cpp silently upgrades K to q8_0 when K/V
-  // quant types are too asymmetric (a quality-preserving safety fallback),
-  // which was quietly happening with turbo3 all along — wasting the context
-  // headroom the user actually wanted turboquant for, without any visible
-  // indication it had happened. turbo4 doesn't trigger that fallback and
-  // works cleanly, so it's now the default for this backend instead.
-  const defaultKvQuant = activeBackend?.backendKey === 'atomic-llama-cpp-turboquant' ? 'turbo4' : 'q8_0'
-  const kvQuantK = (typeof args['--cache-type-k'] === 'string' && args['--cache-type-k']) ? String(args['--cache-type-k']) : defaultKvQuant
-  const kvQuantV = (typeof args['--cache-type-v'] === 'string' && args['--cache-type-v']) ? String(args['--cache-type-v']) : kvQuantK
+  // quant types are too asymmetric (a quality-preserving safety fallback).
+  // turbo4 on K stays safely above that asymmetry threshold, so K defaults
+  // to turbo4 while V defaults to turbo3 — the lighter V-only quant is what
+  // actually buys back the VRAM/context headroom TurboQuant is for, without
+  // silently triggering llama.cpp's K fallback the way an all-turbo3 pair did.
+  const defaultKvQuantK = defaultKvQuantFor(activeBackend?.backendKey)
+  const defaultKvQuantV = defaultKvQuantVFor(activeBackend?.backendKey)
+  const kvQuantK = (typeof args['--cache-type-k'] === 'string' && args['--cache-type-k']) ? String(args['--cache-type-k']) : defaultKvQuantK
+  const kvQuantV = (typeof args['--cache-type-v'] === 'string' && args['--cache-type-v']) ? String(args['--cache-type-v']) : defaultKvQuantV
   // Task 2.1/2.2/2.3/5: per-preset context-fill toggle + memory overhead.
   // (ignoreCtxOverride itself now declared above, near the YaRN logic that needs it.)
   const autoCtxFill = (args['__autoCtxFill'] as 'off' | 'auto' | 'maximum') || 'off'
@@ -554,7 +595,30 @@ export default function CmdParamsEditor({ templateId, args, onChange, modelPathF
     // previous one in the same flush already committed.
     argsRef.current = newArgs
     if (onChange) onChange(newArgs)
-    else if (templateId) updateCard(templateId, { args: newArgs })
+    else if (templateId) {
+      updateCard(templateId, { args: newArgs })
+      // Bug fix ("closing and reopening the app deselects settings I
+      // toggled inline"): this `templateId` branch is what backs the LIVE
+      // editor embedded directly in an expanded card (ModelCard passes
+      // `templateId`, not `onChange` — CreateModal's Save button handles
+      // its own persistence separately via the `onChange` branch above).
+      // updateCard() only ever wrote to the in-memory zustand store — there
+      // was NOTHING, anywhere, that flushed an inline edit back to the
+      // template's own JSON file on disk. So any setting toggled/edited
+      // here (n-gram map/mod, or genuinely anything else touched this way)
+      // silently reverted to whatever was last actually saved the moment
+      // the app restarted and template list reloaded fresh from disk —
+      // while a setting only ever touched through the Create/Edit modal
+      // stayed correct, since THAT flow does persist properly. Debounced
+      // (400ms) so rapid consecutive edits (typing in a number field,
+      // dragging a slider) settle to one write instead of one per keystroke.
+      if (saveTimeoutRef.current) clearTimeout(saveTimeoutRef.current)
+      const idToSave = templateId
+      saveTimeoutRef.current = setTimeout(() => {
+        const latestCard = useStore.getState().cards.find(c => c.template.id === idToSave)
+        if (latestCard) window.api?.saveTemplate?.(latestCard.template).catch(() => {})
+      }, 400)
+    }
   }
   function setMmprojOn(on: boolean) {
     const newArgs: Record<string, any> = { ...args }
@@ -606,21 +670,30 @@ export default function CmdParamsEditor({ templateId, args, onChange, modelPathF
   // Task 2.2: detection runs AND auto-applies the detected method so the
   // user doesn't have to manually enable it. If not detected, stays off.
   //
-  // Bug fix (this round): previously the "trigger the scan" and "apply the
-  // result" logic were combined into ONE effect that only ever attempted to
-  // apply the result at the two specific moments the scan resolved (from
-  // cache, or from the async .then()). If literally anything interfered with
-  // applying at exactly that moment — for any reason, including ones we
-  // haven't been able to pin down without live debugging — the opportunity
-  // was gone for good; nothing would ever retry. Split into two effects:
-  // this one ONLY triggers the scan and records the result in the store.
+  // Rewrite (this round — matches the intended design): Tier 1 (embedded
+  // native MTP) is a STATIC fact of the model's own GGUF metadata — it's
+  // extracted exactly once, as part of the same metadata parse that already
+  // populates `ggufMetadata` (see hasNativeMtp on GgufMetadata / the main
+  // process's detectHasNativeMtp), and persisted to disk with the rest of
+  // that metadata. It never needs to be re-scanned here; `meta.hasNativeMtp`
+  // IS the answer, whenever metadata for this model has loaded.
+  //
+  // Sidecar files (Tiers 2-5) are just files sitting in the model's folder —
+  // the user can add or remove them at any time — so THAT part genuinely
+  // does need to be checked live rather than trusted from a one-time cache.
+  // This effect re-runs the (now cheap — just a folder listing + filename
+  // classification, no per-model file parsing) sidecar scan whenever the
+  // model changes or its metadata finishes loading, and always writes a
+  // fresh result rather than skipping because something was already cached
+  // — a stale/negative sidecar result should never be able to get "stuck"
+  // the way the old combined metadata+sidecar scan could.
+  const hasNativeMtp = !!meta?.hasNativeMtp
   useEffect(() => {
     if (!effectiveModelPath || disabled) return
-    if (detectedSpeculation[effectiveModelPath]) return  // already scanned/cached
-    window.api?.detectSpeculation?.(effectiveModelPath).then(res => {
+    window.api?.detectSpeculation?.(effectiveModelPath, hasNativeMtp).then(res => {
       if (res) setDetectedSpeculation(effectiveModelPath, res)
     }).catch(() => {})
-  }, [effectiveModelPath, disabled, detectedSpeculation, setDetectedSpeculation])
+  }, [effectiveModelPath, disabled, hasNativeMtp, setDetectedSpeculation])
 
   // Item 2: parse the current primary method out of --spec-type. It's now a
   // comma-separated list (primary draft method + stackable n-gram
@@ -795,9 +868,12 @@ export default function CmdParamsEditor({ templateId, args, onChange, modelPathF
     const newArgs: Record<string, any> = { ...args }
     newArgs['__jinja_manual'] = true
     if (!on) {
-      // OFF: don't pass any template flags.
+      // OFF: don't pass any template flags. --reasoning-preserve is only
+      // ever meaningful "under jinja" (it re-injects reasoning_content via
+      // the jinja template loop), so it goes with it.
       delete newArgs['--chat-template']
       delete newArgs['--jinja']
+      delete newArgs['--reasoning-preserve']
       newArgs['--jinja'] = false
     } else {
       // ON: only set --jinja. Do NOT add --chat-template unless the user edits it
@@ -834,6 +910,65 @@ export default function CmdParamsEditor({ templateId, args, onChange, modelPathF
     if (jinjaOn) newArgs['--jinja'] = true
     commit(newArgs)
   }
+
+  // ----- Reasoning Preserve (under Jinja) -----
+  // Only relevant, and only shown, when Jinja is on AND the template
+  // actually in effect (the user's own override if they've set one,
+  // otherwise the model's native tokenizer.chat_template) has reasoning-
+  // preserve logic to turn on at all — see templateSupportsReasoningPreserve.
+  const effectiveChatTemplateForReasoning = explicitChatTemplate !== undefined ? explicitChatTemplate : nativeChatTemplate
+  const reasoningPreserveSupported = jinjaOn && templateSupportsReasoningPreserve(effectiveChatTemplateForReasoning)
+  // On by default: an unset boolean always displays/behaves as OFF regardless
+  // of the schema's own `default` (same established pattern as --kv-unified),
+  // so once support is detected we backfill --reasoning-preserve: true the
+  // first time — same "fill in once metadata arrives" shape as the
+  // --gpu-layers/--ctx-size backfill effects above, since template support
+  // isn't known until GGUF metadata (or a pasted custom template) exists.
+  useEffect(() => {
+    if (disabled || !reasoningPreserveSupported) return
+    const curArgs = argsRef.current
+    if (curArgs['--reasoning-preserve'] === undefined) {
+      commit({ ...curArgs, '--reasoning-preserve': true })
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [disabled, reasoningPreserveSupported])
+  // Mirror-image cleanup: if support goes away (jinja turned off, or the
+  // template was edited to one without reasoning-preserve logic) while the
+  // flag is still set, strip it — otherwise it keeps silently reaching
+  // llama-server with no way to see or turn it off, since the widget itself
+  // is hidden whenever support isn't detected.
+  useEffect(() => {
+    if (disabled || reasoningPreserveSupported) return
+    const curArgs = argsRef.current
+    if (curArgs['--reasoning-preserve'] !== undefined) {
+      const newArgs = { ...curArgs }
+      delete newArgs['--reasoning-preserve']
+      commit(newArgs)
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [disabled, reasoningPreserveSupported])
+  // '--load-mode' backfill: --load-mode is a select, so (per requireValue
+  // above) it has no synthetic empty "Default" choice to fall back to — an
+  // unset value would just leave the dropdown showing whichever option
+  // happens to be first, with nothing actually persisted in args. Ensure it
+  // always resolves to a concrete choice matching this app's own opinionated
+  // default (mmap+mlock — the historical "both switches on" behavior),
+  // regardless of preset mode, so the dropdown's displayed selection always
+  // matches what's actually in the template. Never overrides a value that's
+  // already set (including 'auto', 'none', etc. — anything the user or a
+  // preset already chose).
+  useEffect(() => {
+    if (disabled) return
+    const curArgs = argsRef.current
+    if (curArgs['--load-mode'] === undefined || curArgs['--load-mode'] === '') {
+      commit({ ...curArgs, '--load-mode': 'mmap+mlock' })
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [disabled])
+
+  const reasoningPreserveOn = args['--reasoning-preserve'] !== false
+  function setReasoningPreserveOn(on: boolean) {
+    commit({ ...args, '--reasoning-preserve': on })  }
 
   // ----- Reasoning Budget (feature 17) -----
   const reasoningOn = args['--reasoning-budget'] !== undefined && args['--reasoning-budget'] !== -1 && args['--reasoning-budget'] !== '' && args['--reasoning-budget'] !== false
@@ -1150,22 +1285,50 @@ export default function CmdParamsEditor({ templateId, args, onChange, modelPathF
     return previewEffectiveCtx > rawCtx
   })()
 
-  const cmdPreview = useMemo(() => {
-    const parts: React.ReactNode[] = []
-    parts.push(<span key="base">llama-server</span>)
-    const finalModelPath = card?.template.modelPath || modelPathFallback
-    if (finalModelPath) parts.push(' ', <span key="arg-m" className="arg">-m</span>, ' ', <span key="val-m" className="val">"{finalModelPath}"</span>)
-    // Build a runtime-accurate arg map: skip internal __ flags, and reflect the
-    // AutoFill "Auto" → --fit on / no --ctx-size behavior (so the preview matches
-    // what actually reaches llama-server).
+  // Bug fix: the preview previously only ever reflected the Minimum Context
+  // Length override — every OTHER global override (Parallel Inference, Base
+  // URL Override's port/local-network/API-key) was silently invisible here,
+  // showing whatever was literally stored in the template's own args instead
+  // of what ModelCard.tsx's handleRunToggle actually sends to llama-server.
+  // These mirror ModelCard.tsx's own override logic exactly so the preview
+  // and the real launch can never disagree.
+  //
+  // Parallel Inference override (Overrides → Parallel Inference).
+  const parallelOverrideActive = !!modelDefaults?.parallelOverrideEnabled
+  const previewEffectiveParallel = parallelOverrideActive
+    ? (modelDefaults.parallelInferenceMode === 'separate'
+        ? Math.max(1, Number(isMoe ? modelDefaults.parallelOverrideValueMoe : modelDefaults.parallelOverrideValueDense) || 4)
+        : Math.max(1, Number(modelDefaults.parallelOverrideValue) || 4))
+    : null  // null = don't touch, use whatever's in the template's own args
+  const parallelOverriddenInPreview = parallelOverrideActive
+
+  // Base URL Override (Overrides → Base URL Override): port always wins when
+  // enabled (main process force-rewrites --port to the resolved port
+  // regardless of what's in the template's args — see run-model's "ALWAYS
+  // update the --port argument" comment); host/api-key only apply when their
+  // own sub-toggle is also on.
+  const baseUrlOverrideActive = !!baseUrlOverride?.enabled
+  const previewEffectivePort = baseUrlOverrideActive
+    ? (baseUrlOverride.port || 1234)
+    : (card?.template.serverPort || serverPortFallback || 8080)
+  const portOverriddenInPreview = baseUrlOverrideActive
+  const hostOverrideActive = baseUrlOverrideActive && !!baseUrlOverride.serveOnLocalNetwork
+  const apiKeyOverrideActive = baseUrlOverrideActive && !!baseUrlOverride.apiKeyEnabled && !!baseUrlOverride.apiKey
+
+  // Shared by all three preview builders below: takes the raw args, strips
+  // out whatever's being override-controlled, and injects the effective
+  // (possibly overridden) value in its place — the same transform, reused
+  // three times instead of drifting apart again.
+  function buildRuntimeArgs(): Record<string, any> {
     const isAutoFitAuto = ignoreCtxOverride && autoCtxFill === 'auto'
     const runtimeArgs: Record<string, any> = {}
     for (const [k, v] of Object.entries(args)) {
       if (k.startsWith('__')) continue  // internal UI flags never reach llama-server
-      if (k === '--ctx-size' || k === '-c') {
-        if (isAutoFitAuto) continue  // Auto: no --ctx-size passed
-        continue // handled below via previewEffectiveCtx, which folds in the override floor
-      }
+      if (k === '--ctx-size' || k === '-c') continue  // handled via previewEffectiveCtx
+      if (k === '--parallel' || k === '-np') continue  // handled via previewEffectiveParallel
+      if (k === '--port') continue  // handled via previewEffectivePort
+      if (k === '--host' && hostOverrideActive) continue  // overridden below
+      if (k === '--api-key' && apiKeyOverrideActive) continue  // overridden below
       if (k === '--fit' || k === '-fit') {
         if (isAutoFitAuto) { runtimeArgs[k] = 'on'; continue }
       }
@@ -1174,16 +1337,44 @@ export default function CmdParamsEditor({ templateId, args, onChange, modelPathF
     if (isAutoFitAuto && runtimeArgs['--fit'] === undefined && runtimeArgs['-fit'] === undefined) {
       runtimeArgs['--fit'] = 'on'
     }
-    if (!isAutoFitAuto) {
-      runtimeArgs['--ctx-size'] = previewEffectiveCtx
-    }
-    // Item 8: API launch mode adds --no-webui dynamically at run time (see
-    // ModelCard.tsx handleRunToggle) — reflect it here too if not already set.
-    if (launchMode === 'api' && runtimeArgs['--no-webui'] === undefined) {
-      runtimeArgs['--no-webui'] = true
-    }
+    if (!isAutoFitAuto) runtimeArgs['--ctx-size'] = previewEffectiveCtx
+    runtimeArgs['--parallel'] = previewEffectiveParallel !== null ? previewEffectiveParallel : (args['--parallel'] ?? args['-np'])
+    if (runtimeArgs['--parallel'] === undefined || runtimeArgs['--parallel'] === null) delete runtimeArgs['--parallel']
+    runtimeArgs['--port'] = previewEffectivePort
+    if (hostOverrideActive) runtimeArgs['--host'] = '0.0.0.0'
+    if (apiKeyOverrideActive) runtimeArgs['--api-key'] = baseUrlOverride.apiKey
+    if (launchMode === 'api' && runtimeArgs['--no-webui'] === undefined) runtimeArgs['--no-webui'] = true
+    return runtimeArgs
+  }
+
+  const cmdPreview = useMemo(() => {
+    const parts: React.ReactNode[] = []
+    parts.push(<span key="base">llama-server</span>)
+    const finalModelPath = card?.template.modelPath || modelPathFallback
+    if (finalModelPath) parts.push(' ', <span key="arg-m" className="arg">-m</span>, ' ', <span key="val-m" className="val">"{finalModelPath}"</span>)
+    // Build a runtime-accurate arg map: skip internal __ flags, and reflect
+    // every active override (context floor, parallel, port, host, API key —
+    // see buildRuntimeArgs) so the preview matches what actually reaches
+    // llama-server, not just what's literally stored in this template.
+    const runtimeArgs = buildRuntimeArgs()
     Object.entries(runtimeArgs).forEach(([key, val]) => {
-      const isOverriddenCtx = key === '--ctx-size' && ctxOverriddenInPreview
+      const isOverridden =
+        (key === '--ctx-size' && ctxOverriddenInPreview) ||
+        (key === '--parallel' && parallelOverriddenInPreview) ||
+        (key === '--port' && portOverriddenInPreview) ||
+        (key === '--host' && hostOverrideActive) ||
+        (key === '--api-key' && apiKeyOverrideActive)
+      const title = key === '--ctx-size' && isOverridden
+        ? `Raised from this preset's own ${formatWithSpaces(Number(args['--ctx-size']) || 0)} by the global Minimum AutoFit override`
+        : key === '--parallel' && isOverridden
+          ? `Set by the global Parallel Inference override (was ${args['--parallel'] ?? args['-np'] ?? 'unset'} in this preset)`
+          : key === '--port' && isOverridden
+            ? `Set by the global Base URL Override (was ${card?.template.serverPort || serverPortFallback || 8080} for this preset)`
+            : key === '--host' && isOverridden
+              ? 'Added by the global Base URL Override → "Serve on local network"'
+              : key === '--api-key' && isOverridden
+                ? 'Added by the global Base URL Override → API Key'
+                : undefined
       if (val === true) parts.push(' ', <span key={`arg-${key}`} className="arg">{key}</span>)
       else if (val !== false && val !== null && val !== '') {
         parts.push(
@@ -1192,49 +1383,29 @@ export default function CmdParamsEditor({ templateId, args, onChange, modelPathF
           ' ',
           <span
             key={`val-${key}`}
-            className={isOverriddenCtx ? 'val cmd-preview-overridden' : 'val'}
-            title={isOverriddenCtx ? `Raised from this preset's own ${formatWithSpaces(Number(args['--ctx-size']) || 0)} by the global Minimum AutoFit override` : undefined}
+            className={isOverridden ? 'val cmd-preview-overridden' : 'val'}
+            title={title}
           >{val}</span>
         )
       }
     })
-    const finalPort = card?.template.serverPort || serverPortFallback
-    if (finalPort && runtimeArgs['--port'] === undefined) parts.push(' ', <span key="arg-port" className="arg">--port</span>, ' ', <span key="val-port" className="val">{finalPort}</span>)
     return parts
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [args, ignoreCtxOverride, autoCtxFill, cards, templateId, modelPathFallback, serverPortFallback, previewEffectiveCtx, ctxOverriddenInPreview, launchMode])
+  }, [args, ignoreCtxOverride, autoCtxFill, cards, templateId, modelPathFallback, serverPortFallback, previewEffectiveCtx, ctxOverriddenInPreview, previewEffectiveParallel, parallelOverriddenInPreview, previewEffectivePort, portOverriddenInPreview, hostOverrideActive, apiKeyOverrideActive, baseUrlOverride, isMoe, modelDefaults, launchMode])
 
   // Task 5: plain-text version of the preview for the copy button.
   const cmdPreviewText = useMemo(() => {
     const parts: string[] = ['llama-server']
     const finalModelPath = card?.template.modelPath || modelPathFallback
     if (finalModelPath) parts.push('-m', `"${finalModelPath}"`)
-    const isAutoFitAuto = ignoreCtxOverride && autoCtxFill === 'auto'
-    const runtimeArgs: Record<string, any> = {}
-    for (const [k, v] of Object.entries(args)) {
-      if (k.startsWith('__')) continue
-      if (k === '--ctx-size' || k === '-c') { continue } // handled below via previewEffectiveCtx
-      if (k === '--fit' || k === '-fit') { if (isAutoFitAuto) { runtimeArgs[k] = 'on'; continue } }
-      runtimeArgs[k] = v
-    }
-    if (isAutoFitAuto && runtimeArgs['--fit'] === undefined && runtimeArgs['-fit'] === undefined) {
-      runtimeArgs['--fit'] = 'on'
-    }
-    if (!isAutoFitAuto) {
-      runtimeArgs['--ctx-size'] = previewEffectiveCtx
-    }
-    if (launchMode === 'api' && runtimeArgs['--no-webui'] === undefined) {
-      runtimeArgs['--no-webui'] = true
-    }
+    const runtimeArgs = buildRuntimeArgs()
     Object.entries(runtimeArgs).forEach(([key, val]) => {
       if (val === true) parts.push(key)
       else if (val !== false && val !== null && val !== '') parts.push(key, String(val))
     })
-    const finalPort = card?.template.serverPort || serverPortFallback
-    if (finalPort && runtimeArgs['--port'] === undefined) parts.push('--port', String(finalPort))
     return parts.join(' ')
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [args, ignoreCtxOverride, autoCtxFill, cards, templateId, modelPathFallback, serverPortFallback, previewEffectiveCtx, launchMode])
+  }, [args, ignoreCtxOverride, autoCtxFill, cards, templateId, modelPathFallback, serverPortFallback, previewEffectiveCtx, previewEffectiveParallel, previewEffectivePort, hostOverrideActive, apiKeyOverrideActive, baseUrlOverride, isMoe, modelDefaults, launchMode])
 
   // Item 5: vertical-stack preview — same underlying runtime-accurate args as
   // cmdPreviewText above, just formatted one flag per line with backslash
@@ -1242,34 +1413,20 @@ export default function CmdParamsEditor({ templateId, args, onChange, modelPathF
   // commands (e.g. stacked speculative-decoding flags).
   const cmdPreviewStackedText = useMemo(() => {
     const finalModelPath = card?.template.modelPath || modelPathFallback
-    const isAutoFitAuto = ignoreCtxOverride && autoCtxFill === 'auto'
-    const runtimeArgs: Record<string, any> = {}
-    for (const [k, v] of Object.entries(args)) {
-      if (k.startsWith('__')) continue
-      if (k === '--ctx-size' || k === '-c') continue
-      if (k === '--fit' || k === '-fit') { if (isAutoFitAuto) { runtimeArgs[k] = 'on'; continue } }
-      runtimeArgs[k] = v
-    }
-    if (isAutoFitAuto && runtimeArgs['--fit'] === undefined && runtimeArgs['-fit'] === undefined) {
-      runtimeArgs['--fit'] = 'on'
-    }
-    if (!isAutoFitAuto) runtimeArgs['--ctx-size'] = previewEffectiveCtx
-    if (launchMode === 'api' && runtimeArgs['--no-webui'] === undefined) runtimeArgs['--no-webui'] = true
+    const runtimeArgs = buildRuntimeArgs()
     const argLines: string[] = []
     if (finalModelPath) argLines.push(`-m "${finalModelPath}"`)
     Object.entries(runtimeArgs).forEach(([key, val]) => {
       if (val === true) argLines.push(key)
       else if (val !== false && val !== null && val !== '') argLines.push(`${key} ${val}`)
     })
-    const finalPort = card?.template.serverPort || serverPortFallback
-    if (finalPort && runtimeArgs['--port'] === undefined) argLines.push(`--port ${finalPort}`)
     const allLines = ['llama-server', ...argLines]
     return allLines.map((l, i) => {
       const isLast = i === allLines.length - 1
       return `${i === 0 ? '' : '  '}${l}${isLast ? '' : ' \\'}`
     }).join('\n')
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [args, ignoreCtxOverride, autoCtxFill, cards, templateId, modelPathFallback, serverPortFallback, previewEffectiveCtx, launchMode])
+  }, [args, ignoreCtxOverride, autoCtxFill, cards, templateId, modelPathFallback, serverPortFallback, previewEffectiveCtx, previewEffectiveParallel, previewEffectivePort, hostOverrideActive, apiKeyOverrideActive, baseUrlOverride, isMoe, modelDefaults, launchMode])
 
   const filteredCategories = useMemo(() => {
     if (!commandsSchema) return []
@@ -1423,7 +1580,7 @@ export default function CmdParamsEditor({ templateId, args, onChange, modelPathF
           )}
           {!isHybrid && cmd.type === 'select' && (
             <select className="cmd-select" value={val} onChange={(e) => handleUpdate(cmd.arg, e.target.value)} disabled={disabled}>
-              <option value="">Default</option>
+              {!cmd.requireValue && <option value="">Default</option>}
               {cmd.options?.map(opt => <option key={opt} value={opt}>{opt}</option>)}
             </select>
           )}
@@ -1489,6 +1646,17 @@ export default function CmdParamsEditor({ templateId, args, onChange, modelPathF
           </label>
         </div>
       </div>
+      {reasoningPreserveSupported && (
+        <div className="mmproj-widget-row" title="This chat template re-injects reasoning_content from previous turns, so reasoning can be preserved across multi-turn chat.">
+          <span className="mmproj-widget-label">Preserve reasoning across turns <span style={{ opacity: 0.6, fontWeight: 400 }}>(--reasoning-preserve)</span></span>
+          <div className="toggle-wrap">
+            <label className="toggle" style={disabled ? { opacity: 0.45, cursor: 'not-allowed' } : {}}>
+              <input type="checkbox" checked={reasoningPreserveOn} onChange={(e) => setReasoningPreserveOn(e.target.checked)} disabled={disabled} />
+              <span className="toggle-track"></span><span className="toggle-thumb"></span>
+            </label>
+          </div>
+        </div>
+      )}
       {jinjaOn && (
         <div style={{ position: 'relative', marginTop: 10 }}>
           <textarea

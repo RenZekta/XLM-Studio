@@ -35,7 +35,7 @@ const METADATA_CACHE_PATH = join(APP_ROOT, 'metadata-cache.json')
 // whenever a field is added to the extracted metadata shape, and the cache
 // read below will treat mismatched/missing-version entries as stale and
 // transparently re-extract instead of serving the incomplete old object.
-const METADATA_SCHEMA_VERSION = 4
+const METADATA_SCHEMA_VERSION = 5
 for (const dir of [MODELS_DIR, TEMPLATES_DIR, BACKEND_DIR]) {
   if (!existsSync(dir)) mkdirSync(dir, { recursive: true })
 }
@@ -418,107 +418,26 @@ function isSpecDecodeSidecarFile(name: string, sizeBytes: number): boolean {
 // string-typed metadata values, and tensor names), and NEVER touches a
 // single byte of actual tensor weight data. This can't produce a false
 // positive from quantized noise, no matter how large the file is.
-async function readGgufStructuralText(modelPath: string, maxKv = 2000, maxTensors = 200000): Promise<string> {
-  const fd = await fsPromises.open(modelPath, 'r')
-  try {
-    const header = Buffer.alloc(24)
-    await fd.read(header, 0, 24, 0)
-    if (header.toString('ascii', 0, 4) !== 'GGUF') return ''
-    const version = header.readUInt32LE(4)
-    let fileOffset: number
-    let tensorCount: number
-    let kvCount: number
-    if (version >= 3) {
-      tensorCount = Number(readU64(header, 8))
-      kvCount = Number(readU64(header, 16))
-      fileOffset = 24
-    } else {
-      tensorCount = header.readUInt32LE(8)
-      kvCount = header.readUInt32LE(12)
-      fileOffset = 16
+// Speculative decoding, Tier 1 (Native MTP): whether the model's own GGUF
+// metadata declares an embedded Multi-Token-Prediction head. This is a
+// STATIC fact of the model file (metadata doesn't change), so it's detected
+// here — as part of the SAME metadata-KV walk get-gguf-metadata already does
+// for every other field — and cached right alongside the rest of that
+// metadata, rather than via a separate dedicated file scan. The canonical
+// signal is the `{arch}.nextn_predict_layers` metadata key (llama.cpp's own
+// convention for MTP-capable checkpoints); `multi_token_prediction` is kept
+// as a secondary alias some converters use.
+function detectHasNativeMtp(metaKv: Record<string, any>): boolean {
+  for (const k of Object.keys(metaKv)) {
+    if (k.includes('nextn_predict_layers') || k.includes('multi_token_prediction')) {
+      const v = metaKv[k]
+      if (typeof v === 'number') return v > 0
+      if (typeof v === 'boolean') return v
+      if (typeof v === 'string') return v !== '0' && v.toLowerCase() !== 'false'
+      return true
     }
-
-    const chunkSize = 512 * 1024
-    const readBuf = Buffer.alloc(chunkSize)
-    async function readBytes(n: number): Promise<Buffer> {
-      const out = Buffer.alloc(n)
-      let read = 0
-      while (read < n) {
-        const start = Math.floor(fileOffset / chunkSize) * chunkSize
-        const offInChunk = fileOffset % chunkSize
-        const avail = Math.min(chunkSize - offInChunk, n - read)
-        await fd.read(readBuf, 0, chunkSize, start)
-        readBuf.copy(out, read, offInChunk, offInChunk + avail)
-        fileOffset += avail
-        read += avail
-      }
-      return out
-    }
-    async function readString(): Promise<string> {
-      const lenBytes = version >= 3 ? 8 : 4
-      const lenBuf = await readBytes(lenBytes)
-      const len = version >= 3 ? Number(readU64(lenBuf, 0)) : lenBuf.readUInt32LE(0)
-      if (len < 0 || len > 10 * 1024 * 1024) throw new Error('implausible string length')
-      const strBuf = await readBytes(len)
-      return strBuf.toString('utf-8')
-    }
-    async function skipOrCollectValue(type: number, collect: string[]): Promise<void> {
-      switch (type) {
-        case 0: case 1: case 7: await readBytes(1); return
-        case 2: case 3: await readBytes(2); return
-        case 4: case 5: case 6: await readBytes(4); return
-        case 10: case 11: case 12: await readBytes(8); return
-        case 8: { const s = await readString(); collect.push(s); return }
-        case 9: {
-          const arrTypeBuf = await readBytes(4)
-          const arrType = arrTypeBuf.readUInt32LE(0)
-          const arrLenBytes = version >= 3 ? 8 : 4
-          const lBuf = await readBytes(arrLenBytes)
-          const arrLen = version >= 3 ? Number(readU64(lBuf, 0)) : lBuf.readUInt32LE(0)
-          // String arrays (e.g. tokenizer vocab) can be huge and aren't
-          // relevant to speculative-decoding detection — skip their
-          // CONTENTS without collecting, but still must advance the file
-          // offset correctly by reading through them.
-          for (let i = 0; i < Math.min(arrLen, 2_000_000); i++) {
-            await skipOrCollectValue(arrType, [])
-          }
-          return
-        }
-        default: throw new Error('unknown GGUF value type ' + type)
-      }
-    }
-
-    const textParts: string[] = []
-    for (let i = 0; i < kvCount && i < maxKv; i++) {
-      const key = await readString()
-      textParts.push(key)
-      const typeBuf = await readBytes(4)
-      const valueType = typeBuf.readUInt32LE(0)
-      await skipOrCollectValue(valueType, textParts)
-    }
-    // Tensor names — each tensor info is: name(string) + n_dims(u32) +
-    // dims(u64 * n_dims) + ggml_type(u32) + offset(u64). We only need the
-    // name; skip the rest by their fixed/known sizes.
-    for (let i = 0; i < tensorCount && i < maxTensors; i++) {
-      const name = await readString()
-      textParts.push(name)
-      const nDimsBuf = await readBytes(4)
-      const nDims = nDimsBuf.readUInt32LE(0)
-      if (nDims < 0 || nDims > 8) throw new Error('implausible tensor dim count')
-      await readBytes(nDims * 8)  // dims (u64 each)
-      await readBytes(4)          // ggml_type (u32)
-      await readBytes(8)          // offset (u64)
-    }
-    return textParts.join(' ').toLowerCase()
-  } catch {
-    // Any parse error (corrupt/unusual file, unexpected structure) — return
-    // whatever we've got is not tracked here for simplicity; safest to
-    // signal "nothing reliably found" rather than risk a partial/garbled
-    // read producing a false match.
-    return ''
-  } finally {
-    await fd.close().catch(() => {})
   }
+  return false
 }
 
 // Feature 22: substring-based scan — detect "mmproj" ANYWHERE in the filename,
@@ -991,6 +910,62 @@ function buildTrackedCommandsSchema(tracked: TrackedBackend): CommandsSchema | n
     }
   }
   return base
+}
+
+// Migration: '--mmap'/'--mlock' (independent booleans) → '--load-mode'
+// (single select matching llama.cpp's real spec: 'auto' | 'none' | 'mmap' |
+// 'mlock' | 'mmap+mlock' | 'dio').
+//
+// This is a genuine llama.cpp deprecation (its own log output says so
+// directly: "--mlock is deprecated. use --load-mode mlock instead" /
+// "--mmap and --no-mmap are deprecated. use --load-mode mmap instead"), but
+// it's also fixing a real bug in how this app used to build the CLI args in
+// the first place. Boolean flags here follow a "true → push the bare flag,
+// false → push nothing" convention (see the args-building loop in
+// ModelCard.tsx) — fine for flags whose OFF state IS "absent" (like
+// --verbose), but wrong for --mmap, whose off state needs an EXPLICIT
+// negating flag (--no-mmap) because llama.cpp's own internal default is
+// mmap-on ('auto'). So turning the Memory Map switch off in this app never
+// actually disabled mmap — it just stopped passing anything, and llama.cpp
+// quietly kept using its own default. That's exactly bug report #3: "when
+// turn both of them off, llama.cpp says mmap is enabled anyway".
+//
+// It also explains bug report #1: with mmap OFF (→ no flag emitted at all)
+// and mlock ON (→ bare --mlock emitted), llama.cpp's deprecated-flag
+// compatibility shim apparently expects --mmap to have been explicitly
+// resolved (true OR false) before it can safely fold --mlock into the new
+// load-mode machinery; left implicit, the shim's internal mmap base pointer
+// never gets set up, and locking un-mapped memory hits
+// `GGML_ASSERT(addr) failed` in llama-mmap.cpp. Note this ISN'T actually an
+// invalid combination in the real spec — 'mlock' by itself (mmap off,
+// mlock on) is one of the six listed modes — it's specifically the
+// deprecated-flag compat SHIM that mishandles it. Migrating straight to
+// '--load-mode mlock' sidesteps the shim (and the bug) entirely rather than
+// working around it.
+//
+// Migration mapping (applied once per template, honoring what each switch
+// combination actually meant as UI intent — not the old broken runtime
+// result, since fixing that misbehavior is the point of this migration):
+//   --mlock: true,  --mmap: true         → 'mmap+mlock'
+//   --mlock: true,  --mmap: false/unset  → 'mlock'   (now a real, valid mode
+//                                                       on its own — see above)
+//   --mlock: not true, --mmap: true      → 'mmap'
+//   --mlock: not true, --mmap: false     → 'none'    (explicit "both off")
+//   neither key ever set                 → leave '--load-mode' unset, so the
+//                                           schema's own default ('auto')
+//                                           applies — don't force an explicit
+//                                           value onto a template that never
+//                                           touched this setting.
+function migrateLoadModeArgs(args: Record<string, unknown>): { args: Record<string, unknown>; changed: boolean } {
+  if (args['--mmap'] === undefined && args['--mlock'] === undefined) return { args, changed: false }
+  const next = { ...args }
+  if (next['--mlock'] === true && next['--mmap'] === true) next['--load-mode'] = 'mmap+mlock'
+  else if (next['--mlock'] === true) next['--load-mode'] = 'mlock'
+  else if (next['--mmap'] === true) next['--load-mode'] = 'mmap'
+  else if (next['--mmap'] === false) next['--load-mode'] = 'none'
+  delete next['--mmap']
+  delete next['--mlock']
+  return { args: next, changed: true }
 }
 
 // --------------------------------------------------------------------------
@@ -1638,27 +1613,53 @@ export function registerIpcHandlers(): void {
   })
 
   // ----- Backends: commands schema (per fork) -----
+  // Rewritten (simplified, no back-compat concerns): the previous
+  // "persist once, heal/version-sync on read" design kept reintroducing the
+  // exact class of bug it was meant to fix — a backend's own option
+  // overrides (TurboQuant's cache-type-k/v values) kept getting silently
+  // reset back to the generic ones because the sync/heal logic compared
+  // against the wrong baseline. Simplify entirely: every call recomputes the
+  // built-in commands FRESH from the base schema + this backend's own
+  // defaultOptions — always, unconditionally, no caching, no version flags,
+  // no staleness possible. The only thing ever read from the persisted file
+  // is genuinely CUSTOM commands the user added via the Commands Editor
+  // (i.e. an arg that isn't a built-in one at all) — those are merged in on
+  // top and preserved; anything matching a built-in arg is always overridden
+  // by the fresh computation, full stop.
   ipcMain.handle('get-commands', async (_e, backendKey: string) => {
     if (!backendKey) return loadDefaultCommandsSchema()
     const s = await loadSettings()
     const tracked = s.trackedBackends.find(t => t.folderName === backendKey || t.id === backendKey)
+    const fresh = tracked ? buildTrackedCommandsSchema(tracked) : loadDefaultCommandsSchema()
+    if (!fresh) return null
+    const knownArgs = new Set<string>()
+    for (const cat of fresh.categories) for (const cmd of cat.commands) knownArgs.add(cmd.arg)
     const commandsPath = join(BACKEND_DIR, backendKey, 'commands.json')
     if (existsSync(commandsPath)) {
-      try { return JSON.parse(readFileSync(commandsPath, 'utf-8')) } catch {}
+      try {
+        const persisted = JSON.parse(readFileSync(commandsPath, 'utf-8')) as CommandsSchema
+        for (const cat of persisted.categories) {
+          for (const cmd of cat.commands) {
+            if (knownArgs.has(cmd.arg)) continue  // built-in: always the fresh definition wins
+            let targetCat = fresh.categories.find(c => c.name === cat.name)
+            if (!targetCat) {
+              targetCat = { name: cat.name, icon: cat.icon, commands: [] }
+              fresh.categories.push(targetCat)
+            }
+            targetCat.commands.push(cmd)
+          }
+        }
+      } catch {}
     }
-    // No saved commands: generate from default schema + tracked overrides.
-    if (tracked) {
-      const schema = buildTrackedCommandsSchema(tracked)
-      if (schema) {
-        // Persist the generated schema so the CommandsEditor can edit it later.
-        try {
-          mkdirSync(join(BACKEND_DIR, backendKey), { recursive: true })
-          writeFileSync(commandsPath, JSON.stringify(schema, null, 2))
-        } catch {}
-        return schema
-      }
-    }
-    return loadDefaultCommandsSchema()
+    // Always write the resolved result back, so the Commands Editor (which
+    // reads/writes this same file) is looking at exactly what get-commands
+    // just returned, and any genuinely-custom commands survive being
+    // round-tripped through this merge.
+    try {
+      mkdirSync(join(BACKEND_DIR, backendKey), { recursive: true })
+      writeFileSync(commandsPath, JSON.stringify(fresh, null, 2))
+    } catch {}
+    return fresh
   })
   ipcMain.handle('save-backend-commands', async (_e, backendKey: string, schema: unknown) => {
     try {
@@ -1677,7 +1678,20 @@ export function registerIpcHandlers(): void {
     return readdirSync(TEMPLATES_DIR)
       .filter(f => f.endsWith('.json'))
       .map(f => {
-        try { return { ...JSON.parse(readFileSync(join(TEMPLATES_DIR, f), 'utf-8')), _file: f } }
+        try {
+          const template = JSON.parse(readFileSync(join(TEMPLATES_DIR, f), 'utf-8')) as Record<string, any>
+          // Heal-on-read migration (see migrateLoadModeArgs): only touches
+          // templates that still have the old '--mmap'/'--mlock' keys, and
+          // persists the result so this only has to run once per template.
+          if (template.args && typeof template.args === 'object') {
+            const { args, changed } = migrateLoadModeArgs(template.args)
+            if (changed) {
+              template.args = args
+              try { writeFileSync(join(TEMPLATES_DIR, f), JSON.stringify(template, null, 2)) } catch {}
+            }
+          }
+          return { ...template, _file: f }
+        }
         catch { return null }
       })
       .filter(Boolean)
@@ -1698,6 +1712,13 @@ export function registerIpcHandlers(): void {
     if (r.canceled || !r.filePaths.length) return null
     const data = JSON.parse(readFileSync(r.filePaths[0], 'utf-8'))
     const id = Date.now().toString(); data.id = id
+    // Apply the same '--mmap'/'--mlock' → '--load-mode' migration as
+    // list-templates, so an imported template (possibly exported from an
+    // older version of the app) is normalized immediately rather than
+    // waiting for the next list-templates read to heal it.
+    if (data.args && typeof data.args === 'object') {
+      data.args = migrateLoadModeArgs(data.args).args
+    }
     writeFileSync(join(TEMPLATES_DIR, `${id}.json`), JSON.stringify(data, null, 2))
     return data
   })
@@ -2405,47 +2426,44 @@ export function registerIpcHandlers(): void {
   // ----- GGUF speculation auto-detection (Item 2: full tier rework) -----
   // Returns the HIGHEST-tier speculative decoding method detected for a
   // model, considering both:
-  //  (a) internal metadata (Tier 1, Native MTP — embedded in the model's own
-  //      GGUF, detected the same way as before: nextn tensor/metadata scan)
+  //  (a) internal metadata (Tier 1, Native MTP) — a static fact of the
+  //      model's own GGUF metadata (see detectHasNativeMtp / get-gguf-metadata's
+  //      hasNativeMtp field). Passed in by the caller (already known from the
+  //      SAME cached, disk-persisted metadata the rest of the UI reads —
+  //      extracted once per model, never re-scanned here).
   //  (b) sidecar files (Tiers 2-5 — separate .gguf files in the SAME folder
   //      as the base model, classified by filename keyword per the tier
-  //      table), the same general pattern as mmproj sidecar detection.
+  //      table), the same general pattern as mmproj sidecar detection. This
+  //      part IS re-scanned every call — sidecars are just files, the user
+  //      can add or remove them at any time, so this should always reflect
+  //      the current folder contents rather than a cached-forever answer.
   // Also returns every OTHER candidate found (not just the winner), so the
   // UI can offer manual selection among them — e.g. switching to a lower-
   // tier Draft Model even when a higher-tier method was auto-selected, or
   // choosing between multiple same-tier sidecar files.
-  ipcMain.handle('detect-speculation', async (_e, modelPath: string) => {
+  //
+  // Rewrite (this round): this used to ALSO do its own internal MTP scan via
+  // readGgufStructuralText — a full sequential walk of every tensor's
+  // name/dims/type/offset (thousands of small file reads for a model with a
+  // large tensor count), independent of and redundant with the metadata
+  // parser that get-gguf-metadata already runs and caches. That redundant
+  // scan was slow enough on cold disk I/O to occasionally not complete
+  // before something gave up on it, and any error anywhere in its very long
+  // sequential read chain silently produced "nothing found" with no
+  // indication why — which is exactly what "randomly doesn't detect
+  // anything, but works if you leave it open a while / re-extract metadata
+  // first (warms the OS page cache)" looks like. Since Tier 1 status is a
+  // static fact of the model file that get-gguf-metadata already establishes
+  // once and caches to disk, there's no reason to ever re-derive it here at
+  // all — the caller just passes it in.
+  ipcMain.handle('detect-speculation', async (_e, modelPath: string, hasNativeMtp?: boolean) => {
     try {
       if (!modelPath || !existsSync(modelPath)) return { tier: 0, method: 'off' as const, candidates: [] }
 
-      // (a) Internal MTP scan.
-      // Bug fix (item 3): switched from a raw N-MB byte scan (which was
-      // scanning mostly-random quantized TENSOR WEIGHT DATA, not text, and
-      // could false-positive on "mtp" appearing by pure chance in enough
-      // binary noise — exactly what happened here) to a proper structural
-      // GGUF parse that only ever looks at metadata keys/values and tensor
-      // NAMES — see readGgufStructuralText's comment for the full rationale.
-      // Also dropped the loose bare "mtp"/"draft-mtp" substring checks
-      // entirely — the canonical, unambiguous signal is the "nextn" naming
-      // convention (`{arch}.nextn_predict_layers` metadata key, or tensor
-      // names with a "nextn" component); a bare "mtp" substring is too easy
-      // to false-positive on even within legitimate structural text (e.g. a
-      // license string, a URL, or an unrelated key/tensor name).
-      let internalMtpFound = false
-      let internalReason = ''
-      {
-        const lower = await readGgufStructuralText(modelPath)
-        if (
-          lower.includes('nextn_predict_layers') || lower.includes('.nextn.') ||
-          lower.includes('nextn.eh_proj') || lower.includes('nextn.enorm') ||
-          lower.includes('nextn.pre_projection') || lower.includes('multi_token_prediction')
-        ) {
-          internalMtpFound = true
-          internalReason = 'MTP (Multi-Token Prediction / nextn) tensors detected in model metadata'
-        }
-      }
+      const internalMtpFound = !!hasNativeMtp
+      const internalReason = 'MTP (Multi-Token Prediction / nextn) declared in model metadata'
 
-      // (b) Sidecar scan — every OTHER .gguf-family file in the same folder,
+      // Sidecar scan — every OTHER .gguf-family file in the same folder,
       // classified by filename. Collect every match (not just the best) so
       // the UI can offer manual selection among all of them.
       const folder = dirname(modelPath)
@@ -2518,7 +2536,12 @@ export function registerIpcHandlers(): void {
       headCount: null, headCountKv: null, keyLength: null, valueLength: null,
       slidingWindow: null, kvLoraRank: null, qkRopeHeadDim: null,
       expertUsedCount: null, expertSharedCount: null,
-      fileType: null, fileTypeValue: null, fileTypeInternal: null, fileTypeFilenameHint: null, vocabSize: null, fullAttentionInterval: null
+      fileType: null, fileTypeValue: null, fileTypeInternal: null, fileTypeFilenameHint: null, vocabSize: null, fullAttentionInterval: null,
+      // Speculative decoding Tier 1 — see detectHasNativeMtp above. Extracted
+      // once here (same pass as everything else) and cached with the rest of
+      // this metadata, instead of a separate re-scan every time the
+      // Speculative Decoding widget wants to know.
+      hasNativeMtp: false
     }
     try {
       if (!modelPath || !existsSync(modelPath)) return { ...result, error: 'File not found' }
@@ -2600,6 +2623,7 @@ export function registerIpcHandlers(): void {
           })()
           result.vocabSize = vocabArrLen
           result.isMoe = (result.expertCount || 0) > 0
+          result.hasNativeMtp = detectHasNativeMtp(kv)
           // If we got the essential fields, return immediately — no need for JS fallback.
           if (result.blockCount && result.contextLength) {
             console.log('[GGUF] Native tool succeeded: blockCount=' + result.blockCount + ' contextLength=' + result.contextLength + ' chatTemplate=' + (result.chatTemplate ? 'yes' : 'no'))
@@ -2828,6 +2852,7 @@ export function registerIpcHandlers(): void {
       // vocab size: count of tokenizer.ggml.tokens array (the JS parser stores
       // arrays as [] so we can't get the length here; best-effort via vocab_size key).
       if (!result.vocabSize) result.vocabSize = resolve('tokenizer.ggml.tokens.count') || resolve('vocab_size')
+      if (!result.hasNativeMtp) result.hasNativeMtp = detectHasNativeMtp(allMeta)
 
       // Fix 1/2: Fallback byte-scan — if the structured parse failed to find
       // block_count, context_length, or chat_template, do a raw byte search
@@ -2842,6 +2867,15 @@ export function registerIpcHandlers(): void {
           await scanFd.close()
           const scanStr = scanBuf.subarray(0, bytesRead).toString('latin1')
           const lowerScan = scanStr.toLowerCase()
+          // Cheap safety net: if the structured KV walk broke early (or the
+          // model has enough metadata that nextn_predict_layers falls outside
+          // this parser's 500-KV cap) and hasNativeMtp is still unset, a raw
+          // substring check over this same already-read 16 MB prefix is
+          // free — no extra I/O, no full tensor-list walk like the old
+          // dedicated scan used to require.
+          if (!result.hasNativeMtp && (lowerScan.includes('nextn_predict_layers') || lowerScan.includes('multi_token_prediction'))) {
+            result.hasNativeMtp = true
+          }
 
           // Helper: find a metadata key in the byte stream and read the value
           // that follows it. In GGUF, after a string key comes a u32 value type,
