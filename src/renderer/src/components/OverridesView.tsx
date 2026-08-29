@@ -4,7 +4,7 @@ import { Link2, Database, Shield, Copy, Check, Server } from 'lucide-react'
 import { formatWithSpaces, parseSpacedNumber, CONTEXT_POWER_OF_TWO_STEPS, snapToNearestPowerOfTwo, indexOnLadder } from '../utils/contextFormat'
 
 
-// Task 1: Base URL field — LM Studio style.
+// Base URL field — LM Studio style.
 // REST (not focused): the whole URL "http://localhost:<port>/v1" is one
 //   continuous white string (a single link, no breaks). A copy button sits
 //   on the RIGHT inside the box.

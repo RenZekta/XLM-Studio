@@ -336,7 +336,7 @@ export default function ModelsView() {
     setLoading(false)
   }, [setModels])
 
-  // Item 3: "Reextract model data" — wipes BOTH the persisted (main-process)
+  // "Reextract model data" — wipes BOTH the persisted (main-process)
   // and in-memory (renderer store) metadata caches, then re-triggers
   // extraction for every currently-detected model, exactly like the app-launch
   // parallel scan does for uncached models (see App.tsx's init effect) — the

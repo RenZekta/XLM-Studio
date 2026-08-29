@@ -128,10 +128,10 @@ const api = {
 
   // ----- GGUF metadata parser (features 12/13/14/16/29) -----
   getGgufMetadata: (modelPath: string) => ipcRenderer.invoke('get-gguf-metadata', modelPath) as Promise<any>,
-  // Task 1: metadata cache (bulk-load + live updates)
+  // Metadata cache (bulk-load + live updates)
   getMetadataCache: () => ipcRenderer.invoke('get-metadata-cache') as Promise<Record<string, any>>,
   clearMetadataCache: () => ipcRenderer.invoke('clear-metadata-cache') as Promise<{ success: boolean; cleared: number }>,
-  // Item 4: Monitoring tab.
+  // Monitoring tab.
   perfGetActiveSessions: () => ipcRenderer.invoke('perf-get-active-sessions') as Promise<{ sessionId: string; templateId: string; templateName: string; startedAt: number }[]>,
   perfGetActiveSessionData: (templateId: string) => ipcRenderer.invoke('perf-get-active-session-data', templateId) as Promise<any>,
   perfGetSessionHistory: () => ipcRenderer.invoke('perf-get-session-history') as Promise<any[]>,
@@ -188,7 +188,7 @@ const api = {
     ipcRenderer.on('backends-checked-silent', (_e, data) => cb(data))
   },
 
-  // Fix 4: Server log stream listener (for the Logs tab)
+  // Server log stream listener (for the Logs tab)
   onServerLog: (cb: (data: { id: string; name: string; stream: string; line: string; ts: number }) => void) => {
     ipcRenderer.removeAllListeners('server-log')
     ipcRenderer.on('server-log', (_e, data) => cb(data))

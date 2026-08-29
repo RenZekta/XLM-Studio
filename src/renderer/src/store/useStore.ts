@@ -60,7 +60,7 @@ interface AppStore {
   speculationApplied: Record<string, boolean>
   // New state for features 12-34
   ggufMetadata: Record<string, any>  // keyed by modelPath
-  // Task 1: per-model metadata extraction status (for the "extracting…" notification).
+  // Per-model metadata extraction status (for the "extracting…" notification).
   metadataExtractions: Record<string, { name: string; status: 'extracting' | 'done' | 'error' }>
   vramInfo: { freeVRAMMB: number; totalVRAMMB: number; hasNvidia: boolean; gpuName: string | null; vendor?: string | null; gpuType?: string | null } | null
   systemRam: { totalRAMMB: number; freeRAMMB: number } | null
@@ -69,11 +69,11 @@ interface AppStore {
   samplingPresets: any[]
   paramViewMode: 'common' | 'full'  // feature 30
   quickBaselineActive: boolean      // feature 25 — tracks if Quick preset is the active baseline
-  // Task 5: 3-way preset mode. 'clear' = empty, 'quick' = LM Studio baselines,
+  // 3-way preset mode. 'clear' = empty, 'quick' = LM Studio baselines,
   // 'fullauto' = Quick baselines + Ignore-Context-Override + Auto-Context-Fill ON.
   presetMode: 'clear' | 'quick' | 'fullauto'
 
-  // Bug fix (item 4): logs used to live in LogsView's local component state and
+  // Logs used to live in LogsView's local component state and
   // the IPC listener was only registered while that view was mounted — so
   // navigating away lost every log that arrived in the meantime (not just
   // hid them). Logs now live in the global store (populated by a listener
@@ -128,7 +128,7 @@ interface AppStore {
   markSpeculationApplied: (templateId: string, applied: boolean) => void
   setGgufMetadata: (modelPath: string, meta: any) => void
   setGgufMetadataBulk: (cache: Record<string, any>) => void
-  // Item 3: wipes the renderer's in-memory metadata cache — the "Reextract
+  // Wipes the renderer's in-memory metadata cache — the "Reextract
   // models' data" button calls this right after clearing the persisted
   // main-process cache, so nothing stale lingers in either place.
   clearGgufMetadataAll: () => void
@@ -142,7 +142,7 @@ interface AppStore {
   setParamViewMode: (mode: 'common' | 'full') => void
   setQuickBaselineActive: (active: boolean) => void
   setPresetMode: (mode: 'clear' | 'quick' | 'fullauto') => void
-  // Bug fix (item 4): global log actions — appendLog is called by the App-root
+  // Global log actions — appendLog is called by the App-root
   // listener for every incoming server-log IPC event (so logs accumulate
   // regardless of which tab is active); clearLogs is the manual "Clear" button.
   appendLog: (entry: { id: string; name: string; stream: 'stdout' | 'stderr' | 'app'; line: string; ts: number }) => void
@@ -280,7 +280,7 @@ export const useStore = create<AppStore>((set) => ({
   setParamViewMode: (mode) => set({ paramViewMode: mode }),
   setQuickBaselineActive: (active) => set({ quickBaselineActive: active }),
   setPresetMode: (mode) => set({ presetMode: mode, quickBaselineActive: mode !== 'clear' }),
-  // Bug fix (item 4): cap at 10000 entries to avoid unbounded memory growth
+  // Cap at 10000 entries to avoid unbounded memory growth
   // over a long-running session (LogsView still only shows the most recent
   // ones by default via its own filter, but the cap lives here now since this
   // is the single persistent source of truth for the whole app lifetime).

@@ -64,7 +64,7 @@ function getRecommendedSettings(filename: string): RecommendedSettings {
   const quant = detectQuant(filename)
   const size = detectSize(filename)
   const family = detectFamily(filename)
-  // Fix 2: Don't set a hardcoded ctx-size. Let llama-server use the model's
+  // Don't set a hardcoded ctx-size. Let llama-server use the model's
   // native context length (ctx=0 = from model). The web UI will show the real
   // value from the server's /props endpoint.
   const ctxSize = 0

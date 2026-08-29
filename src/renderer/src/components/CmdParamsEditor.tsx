@@ -26,15 +26,15 @@ const HYBRID_PARAMS = ['--threads', '--gpu-layers', '--temperature', '--top-p', 
 // Params that get a custom widget (excluded from the regular command grid).
 const CUSTOM_PARAMS = ['--model', '--port', '--host', '--api-key', '--mmproj', '--spec-type', '--spec-draft-model', '--chat-template', '--reasoning-budget', '--reasoning-budget-message', '--moe-cpu-layers', '--reasoning-preserve',
   '--spec-ngram-map-k4v-size-n', '--spec-ngram-map-k4v-size-m', '--spec-ngram-map-k4v-min-hits',
-  '--spec-ngram-mod-n-match', '--spec-ngram-mod-n-min', '--spec-ngram-mod-n-max', '--ctx-size-dft']
-// Bug fix (item 1.2): sampling values are per-model/user-preferred, set once
+  '--spec-ngram-mod-n-match', '--spec-ngram-mod-n-min', '--spec-ngram-mod-n-max']
+// Sampling values are per-model/user-preferred, set once
 // at template creation from the starred sampling preset, and must NEVER be
 // touched by the Quick/FullAuto/Clear engine presets. Shared list so every
 // place that needs to check "is this a sampling key" (the initial-args
 // detection, Clear's wipe, etc.) agrees on exactly the same set.
 const SAMPLING_KEYS = ['--temperature', '--top-p', '--top-k', '--min-p', '--repeat-penalty', '--presence-penalty']
 
-// Item (this round): --reasoning-preserve support detection. There's no GGUF
+// --reasoning-preserve support detection. There's no GGUF
 // metadata field that directly says "this template supports preserving
 // reasoning across turns" — the only signal available is the chat template's
 // own Jinja source. Templates that support carrying a previous turn's
@@ -60,7 +60,7 @@ interface Props {
   modelPathFallback?: string
   serverPortFallback?: number
   disabled?: boolean
-  // Bug fix (Task 1 follow-up): CreateModal wants the Settings/Parameters
+  // CreateModal wants the Settings/Parameters
   // toggles + CPU/model/Free-VRAM info banners to always be visible above the
   // collapsible "Advanced Parameters" section, not hidden inside it. Rather
   // than duplicate that JSX (and its state/hooks) in CreateModal, CmdParamsEditor
@@ -69,18 +69,17 @@ interface Props {
   // provided (e.g. ModelCard's usage, which has no such split), the header
   // renders inline in its normal position as before.
   headerPortalTarget?: HTMLElement | null
-  // Item 8: the actual launch command (see ModelCard.tsx's handleRunToggle)
+  // The actual launch command (see ModelCard.tsx's handleRunToggle)
   // pushes --no-webui when launchMode is 'api', on top of the stored args —
   // pass it through so the preview reflects that too.
   launchMode?: 'chat' | 'api'
 }
 
-// Item 2 (Speculative Decoding rework): the full tier system, per the user's
-// comparison table — mirrors src/main/perfMonitor... no, mirrors the backend
-// definitions in src/main/ipc.ts (SPEC_TIER_DEFS/classifySidecarFilename).
-// Duplicated here (not imported from main) since main-process modules can't
-// be imported into the renderer bundle; kept in sync manually — the tier
-// numbers, methods, and flags are a stable, rarely-changing reference table.
+// Speculative-decoding tier table — mirrors the backend definitions in
+// src/main/ipc.ts (SPEC_TIER_DEFS/classifySidecarFilename). Duplicated here
+// (not imported from main) since main-process modules can't be imported into
+// the renderer bundle; kept in sync manually — the tier numbers, methods, and
+// flags are a stable, rarely-changing reference table.
 interface SpecTierDef { tier: number; method: SpecMethod; label: string; flag: string | null; draftMax: number; draftMin: number; draftPMin: number }
 const SPEC_TIER_DEFS: SpecTierDef[] = [
   { tier: 0, method: 'off', label: 'Off', flag: null, draftMax: 0, draftMin: 0, draftPMin: 0 },
@@ -91,7 +90,7 @@ const SPEC_TIER_DEFS: SpecTierDef[] = [
   { tier: 5, method: 'dflash2', label: 'DFlash2', flag: 'draft-dflash', draftMax: 5, draftMin: 0, draftPMin: 0.80 }
 ]
 
-// Params visible in "Common" view mode (feature 30).
+// Params visible in "Common" view mode.
 const COMMON_VISIBLE = new Set([
   '--ctx-size', '--threads', '--gpu-layers', '--batch-size', '--ubatch-size',
   '--parallel', '--flash-attn', '--temperature', '--top-p', '--min-p', '--top-k',
@@ -99,18 +98,17 @@ const COMMON_VISIBLE = new Set([
   '--kv-unified', '--keep', '--seed'
 ])
 
-// Item 4: reusable on/off block for a stackable n-gram speculative-decoding
+// Reusable on/off block for a stackable n-gram speculative-decoding
 // modifier (ngram-map-k4v, ngram-mod) — a toggle that, when on, reveals a
 // slider+input row per llama.cpp flag, each seeded with llama.cpp's own
 // documented default the first time it's turned on.
-function NgramModifierBlock({ title, flagPrefix, enabled, onToggle, disabled, fields, extraField, args, handleUpdate }: {
+function NgramModifierBlock({ title, flagPrefix, enabled, onToggle, disabled, fields, args, handleUpdate }: {
   title: string
   flagPrefix: string
   enabled: boolean
   onToggle: (on: boolean) => void
   disabled?: boolean
   fields: { key: string; label: string; def: number }[]
-  extraField?: { arg: string; label: string; def: number }
   args: Record<string, any>
   handleUpdate: (arg: string, value: any) => void
 }) {
@@ -132,12 +130,6 @@ function NgramModifierBlock({ title, flagPrefix, enabled, onToggle, disabled, fi
               </div>
             )
           })}
-          {extraField && (
-            <div className="cmd-row cmd-row-hybrid" style={{ padding: '4px 0', border: 'none', background: 'transparent' }}>
-              <div className="cmd-label-group"><div className="cmd-label">{extraField.label}</div><div className="cmd-arg">{extraField.arg}</div></div>
-              <HybridSlider value={args[extraField.arg] ?? extraField.def} min={0} max={2097152} step={1} onChange={v => handleUpdate(extraField.arg, v)} defaultVal={extraField.def} allowAuto placeholder="0 = same as main context" disabled={disabled} />
-            </div>
-          )}
         </div>
       )}
     </div>
@@ -153,15 +145,15 @@ export default function CmdParamsEditor({ templateId, args, onChange, modelPathF
     setPresetMode, modelDefaults, samplingPresets, baseUrlOverride
   } = useStore()
   const [searchQuery, setSearchQuery] = useState('')
-  const [previewCopied, setPreviewCopied] = useState(false)  // Task 5: preview copy button
-  // Item 5: vertical-stack command preview toggle.
+  const [previewCopied, setPreviewCopied] = useState(false)  // "Copied" flash state for the preview copy button
+  // Vertical-stack command preview toggle.
   const [stackedPreview, setStackedPreview] = useState(false)
 
   const card = templateId ? cards.find(c => c.template.id === templateId) : null
   const isRunning = card?.status === 'running'
   const disabled = disabledProp || isRunning
 
-  // Bug fix (Task 1.1): keep a ref mirroring the latest `args` prop. Async
+  // Keep a ref mirroring the latest `args` prop. Async
   // callbacks (e.g. the speculation/MTP file-scan below) close over `args` as
   // of the render in which the effect fired. If the scan takes a while and the
   // parent's args change in the meantime (e.g. Quick preset finishing its own
@@ -193,7 +185,7 @@ export default function CmdParamsEditor({ templateId, args, onChange, modelPathF
   }, [templateId])
 
 
-  // Task 1+3: On mount, for a NEW template (no templateId, args empty or only
+  // On mount, for a NEW template (no templateId, args empty or only
   // sampling-seeded), auto-apply the Quick preset so the engine baselines
   // (threads/batch/flash-attn/etc.) are actually set — not just visually
   // selected. The starred sampling preset's values are seeded by CreateModal and
@@ -226,7 +218,7 @@ export default function CmdParamsEditor({ templateId, args, onChange, modelPathF
   }, [models, effectiveModelPath])
   const detectedMmproj = modelGroup?.mmproj || null
 
-  // Feature 12/29/16: Load GGUF metadata when model changes.
+  // Load GGUF metadata when model changes.
   useEffect(() => {
     if (!effectiveModelPath || disabled) return
     const cached = ggufMetadata[effectiveModelPath]
@@ -250,7 +242,7 @@ export default function CmdParamsEditor({ templateId, args, onChange, modelPathF
   const cpuThreadsOverridePercent = modelDefaults.cpuThreadsOverrideEnabled ? modelDefaults.cpuThreadsOverridePercent : null
   const recommendedThreads = computeRecommendedThreads(cpuInfo, cpuThreadsOverridePercent)
 
-  // Bug fix (item 1 — toggle "stuck" on last-selected preset): `presetMode`
+  // `presetMode`
   // is a SINGLE GLOBAL store field shared across every open template/card, so
   // it only ever reflects whichever preset button was clicked MOST RECENTLY
   // ANYWHERE in the app — not necessarily anything to do with the template
@@ -260,7 +252,7 @@ export default function CmdParamsEditor({ templateId, args, onChange, modelPathF
   // displayed/effective mode from THIS template's own args instead — scoped
   // per-template so it can't leak across cards, unlike the old global field.
   //
-  // Bug fix (this round): the FIRST version of this derivation used
+  // The FIRST version of this derivation used
   // `__ignoreCtxOverride === true` as the Quick-vs-FullAuto discriminator —
   // but that flag is ALSO an independent, directly user-toggleable checkbox
   // ("Ignore Context Length Override"), not something exclusive to FULL
@@ -277,16 +269,16 @@ export default function CmdParamsEditor({ templateId, args, onChange, modelPathF
       ? args['__lastPreset']
       : (args['--threads'] === undefined ? 'clear' : 'quick')
 
-  // Feature 12: GPU layers slider max = block_count (fallback 120).
+  // GPU layers slider max = block_count (fallback 120).
   const gpuLayersMax = blockCount > 0 ? blockCount : 120
-  // Task 2.1/2.2/2.3/5: per-preset context-fill toggles + memory overhead.
+  // Per-preset context-fill toggles + memory overhead.
   // (Moved up from below so the YaRN auto-scale logic right after it can see it.)
   const ignoreCtxOverride = args['__ignoreCtxOverride'] === true
-  // Item 8: per-template "Automatic YaRN scaling control" — when on, unlocks
+  // Per-template "Automatic YaRN scaling control" — when on, unlocks
   // the Context Size slider up to 2 097 152 and auto-computes YaRN RoPE
   // scaling to reach whatever context the user picks.
   const yarnAutoScale = args['__yarnAutoScale'] === true
-  // Item 5: the GLOBAL "Automatic YaRN scaling control override and upscale
+  // The GLOBAL "Automatic YaRN scaling control override and upscale
   // to AutoFit" switch (Settings) also enables the same auto-scaling
   // behavior, but only when this preset is actually subject to the AutoFit
   // override (i.e. NOT ignoring it) AND the override is genuinely higher than
@@ -295,15 +287,15 @@ export default function CmdParamsEditor({ templateId, args, onChange, modelPathF
   const globalYarnUpscale = !!modelDefaults.autoFitYarnAutoScale && !ignoreCtxOverride &&
     modelDefaults.autoFitEnabled && contextLength > 0 && modelDefaults.autoFitContextLength > contextLength
   const effectiveYarnAutoScale = yarnAutoScale || globalYarnUpscale
-  // Item 5: "Use 2x increments" for the per-template Context Size slider.
+  // "Use 2x increments" for the per-template Context Size slider.
   const ctxUse2xIncrements = args['__ctxUse2xIncrements'] === true
-  // Feature 29: Context slider max = model context_length (fallback 131072).
-  // Item 8: unlocked to 2 097 152 while YaRN auto-scaling (per-template or via
+  // Context slider max = model context_length (fallback 131072).
+  // Unlocked to 2 097 152 while YaRN auto-scaling (per-template or via
   // the global upscale-to-AutoFit switch) is active, regardless of the
   // model's native context — that's the entire point of the switch.
   const ctxSliderMax = effectiveYarnAutoScale ? 2097152 : (contextLength > 0 ? contextLength : 131072)
 
-  // Feature 14: VRAM budget calculation.
+  // VRAM budget calculation.
   const modelSizeMB = meta?.fileSizeMB || 0
   const mmprojEnabled = args['--mmproj'] !== undefined && args['--mmproj'] !== '' && args['--mmproj'] !== false
   const mmprojSizeMB = detectedMmproj ? Math.round(detectedMmproj.size / (1024 * 1024)) : 0
@@ -311,7 +303,7 @@ export default function CmdParamsEditor({ templateId, args, onChange, modelPathF
   // Default KV cache quant depends on the backend (TurboQuant fork →
   // K=turbo4 / V=turbo3, otherwise q8_0/q8_0). The user can override per-
   // template via --cache-type-k/v.
-  // Bug fix (item 4): llama.cpp silently upgrades K to q8_0 when K/V
+  // Llama.cpp silently upgrades K to q8_0 when K/V
   // quant types are too asymmetric (a quality-preserving safety fallback).
   // turbo4 on K stays safely above that asymmetry threshold, so K defaults
   // to turbo4 while V defaults to turbo3 — the lighter V-only quant is what
@@ -321,19 +313,19 @@ export default function CmdParamsEditor({ templateId, args, onChange, modelPathF
   const defaultKvQuantV = defaultKvQuantVFor(activeBackend?.backendKey)
   const kvQuantK = (typeof args['--cache-type-k'] === 'string' && args['--cache-type-k']) ? String(args['--cache-type-k']) : defaultKvQuantK
   const kvQuantV = (typeof args['--cache-type-v'] === 'string' && args['--cache-type-v']) ? String(args['--cache-type-v']) : defaultKvQuantV
-  // Task 2.1/2.2/2.3/5: per-preset context-fill toggle + memory overhead.
+  // Per-preset context-fill toggle + memory overhead.
   // (ignoreCtxOverride itself now declared above, near the YaRN logic that needs it.)
   const autoCtxFill = (args['__autoCtxFill'] as 'off' | 'auto' | 'maximum') || 'off'
-  // Task 5: Memory Overhead — off by default everywhere. When enabled, the
+  // Memory Overhead — off by default everywhere. When enabled, the
   // default value is 2.5 GB (2560 MB). The overhead reduces Free VRAM then RAM.
   const memOverheadEnabled = args['__memOverheadEnabled'] === true
   const memOverheadMB = memOverheadEnabled ? (Number(args['__memOverheadMB']) || 2560) : 0
   // (moeStrategy local var removed — item 7 eliminated its only two call
   // sites; call sites elsewhere read modelDefaults.moeOffloadStrategy directly.)
-  // Task 2: pass whether AutoFill "Auto" is active so useVramBudget can ignore
+  // Pass whether AutoFill "Auto" is active so useVramBudget can ignore
   // the selected ctx and check full-fit by speed priority for dense models.
   const autoFillAuto = ignoreCtxOverride && autoCtxFill === 'auto'
-  // Bug fix (item 7): compute the YaRN-scaled effective max context (if RoPE
+  // Compute the YaRN-scaled effective max context (if RoPE
   // scaling is set to yarn) so the AutoFit guardrail warning doesn't
   // misfire against the model's raw (un-scaled) native context.
   const ropeScalingType = args['--rope-scaling']
@@ -367,7 +359,7 @@ export default function CmdParamsEditor({ templateId, args, onChange, modelPathF
   // the button click / buildQuickEngineBaseline) because for a brand-new
   // template metadata usually isn't loaded yet at either of those moments.
   //
-  // Bug fix (residual dynamic control): this used to re-fire and FORCE
+  // This used to re-fire and FORCE
   // --gpu-layers back to gpuLayersMax on ANY divergence — including a value
   // the user had deliberately set manually. Since `disabled` is one of this
   // effect's dependencies, it also re-evaluated every time the server
@@ -388,7 +380,7 @@ export default function CmdParamsEditor({ templateId, args, onChange, modelPathF
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [disabled, derivedPresetMode, isMoe, blockCount, gpuLayersMax])
 
-  // Item 3: the equivalent backfill for --ctx-size — Quick/FullAuto set it
+  // The equivalent backfill for --ctx-size — Quick/FullAuto set it
   // at click/creation time based on model metadata (native context length,
   // and for MoE, the VRAM+RAM leftover estimate), but that data is USUALLY
   // NOT YET AVAILABLE at either of those moments for a brand-new template
@@ -419,7 +411,7 @@ export default function CmdParamsEditor({ templateId, args, onChange, modelPathF
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [disabled, derivedPresetMode, isMoe, meta?.contextLength, vramBudget?.freeVRAMMB, vramBudget?.freeRAMMB, modelSizeMB, kvQuantK, kvQuantV, mmprojEnabled, mmprojSizeMB])
 
-  // Item 7: "Maximum available" AutoFill used to force-switch back to 'auto'
+  // "Maximum available" AutoFill used to force-switch back to 'auto'
   // whenever the MoE strategy was "MAX GPU Layers and Force MoE Weights onto
   // CPU", on the assumption the two conflicted. That's no longer true — the
   // recommendation engine (Task 4 fix) now correctly computes how many
@@ -467,7 +459,7 @@ export default function CmdParamsEditor({ templateId, args, onChange, modelPathF
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [effectiveYarnAutoScale, globalYarnUpscale, currentCtx, contextLength, disabled, modelDefaults.autoFitContextLength])
 
-  // Task 2.2/7: Automatic Context Fill — compute the max context that fits and
+  // Automatic Context Fill — compute the max context that fits and
   // auto-write it into --ctx-size ONLY when AutoFill is "Maximum available"
   // (the only case where ctx is auto-applied, per the user's spec). Dense 'auto'
   // and MoE 'auto' defer to llama-server --fit (no ctx forced).
@@ -495,7 +487,7 @@ export default function CmdParamsEditor({ templateId, args, onChange, modelPathF
       newArgs['--ctx-size'] = autoFillResult.context
       changed = true
     }
-    // Item 7: now that "Maximum available" is allowed together with the MoE
+    // Now that "Maximum available" is allowed together with the MoE
     // "MAX GPU Layers and Force MoE Weights onto CPU" strategy, also write
     // the layer placement it computed — not just --ctx-size — so the
     // strategy actually gets the CPU-forced layer count needed to fit the
@@ -512,7 +504,7 @@ export default function CmdParamsEditor({ templateId, args, onChange, modelPathF
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [autoFillResult?.context, autoFillResult?.layers, autoFillResult?.maxLayers, disabled, isMoe, modelDefaults.moeOffloadStrategy])
 
-  // Item 6: "With (L2/Ltotal) GPU Offload Layers selected, context window of
+  // "With (L2/Ltotal) GPU Offload Layers selected, context window of
   // (C2) will fit into the (VRAM/RAM)" — the second Free-VRAM recommendation
   // line. Unlike autoFillResult above (which only runs when AutoFill=Maximum
   // and WRITES --ctx-size), this is a pure read-only projection computed
@@ -536,7 +528,7 @@ export default function CmdParamsEditor({ templateId, args, onChange, modelPathF
   }) : null
 
   // ----- mmproj widget state (Task 2.1) -----
-  // Task 2.1: if mmproj detected → ON + Automatic. If not detected → OFF + Manual.
+  // If mmproj detected → ON + Automatic. If not detected → OFF + Manual.
   // The user can manually override at any time (tracked via __mmproj_manual).
   const mmprojArgValue = args['--mmproj']
   const mmprojManuallyToggled = args['__mmproj_manual'] === true
@@ -554,10 +546,10 @@ export default function CmdParamsEditor({ templateId, args, onChange, modelPathF
     return mmprojManuallyToggled ? 'manual' : 'auto'
   }, [mmprojOn, mmprojArgValue, detectedMmproj, mmprojManuallyToggled])
 
-  // Task 2.1: Auto-select detected mmproj when ON and in auto mode.
+  // Auto-select detected mmproj when ON and in auto mode.
   useEffect(() => {
     if (disabled) return
-    // Bug fix (item 1): base on argsRef.current, not `args` — see commit()
+    // Base on argsRef.current, not `args` — see commit()
     // comment above for why this matters when sibling effects fire in the
     // same flush.
     const curArgs = argsRef.current
@@ -622,7 +614,7 @@ export default function CmdParamsEditor({ templateId, args, onChange, modelPathF
   }
   function setMmprojOn(on: boolean) {
     const newArgs: Record<string, any> = { ...args }
-    // Fix 3: Mark as manually toggled so the default-ON behavior doesn't override.
+    // Mark as manually toggled so the default-ON behavior doesn't override.
     newArgs['__mmproj_manual'] = true
     newArgs['__mmproj_enabled'] = on
     if (!on) {
@@ -634,7 +626,7 @@ export default function CmdParamsEditor({ templateId, args, onChange, modelPathF
     }
     commit(newArgs)
   }
-  // Fix 2: Clicking Manual opens the file picker immediately.
+  // Clicking Manual opens the file picker immediately.
   async function setMmprojMode(mode: 'auto' | 'manual') {
     const newArgs: Record<string, any> = { ...args }
     delete newArgs['__mmproj_disabled']
@@ -667,7 +659,7 @@ export default function CmdParamsEditor({ templateId, args, onChange, modelPathF
   }
 
   // ----- Speculation auto-detection (Item 2: full tier rework) -----
-  // Task 2.2: detection runs AND auto-applies the detected method so the
+  // Detection runs AND auto-applies the detected method so the
   // user doesn't have to manually enable it. If not detected, stays off.
   //
   // Rewrite (this round — matches the intended design): Tier 1 (embedded
@@ -695,7 +687,7 @@ export default function CmdParamsEditor({ templateId, args, onChange, modelPathF
     }).catch(() => {})
   }, [effectiveModelPath, disabled, hasNativeMtp, setDetectedSpeculation])
 
-  // Item 2: parse the current primary method out of --spec-type. It's now a
+  // Parse the current primary method out of --spec-type. It's now a
   // comma-separated list (primary draft method + stackable n-gram
   // modifiers), so this specifically looks for whichever segment matches one
   // of the mutually-exclusive PRIMARY method flags (draft-mtp/draft-simple/
@@ -724,7 +716,7 @@ export default function CmdParamsEditor({ templateId, args, onChange, modelPathF
     return parts.join(',')
   }
 
-  // Bug fix (item — MTP can't be turned off / can't manually switch method):
+  // 
   // applying the detected method is a continuously-reactive effect (see
   // above), which is great for resilience against transient failures — but
   // it meant choosing "Off" (or any OTHER method) in the dropdown looked
@@ -764,7 +756,7 @@ export default function CmdParamsEditor({ templateId, args, onChange, modelPathF
     newArgs['--spec-type'] = buildSpecTypeValue(tierDef.flag, ngramMapK4vOn, ngramModOn) || undefined
     if (!newArgs['--spec-type']) delete newArgs['--spec-type']
     if (tierDef.tier === 0) {
-      // Bug fix (item 1, same principle): also clear the draft-tuning
+      // Also clear the draft-tuning
       // params when switching to Off — they only mean anything paired with
       // an active primary method, so leaving them behind is the same class
       // of "settings survive after their toggle turns off" bug.
@@ -773,7 +765,7 @@ export default function CmdParamsEditor({ templateId, args, onChange, modelPathF
       delete newArgs['--spec-draft-n-min']
       delete newArgs['--spec-draft-p-min']
     } else {
-      // Item 2: draft-max/min/p-min act as this tier's own "preset" — apply
+      // Draft-max/min/p-min act as this tier's own "preset" — apply
       // them whenever switching TO this tier (matching the comparison table).
       newArgs['--spec-draft-n-max'] = tierDef.draftMax
       newArgs['--spec-draft-n-min'] = tierDef.draftMin
@@ -798,11 +790,8 @@ export default function CmdParamsEditor({ templateId, args, onChange, modelPathF
     if (value) newArgs['--spec-type'] = value
     else delete newArgs['--spec-type']
     // Seed each modifier's own llama.cpp defaults the first time it's turned
-    // on. Bug fix (item 1): turning a modifier OFF must delete its flags too
-    // — previously only the "ngram-map-k4v"/"ngram-mod" segment was removed
-    // from --spec-type, but the individual --spec-ngram-* / --ctx-size-dft
-    // values stayed in args and kept getting passed to the actual launch
-    // command even though the modifier itself was off.
+    // on; turning a modifier off deletes its flags too, since --spec-type no
+    // longer references them.
     if (which === 'map-k4v') {
       if (on) {
         setIfAbsent(newArgs, '--spec-ngram-map-k4v-size-n', 12)
@@ -819,26 +808,24 @@ export default function CmdParamsEditor({ templateId, args, onChange, modelPathF
         setIfAbsent(newArgs, '--spec-ngram-mod-n-match', 24)
         setIfAbsent(newArgs, '--spec-ngram-mod-n-min', 48)
         setIfAbsent(newArgs, '--spec-ngram-mod-n-max', 64)
-        setIfAbsent(newArgs, '--ctx-size-dft', 0)
       } else {
         delete newArgs['--spec-ngram-mod-n-match']
         delete newArgs['--spec-ngram-mod-n-min']
         delete newArgs['--spec-ngram-mod-n-max']
-        delete newArgs['--ctx-size-dft']
       }
     }
     commit(newArgs)
   }
 
   // ----- Jinja Chat Template (feature 13/Fix 5/Task 6) -----
-  // Bug fix (item 1.5a): Jinja used to default to ON unconditionally (`args['--jinja']
+  // Jinja used to default to ON unconditionally (`args['--jinja']
   // !== false`), regardless of whether a native chat_template was actually found in
   // the GGUF metadata — so it looked "on everywhere" even for models with no
   // template to apply. It should default ON only when a native template was
   // actually detected, same "auto unless manually touched" pattern as mmproj.
   const jinjaManuallyToggled = args['__jinja_manual'] === true
   const jinjaOn = jinjaManuallyToggled ? (args['--jinja'] !== false) : !!nativeChatTemplate
-  // Bug fix (item 1.5b): distinguish "no override yet, showing native template
+  // Distinguish "no override yet, showing native template
   // for reference" from "user explicitly cleared the box" — previously these
   // were indistinguishable (both = args['--chat-template'] absent/empty), so
   // clearing the box just made it immediately snap back to showing the native
@@ -885,7 +872,7 @@ export default function CmdParamsEditor({ templateId, args, onChange, modelPathF
   function setJinjaValue(v: string) {
     const newArgs: Record<string, any> = { ...args }
     if (v === '') {
-      // Bug fix (item 1.5b): remove any override AND remember the user
+      // Remove any override AND remember the user
       // explicitly cleared it, so the display stays empty on the next render
       // instead of snapping back to the native template — the whole point of
       // clearing is to paste something new into a visibly-empty box.
@@ -991,7 +978,7 @@ export default function CmdParamsEditor({ templateId, args, onChange, modelPathF
   // ----- MoE controls (feature 16) -----
   const moeCpuLayers = args['--moe-cpu-layers']
   const moeCpuLayersSet = moeCpuLayers !== undefined && moeCpuLayers !== '' && moeCpuLayers !== false
-  // Feature 16: inverse locking — MoE-CPU control is ONLY active when GPU layers is manually set.
+  // Inverse locking — MoE-CPU control is ONLY active when GPU layers is manually set.
   const gpuLayersManuallySet = args['--gpu-layers'] !== undefined && args['--gpu-layers'] !== '' && args['--gpu-layers'] !== false && args['--gpu-layers'] !== 'auto'
 
   // ----- handleUpdate + changed-state tracking (feature 8/25) -----
@@ -1001,7 +988,7 @@ export default function CmdParamsEditor({ templateId, args, onChange, modelPathF
     else newArgs[argName] = value
     commit(newArgs)
   }
-  // Item 2: map each sampling arg to its field name on a SamplingPreset's
+  // Map each sampling arg to its field name on a SamplingPreset's
   // `values` object — used to diff against the currently-starred preset,
   // independent of whichever engine preset (Quick/FullAuto/Clear) is active.
   const SAMPLING_FIELD_MAP: Record<string, string> = {
@@ -1016,7 +1003,7 @@ export default function CmdParamsEditor({ templateId, args, onChange, modelPathF
   }
 
   function isChanged(cmd: CommandParam, val: any): boolean {
-    // Bug fix (items 1.6/1.7): unify the two previously-separate highlight
+    // Unify the two previously-separate highlight
     // systems into one, driven by whichever preset is ACTUALLY selected:
     //  - Clear: no preset is applied, so there's no baseline to diff against
     //    at all — nothing is ever highlighted as "changed" (this also
@@ -1026,7 +1013,7 @@ export default function CmdParamsEditor({ templateId, args, onChange, modelPathF
     //  - Quick / FullAuto: both share the exact same engine baseline (see
     //    buildQuickEngineBaseline) — diff against THAT, not a stale
     //    hardcoded copy that could drift from what the button actually sets.
-    // Item 2: sampling keys (temperature/top-p/etc.) are compared separately,
+    // Sampling keys (temperature/top-p/etc.) are compared separately,
     // against the CURRENTLY STARRED sampling preset — never against the
     // engine preset (Quick/FullAuto/Clear never touch them, per item 1.2),
     // and this comparison applies regardless of derivedPresetMode/Clear,
@@ -1039,7 +1026,7 @@ export default function CmdParamsEditor({ templateId, args, onChange, modelPathF
       return String(val) !== String(target)
     }
     if (derivedPresetMode === 'clear') return false
-    // Bug fix (item 6, updated for item 5): --gpu-layers isn't a static
+    // --gpu-layers isn't a static
     // baseline value — Quick/FullAuto set it dynamically based on Dense-vs-
     // MoE (see the identical isMoe branch in handleQuickPreset/
     // handleFullAutoPreset): MoE leaves it unset ("auto"), Dense sets it to
@@ -1052,7 +1039,7 @@ export default function CmdParamsEditor({ templateId, args, onChange, modelPathF
       return currentUnset || String(val) !== String(gpuLayersMax)
     }
     const quickBaselines: Record<string, any> = buildQuickEngineBaseline({ cpuInfo, backendKey: activeBackend?.backendKey, cpuThreadsOverridePercent })
-    // Fix 2: ctx-size baseline = model's native context (or 32768 if unknown).
+    // Ctx-size baseline = model's native context (or 32768 if unknown).
     if (meta?.contextLength && meta.contextLength > 0) {
       quickBaselines['--ctx-size'] = Math.min(meta.contextLength, 32768)
     }
@@ -1073,13 +1060,13 @@ export default function CmdParamsEditor({ templateId, args, onChange, modelPathF
   }
   function handleReset(cmd: CommandParam) {
     const newArgs: Record<string, any> = { ...args }
-    // Fix 7: CPU Threads resets to 3/4 of physical cores (not the schema default of -1).
+    // CPU Threads resets to 3/4 of physical cores (not the schema default of -1).
     if (cmd.arg === '--threads') {
       newArgs[cmd.arg] = recommendedThreads
       commit(newArgs)
       return
     }
-    // Item 2: sampling keys reset to the currently-starred sampling preset's
+    // Sampling keys reset to the currently-starred sampling preset's
     // value — independent of the engine preset (Quick/FullAuto/Clear).
     if (SAMPLING_KEYS.includes(cmd.arg)) {
       const target = getStarredSamplingValue(cmd.arg)
@@ -1089,7 +1076,7 @@ export default function CmdParamsEditor({ templateId, args, onChange, modelPathF
         return
       }
     }
-    // Bug fix (item 6): mirror the same explicit --gpu-layers handling as
+    // Mirror the same explicit --gpu-layers handling as
     // isChanged() above — reset to "unset/auto" for MoE, or gpuLayersMax
     // (item 5: "all layers", not a computed VRAM recommendation) for Dense.
     if (cmd.arg === '--gpu-layers' && derivedPresetMode !== 'clear') {
@@ -1101,11 +1088,11 @@ export default function CmdParamsEditor({ templateId, args, onChange, modelPathF
       commit(newArgs)
       return
     }
-    // Fix 5: Reset to the current preset baseline, not the schema default.
-    // Bug fix (items 1.6/1.7): same unification as isChanged() above.
+    // Reset to the current preset baseline, not the schema default.
+    // Same unification as isChanged() above.
     if (derivedPresetMode !== 'clear' && !SAMPLING_KEYS.includes(cmd.arg)) {
       const quickBaselines: Record<string, any> = buildQuickEngineBaseline({ cpuInfo, backendKey: activeBackend?.backendKey, cpuThreadsOverridePercent })
-      // Fix 2: ctx-size baseline = model's native context (or 32768 if unknown).
+      // Ctx-size baseline = model's native context (or 32768 if unknown).
       if (meta?.contextLength && meta.contextLength > 0) {
         quickBaselines['--ctx-size'] = Math.min(meta.contextLength, 32768)
       }
@@ -1124,7 +1111,7 @@ export default function CmdParamsEditor({ templateId, args, onChange, modelPathF
   }
 
   // ----- Quick / Clear presets (feature 10/15/25/27) -----
-  // Task 1: helper — only set a sampling value if it isn't already present (so
+  // Helper — only set a sampling value if it isn't already present (so
   // the starred preset's values seeded by CreateModal are preserved when Quick
   // is auto-applied on a new template).
   const setIfAbsent = (obj: Record<string, any>, key: string, val: any) => {
@@ -1138,7 +1125,7 @@ export default function CmdParamsEditor({ templateId, args, onChange, modelPathF
     Object.assign(newArgs, buildQuickEngineBaseline({ cpuInfo, backendKey: activeBackend?.backendKey, cpuThreadsOverridePercent }))
     // ctx-size needs model metadata, which the shared baseline function
     // doesn't have access to — set it here only if not already present.
-    // Item 3: MoE gets a memory-aware default (VRAM+RAM leftover after model
+    // MoE gets a memory-aware default (VRAM+RAM leftover after model
     // weight) rather than a flat 32768 cap — MoE tolerates RAM-resident
     // layers well, so there's usually much more usable context available
     // than a VRAM-only assumption would suggest. Dense keeps the flat cap
@@ -1156,7 +1143,7 @@ export default function CmdParamsEditor({ templateId, args, onChange, modelPathF
         setIfAbsent(newArgs, '--ctx-size', Math.min(meta.contextLength, 32768))
       }
     }
-    // Bug fix (item 1.2): Quick/FullAuto/Clear must NEVER touch sampling
+    // Quick/FullAuto/Clear must NEVER touch sampling
     // values (temperature, top-p, top-k, min-p, repeat-penalty, presence-
     // penalty) — those are per-model/user-preferred and set once at template
     // creation from the starred sampling preset (see CreateModal), then only
@@ -1180,18 +1167,18 @@ export default function CmdParamsEditor({ templateId, args, onChange, modelPathF
     } else {
       newArgs['--gpu-layers'] = gpuLayersMax
     }
-    // Bug fix (preset toggle showing wrong mode): explicit per-template
+    // Explicit per-template
     // marker for derivedPresetMode above — see its comment for why this
     // replaced the old __ignoreCtxOverride-based heuristic.
     newArgs['__lastPreset'] = 'quick'
     commit(newArgs)
-    // Feature 25: mark Quick as the active baseline so blue lines DON'T appear.
+    // Mark Quick as the active baseline so blue lines DON'T appear.
     setPresetMode('quick')
   }
   function handleClearPreset() {
     const newArgs: Record<string, any> = {}
     if (args['--mmproj'] !== undefined) newArgs['--mmproj'] = args['--mmproj']
-    // Bug fix (item 1.2): Clear must preserve sampling values too — it wipes
+    // Clear must preserve sampling values too — it wipes
     // the ENGINE args (everything else), not the model's/user's sampling
     // setup. Previously `newArgs = {}` dropped temperature/top-p/etc.
     // entirely, and then re-selecting Quick or FullAuto would silently
@@ -1200,16 +1187,16 @@ export default function CmdParamsEditor({ templateId, args, onChange, modelPathF
     for (const k of SAMPLING_KEYS) {
       if (args[k] !== undefined) newArgs[k] = args[k]
     }
-    // Task 2.1/2.2: turn OFF the context-fill toggles in Clear mode.
+    // Turn OFF the context-fill toggles in Clear mode.
     newArgs['__ignoreCtxOverride'] = false
     newArgs['__autoCtxFill'] = 'off'
-    // Task 5: Memory Overhead off by default in Clear.
+    // Memory Overhead off by default in Clear.
     newArgs['__memOverheadEnabled'] = false
     newArgs['__lastPreset'] = 'clear'
     commit(newArgs)
     setPresetMode('clear')
   }
-  // Task 5: FULL AUTO = Quick baselines + Ignore-Context-Override ON +
+  // FULL AUTO = Quick baselines + Ignore-Context-Override ON +
   // Auto-Context-Fill ON (Auto mode — llama-server handles offloading + ctx).
   // Stacks the best defaults so the user can "set it and forget it".
   function handleFullAutoPreset() {
@@ -1217,7 +1204,7 @@ export default function CmdParamsEditor({ templateId, args, onChange, modelPathF
     // two advanced context toggles for FULL AUTO's "set it and forget it" behavior.
     const newArgs: Record<string, any> = { ...args }
     Object.assign(newArgs, buildQuickEngineBaseline({ cpuInfo, backendKey: activeBackend?.backendKey, cpuThreadsOverridePercent }))
-    // Item 3: same MoE-aware default as Quick (see the identical note there).
+    // Same MoE-aware default as Quick (see the identical note there).
     if (meta?.contextLength && meta.contextLength > 0) {
       if (isMoe && vramBudget) {
         newArgs['--ctx-size'] = estimateMoeDefaultContext({
@@ -1230,12 +1217,12 @@ export default function CmdParamsEditor({ templateId, args, onChange, modelPathF
         newArgs['--ctx-size'] = Math.min(meta.contextLength, 32768)
       }
     }
-    // Bug fix (item 1.2): sampling values are never touched by presets — see
+    // Sampling values are never touched by presets — see
     // the identical note in handleQuickPreset above. FullAuto previously
     // unconditionally overwrote temperature/top-p/top-k/min-p/repeat-penalty
     // with hardcoded defaults every time, clobbering the user's/model's own
     // values — removed entirely.
-    // Item 5: same "just request all layers" approach as Quick above — for
+    // Same "just request all layers" approach as Quick above — for
     // FULL AUTO this combines with --fit (autoCtxFill='auto' below) so
     // llama.cpp determines actual GPU-resident layer count AND context
     // together in one pass, genuinely one-click "best achievable" behavior.
@@ -1244,7 +1231,7 @@ export default function CmdParamsEditor({ templateId, args, onChange, modelPathF
     } else {
       newArgs['--gpu-layers'] = gpuLayersMax
     }
-    // Task 2.1/2.2: enable the advanced context-fill toggles.
+    // Enable the advanced context-fill toggles.
     // FULL AUTO defaults to 'auto' (llama-server --fit handles offloading + ctx)
     // for both dense and MoE — the user can manually switch to Maximum if desired.
     newArgs['__ignoreCtxOverride'] = true
@@ -1255,7 +1242,7 @@ export default function CmdParamsEditor({ templateId, args, onChange, modelPathF
   }
 
   // ----- Command preview -----
-  // Item 8: the preview must show what ACTUALLY reaches llama-server, not
+  // The preview must show what ACTUALLY reaches llama-server, not
   // just the raw stored args. Two things were previously invisible here:
   //  1. The global "Minimum Context Length Override" floor — when enabled and
   //     not ignored, ModelCard.tsx's actual launch logic uses
@@ -1285,7 +1272,7 @@ export default function CmdParamsEditor({ templateId, args, onChange, modelPathF
     return previewEffectiveCtx > rawCtx
   })()
 
-  // Bug fix: the preview previously only ever reflected the Minimum Context
+  // The preview previously only ever reflected the Minimum Context
   // Length override — every OTHER global override (Parallel Inference, Base
   // URL Override's port/local-network/API-key) was silently invisible here,
   // showing whatever was literally stored in the template's own args instead
@@ -1393,7 +1380,7 @@ export default function CmdParamsEditor({ templateId, args, onChange, modelPathF
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [args, ignoreCtxOverride, autoCtxFill, cards, templateId, modelPathFallback, serverPortFallback, previewEffectiveCtx, ctxOverriddenInPreview, previewEffectiveParallel, parallelOverriddenInPreview, previewEffectivePort, portOverriddenInPreview, hostOverrideActive, apiKeyOverrideActive, baseUrlOverride, isMoe, modelDefaults, launchMode])
 
-  // Task 5: plain-text version of the preview for the copy button.
+  // Plain-text version of the preview for the copy button.
   const cmdPreviewText = useMemo(() => {
     const parts: string[] = ['llama-server']
     const finalModelPath = card?.template.modelPath || modelPathFallback
@@ -1407,7 +1394,7 @@ export default function CmdParamsEditor({ templateId, args, onChange, modelPathF
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [args, ignoreCtxOverride, autoCtxFill, cards, templateId, modelPathFallback, serverPortFallback, previewEffectiveCtx, previewEffectiveParallel, previewEffectivePort, hostOverrideActive, apiKeyOverrideActive, baseUrlOverride, isMoe, modelDefaults, launchMode])
 
-  // Item 5: vertical-stack preview — same underlying runtime-accurate args as
+  // Vertical-stack preview — same underlying runtime-accurate args as
   // cmdPreviewText above, just formatted one flag per line with backslash
   // line-continuations (shell-script style), for readability with long
   // commands (e.g. stacked speculative-decoding flags).
@@ -1448,7 +1435,7 @@ export default function CmdParamsEditor({ templateId, args, onChange, modelPathF
       commands: cat.commands.filter(c => {
         if (CUSTOM_PARAMS.includes(c.arg)) return false
         if (FEATURED_ARGS.includes(c.arg)) return false
-        // Feature 30: "Common" view filters out low-level params.
+        // "Common" view filters out low-level params.
         if (paramViewMode === 'common' && !COMMON_VISIBLE.has(c.arg)) return false
         return true
       })
@@ -1470,12 +1457,12 @@ export default function CmdParamsEditor({ templateId, args, onChange, modelPathF
   // ----- Render a single command row -----
   const renderCommand = (cmd: CommandParam) => {
     if (CUSTOM_PARAMS.includes(cmd.arg)) return null
-    // Task 2: when AutoFill "Auto" is active, the Context Size block is
+    // When AutoFill "Auto" is active, the Context Size block is
     // disabled (llama-server --fit decides context; we don't pass --ctx-size).
     const isAutoFitAuto = ignoreCtxOverride && autoCtxFill === 'auto'
     const ctxDisabled = isAutoFitAuto && (cmd.arg === '--ctx-size' || cmd.arg === '-c')
     const val = args[cmd.arg] ?? (cmd.type === 'boolean' ? false : '')
-    // Bug fix (item 1.7): removed the legacy hexllama-era "active-param"
+    // Removed the legacy hexllama-era "active-param"
     // contour, which highlighted ANY set value regardless of which preset was
     // selected (i.e. "differs from nothing") — redundant now that
     // isChanged()/changed-param does the equivalent job relative to whichever
@@ -1664,7 +1651,7 @@ export default function CmdParamsEditor({ templateId, args, onChange, modelPathF
             style={{ width: '100%', minHeight: 150, fontSize: 13, resize: 'vertical' }}
             value={jinjaValue}
             placeholder={
-              // Bug fix (item 4): the placeholder used to unconditionally say
+              // The placeholder used to unconditionally say
               // "No chat template found in GGUF metadata" — misleading when a
               // native template WAS found and the user just cleared the box
               // to paste something new (it looked like detection had failed).
@@ -1697,7 +1684,7 @@ export default function CmdParamsEditor({ templateId, args, onChange, modelPathF
   const renderSpecWidget = () => {
     const detected = effectiveModelPath ? detectedSpeculation[effectiveModelPath] : null
     const candidates = detected?.candidates || []
-    // Bug fix (item 1 — can't manually pick a different method/sidecar):
+    // 
     // draft-max/min/p-min act as each tier's own "preset" (per the user's
     // comparison table) — diff-highlight them against the CURRENTLY
     // SELECTED tier's own values, not a fixed hardcoded baseline, and offer
@@ -1855,7 +1842,6 @@ export default function CmdParamsEditor({ templateId, args, onChange, modelPathF
               { key: 'n-min', label: 'Minimum N-gram Size', def: 48 },
               { key: 'n-max', label: 'Maximum N-gram Size', def: 64 }
             ]}
-            extraField={{ arg: '--ctx-size-dft', label: 'Draft Context Size', def: 0 }}
             args={args}
             handleUpdate={handleUpdate}
           />
@@ -1868,7 +1854,7 @@ export default function CmdParamsEditor({ templateId, args, onChange, modelPathF
   const renderMoeWidget = () => {
     if (!isMoe) return null
     const moeMax = expertCount > 0 ? expertCount : 256
-    // Fix 1: expert_used_count = active experts. Default the slider to this value.
+    // Expert_used_count = active experts. Default the slider to this value.
     const expertUsedCount = (meta as any)?.expertUsedCount || expertCount || 0
     const nExpertsVal = args['--n-experts-used']
     const nExpertsChanged = nExpertsVal !== undefined && nExpertsVal !== '' && nExpertsVal !== expertUsedCount
@@ -1939,7 +1925,7 @@ export default function CmdParamsEditor({ templateId, args, onChange, modelPathF
   }
 
   // ----- Reasoning Budget widget (feature 17) -----
-  // Fix 3: ALL parameters need blue line + reset button.
+  // ALL parameters need blue line + reset button.
   const reasoningBudgetChanged = reasoningOn && reasoningValue !== 8192
   const reasoningMsgChanged = reasoningOn && reasoningMessage !== '' && reasoningMessage !== 'I have to answer now.'
   const renderReasoningWidget = () => (
@@ -2031,7 +2017,7 @@ export default function CmdParamsEditor({ templateId, args, onChange, modelPathF
           <div className="toggle-wrap">
             <label className="toggle" style={disabled ? { opacity: 0.45, cursor: 'not-allowed' } : {}}>
               <input type="checkbox" checked={autoCtxFill !== 'off'} onChange={(e) => {
-                // Item 7: turning ON now defaults to 'maximum' for BOTH dense
+                // Turning ON now defaults to 'maximum' for BOTH dense
                 // and MoE regardless of the MoE offload strategy — the old
                 // "MAX strategy conflicts with Maximum available" assumption
                 // no longer holds (see the removed force-effect above).
@@ -2111,7 +2097,7 @@ export default function CmdParamsEditor({ templateId, args, onChange, modelPathF
   }
 
   // ----- VRAM budget display (feature 14) -----
-  // Item 6: apply the recommended GPU-layers / CPU-forced-layers value from
+  // Apply the recommended GPU-layers / CPU-forced-layers value from
   // line 1 (L1) into --gpu-layers or --moe-cpu-layers depending on strategy.
   function applyLine1Recommendation() {
     if (!vramBudget) return
@@ -2121,7 +2107,7 @@ export default function CmdParamsEditor({ templateId, args, onChange, modelPathF
       commit({ ...args, '--gpu-layers': vramBudget.recommendedLayers })
     }
   }
-  // Item 6: apply line 2's projection — L2 GPU layers (ideally = all layers)
+  // Apply line 2's projection — L2 GPU layers (ideally = all layers)
   // and the context that fits alongside them.
   function applyLine2Recommendation() {
     if (!maxFitResult) return
@@ -2137,7 +2123,7 @@ export default function CmdParamsEditor({ templateId, args, onChange, modelPathF
 
   const renderVramInfo = () => {
     if (!vramBudget) return null
-    // Task 3: BPW-accurate VRAM breakdown (W + KV + B + O) so the user can see
+    // BPW-accurate VRAM breakdown (W + KV + B + O) so the user can see
     // exactly where the memory goes and verify the calculation.
     const kv = vramBudget as any
     const isMaxStrategy = isMoe && modelDefaults.moeOffloadStrategy === 'max'
@@ -2257,7 +2243,7 @@ export default function CmdParamsEditor({ templateId, args, onChange, modelPathF
           {meta.contextLength && <span className="cpu-info-cores">Model supports up to {meta.contextLength.toLocaleString()} tokens</span>}
           {meta.fileType && (() => {
             const filenameLabel = (meta as any).fileTypeFilenameHint as string | null | undefined
-            // Bug fix (item 2, corrected): `meta.fileType` is now the
+            // `meta.fileType` is now the
             // internal general.file_type value whenever available — this is
             // what llama-server itself reports/uses when loading the model,
             // so our display matches llama-server's own logs. Unsloth

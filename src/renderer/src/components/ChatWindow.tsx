@@ -13,7 +13,7 @@ const IS_MACOS = typeof navigator !== 'undefined' && /Mac|iPhone|iPad/.test(navi
 interface Tab {
   url: string
   name: string
-  ctxSize?: number  // Fix 10: context size for display in the address bar
+  ctxSize?: number  // context size, for display in the address bar
 }
 
 export default function ChatWindow({ url }: { url: string }) {

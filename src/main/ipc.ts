@@ -22,10 +22,10 @@ const MODELS_DIR    = join(APP_ROOT, 'models')
 const TEMPLATES_DIR = join(APP_ROOT, 'templates')
 const BACKEND_DIR   = join(APP_ROOT, 'backend')
 const SETTINGS_PATH = join(APP_ROOT, 'settings.json')
-// Task 1: persisted GGUF metadata cache so metadata is available instantly
+// Persisted GGUF metadata cache so metadata is available instantly
 // whenever the user accesses a model (no re-extraction on every view).
 const METADATA_CACHE_PATH = join(APP_ROOT, 'metadata-cache.json')
-// Bug fix (Task 1.2 / KV overshoot): the cache is disk-persisted with NO
+// The cache is disk-persisted with NO
 // schema check, so entries written before a metadata field was added (e.g.
 // `fullAttentionInterval`, added for hybrid SSM/attention models like
 // Qwen3.5/3.6/Next) get served forever as-is — the field is simply absent
@@ -41,7 +41,7 @@ for (const dir of [MODELS_DIR, TEMPLATES_DIR, BACKEND_DIR]) {
 }
 
 // --------------------------------------------------------------------------
-// Task 1: GGUF metadata cache (load/save + in-memory mirror)
+// GGUF metadata cache (load/save + in-memory mirror)
 // --------------------------------------------------------------------------
 // The cache is keyed by absolute model file path. On `list-models`, we diff the
 // set of currently-detected model files against the cache: extract metadata for
@@ -187,7 +187,7 @@ async function loadSettings(): Promise<AppSettings> {
         guardrailMode: data.modelDefaults?.guardrailMode ?? DEFAULT_SETTINGS.modelDefaults!.guardrailMode,
         customMaxSizeGB: data.modelDefaults?.customMaxSizeGB ?? DEFAULT_SETTINGS.modelDefaults!.customMaxSizeGB,
         useCurrentMemState: data.modelDefaults?.useCurrentMemState ?? false,
-        // Item 6: fixed to match the same "respect saved value, else use the
+        // Fixed to match the same "respect saved value, else use the
         // CURRENT default" pattern as every other field here. It previously
         // hardcoded 'offload' as the fallback regardless of DEFAULT_SETTINGS,
         // so bumping the default above would never actually reach anyone with
@@ -195,7 +195,7 @@ async function loadSettings(): Promise<AppSettings> {
         moeOffloadStrategy: (data.modelDefaults?.moeOffloadStrategy === 'offload' || data.modelDefaults?.moeOffloadStrategy === 'max')
           ? data.modelDefaults.moeOffloadStrategy
           : DEFAULT_SETTINGS.modelDefaults!.moeOffloadStrategy,
-        // Item 5/8: 2x-increment context-slider lock + YaRN auto-scaling override.
+        // 2x-increment context-slider lock + YaRN auto-scaling override.
         autoFitUse2xIncrements: data.modelDefaults?.autoFitUse2xIncrements ?? false,
         autoFitYarnAutoScale: data.modelDefaults?.autoFitYarnAutoScale ?? false,
         // New Settings toggle: "Enable Multimodal Projector automatically in
@@ -258,7 +258,7 @@ let sharedChatWindow: BrowserWindow | null = null
 const serverReadyFlags = new Map<string, boolean>()
 const modelLoadingFlags = new Map<string, boolean>()
 
-// Feature (logs): emit an app-level meta log into the same `server-log` stream
+// Emit an app-level meta log into the same `server-log` stream
 // consumed by the Logs view. These appear with a left blue bar + faint tint so
 // the user can spot lifecycle / generation / chat / error events at a glance,
 // on top of the raw llama-server stdout/stderr.
@@ -386,7 +386,7 @@ function classifySidecarFilename(name: string): SpecTierDef | null {
   if (/draft|mtp/.test(lower)) return SPEC_TIER_DEFS[2]
   return null
 }
-// Bug fix (item 3): a filename keyword match alone isn't enough — a genuine
+// A filename keyword match alone isn't enough — a genuine
 // full-size model can legitimately have "MTP" in its OWN name to advertise
 // that it has a built-in Native MTP head (e.g. "Qwen3.6-35B-A3B-MTP.gguf"),
 // and without a size check that model would get misclassified as a T2
@@ -402,7 +402,7 @@ function isSpecDecodeSidecarFile(name: string, sizeBytes: number): boolean {
   return sizeBytes <= SIDECAR_MAX_SIZE_MB * 1024 * 1024
 }
 
-// Bug fix (item 3 — false-positive Native MTP detection): the original MTP
+// The original MTP
 // scanner read a fixed N-MB window from the start of the file and searched
 // it as raw latin1 text for substrings like "mtp". For any model whose
 // metadata+tensor-name section is smaller than that window (the vast
@@ -440,7 +440,7 @@ function detectHasNativeMtp(metaKv: Record<string, any>): boolean {
   return false
 }
 
-// Feature 22: substring-based scan — detect "mmproj" ANYWHERE in the filename,
+// Substring-based scan — detect "mmproj" ANYWHERE in the filename,
 // not just at the beginning. Allows files like "modelname-mmproj-BF16.gguf".
 function isMmprojFile(name: string): boolean {
   const lower = name.toLowerCase()
@@ -450,7 +450,7 @@ function isMmprojFile(name: string): boolean {
 function isModelFile(name: string): boolean {
   const lower = name.toLowerCase()
   if (lower.endsWith('.tmp')) return false
-  // Bug fix (item 3): no longer excludes spec-decode sidecars here — that
+  // No longer excludes spec-decode sidecars here — that
   // now needs the file's SIZE too (see isSpecDecodeSidecarFile above), which
   // isn't available from a filename alone. scanModelFolder below does the
   // full name+size classification itself.
@@ -468,7 +468,7 @@ async function scanModelFolder(folderPath: string, external: boolean): Promise<M
   }
   const models: ModelEntry[] = []
   let mmproj: MmprojFile | null = null
-  // Item 2/3: sidecar speculative-decoding files — kept SEPARATE from
+  // Sidecar speculative-decoding files — kept SEPARATE from
   // `models` (so the Template Model File dropdown never shows them, per
   // item 4) but still returned to the renderer (so the Models tab CAN show
   // them, non-interactively, inside their folder — same treatment as
@@ -727,7 +727,7 @@ const GGUF_FTYPE_NAMES: Record<number, string> = {
   32: 'BF16', 33: 'Q4_0_4_4', 34: 'Q4_0_4_8', 35: 'Q4_0_8_8',
   36: 'TQ1_0', 37: 'TQ2_0', 38: 'IQ2_XXS_NL'
 }
-// Bug fix (item 2, corrected): initial hypothesis was that Unsloth's Dynamic/
+// Initial hypothesis was that Unsloth's Dynamic/
 // UD-* quants have an internal general.file_type that disagrees with their
 // own filename labeling, and that the filename was therefore the more useful
 // thing to show. That was WRONG in the way that matters most: llama-server
@@ -846,7 +846,7 @@ async function scanBackendRoot(rootDir: string, rootExternal: boolean, rootIndex
       const found = discoverBackendExe(versionDir)
       if (!found) continue
       foundNewLayout = true
-      // Feature 20/21: version folder name IS the release tag (e.g. "b10448" or
+      // Version folder name IS the release tag (e.g. "b10448" or
       // "TurboQuant b10269-1.5.1"). Display as "forkName (versionTag)".
       out.push({
         id: `${rootIndex}::${e.name}::${v.name}`,
@@ -965,6 +965,17 @@ function migrateLoadModeArgs(args: Record<string, unknown>): { args: Record<stri
   else if (next['--mmap'] === false) next['--load-mode'] = 'none'
   delete next['--mmap']
   delete next['--mlock']
+  return { args: next, changed: true }
+}
+
+// --ctx-size-dft (LLAMA_ARG_CTX_SIZE_DRAFT) never existed in llama.cpp; it
+// was invented and only ever reachable through the N-gram Modifier UI, which
+// llama-server rejects as an unknown argument. Strip it from any template
+// that already has it stored.
+function migrateCtxSizeDftArgs(args: Record<string, unknown>): { args: Record<string, unknown>; changed: boolean } {
+  if (args['--ctx-size-dft'] === undefined) return { args, changed: false }
+  const next = { ...args }
+  delete next['--ctx-size-dft']
   return { args: next, changed: true }
 }
 
@@ -1106,7 +1117,7 @@ async function smartExtractBackend(opts: {
   // Inspect the staging folder's top-level entries.
   const topEntries = readdirSync(staging, { withFileTypes: true })
   let versionDir: string
-  // Feature 21: The version folder name MUST match the release tag so the
+  // The version folder name MUST match the release tag so the
   // version scanner can match it against the tracker payload and flip the
   // UI state to "Up to date". We always use opts.versionHint (the release tag)
   // as the final folder name, regardless of what the archive's internal
@@ -1269,7 +1280,7 @@ export function registerIpcHandlers(): void {
         groups.push(g)
       }
     }
-    // Task 1: prune the metadata cache — delete entries for model files that
+    // Prune the metadata cache — delete entries for model files that
     // are no longer detected (e.g. deleted / moved). mmproj files are never
     // cached (they're not models), so they're naturally absent.
     const detectedPaths = new Set<string>()
@@ -1285,11 +1296,11 @@ export function registerIpcHandlers(): void {
     return groups
   })
 
-  // Task 1: return the full metadata cache so the renderer can bulk-load it
+  // Return the full metadata cache so the renderer can bulk-load it
   // (instant access, no re-extraction on every view).
   ipcMain.handle('get-metadata-cache', async () => metadataCache)
 
-  // Item 3: "Reextract model data" — wipe the ENTIRE persisted metadata
+  // "Reextract model data" — wipe the ENTIRE persisted metadata
   // cache (every model, regardless of schema version) so the next
   // get-gguf-metadata call for each one is forced to re-run extraction from
   // scratch. This is the manual counterpart to the schema-version auto-
@@ -1345,7 +1356,7 @@ export function registerIpcHandlers(): void {
       const allowed = [MODELS_DIR, ...s.externalModelFolders]
       if (!allowed.some(b => isSafePath(b, filePath))) return { success: false, error: 'Access denied' }
       unlinkSync(filePath)
-      // Task 1: remove the cached metadata for the deleted model file.
+      // Remove the cached metadata for the deleted model file.
       if (metadataCache[filePath]) {
         delete metadataCache[filePath]
         saveMetadataCache()
@@ -1680,13 +1691,14 @@ export function registerIpcHandlers(): void {
       .map(f => {
         try {
           const template = JSON.parse(readFileSync(join(TEMPLATES_DIR, f), 'utf-8')) as Record<string, any>
-          // Heal-on-read migration (see migrateLoadModeArgs): only touches
-          // templates that still have the old '--mmap'/'--mlock' keys, and
-          // persists the result so this only has to run once per template.
+          // Heal-on-read migrations: only touch templates that still have
+          // stale keys, and persist the result so each only runs once per
+          // template.
           if (template.args && typeof template.args === 'object') {
-            const { args, changed } = migrateLoadModeArgs(template.args)
-            if (changed) {
-              template.args = args
+            const r1 = migrateLoadModeArgs(template.args)
+            const r2 = migrateCtxSizeDftArgs(r1.args)
+            if (r1.changed || r2.changed) {
+              template.args = r2.args
               try { writeFileSync(join(TEMPLATES_DIR, f), JSON.stringify(template, null, 2)) } catch {}
             }
           }
@@ -1717,7 +1729,7 @@ export function registerIpcHandlers(): void {
     // older version of the app) is normalized immediately rather than
     // waiting for the next list-templates read to heal it.
     if (data.args && typeof data.args === 'object') {
-      data.args = migrateLoadModeArgs(data.args).args
+      data.args = migrateCtxSizeDftArgs(migrateLoadModeArgs(data.args).args).args
     }
     writeFileSync(join(TEMPLATES_DIR, `${id}.json`), JSON.stringify(data, null, 2))
     return data
@@ -1743,7 +1755,7 @@ export function registerIpcHandlers(): void {
   // ----- Run model -----
   ipcMain.handle('run-model', async (_e, opts: { id: string; name: string; backendPath: string; exe: string; args: string[]; openBrowser: boolean; port: number }) => {
     if (runningProcesses.has(opts.id)) return { success: false, error: 'Already running' }
-    // Fix 4: If base URL override is enabled, use the override port, ignoring
+    // If base URL override is enabled, use the override port, ignoring
     // the template's original Server Port completely.
     let port = opts.port || 8080
     const overridePort = await getOverridePort()
@@ -1753,7 +1765,7 @@ export function registerIpcHandlers(): void {
     let available = await isPortAvailable(port)
     let finalPort = port
     let finalArgs = [...opts.args]
-    // Fix 4: ALWAYS update the --port argument in finalArgs to match the
+    // ALWAYS update the --port argument in finalArgs to match the
     // resolved port (which may be the override port). Previously this only
     // happened inside the port-conflict block, so when the override port was
     // available, the server still started on the ORIGINAL port from the args.
@@ -1771,7 +1783,7 @@ export function registerIpcHandlers(): void {
       }
     }
     if (!available) {
-      // Task 10: no more "run on a different port?" dialog or temp-port
+      // No more "run on a different port?" dialog or temp-port
       // reassignment — that "parallel processes" behavior was confusing. Just
       // return a clean error so the renderer alerts the user. The Stop button
       // already disables Start while the previous server is closing, so a busy
@@ -1780,7 +1792,7 @@ export function registerIpcHandlers(): void {
       return { success: false, error: `Port ${port} is already in use. Stop the other model or change the port.` }
     }
 
-    // Fix (context): ensure --ctx-size is passed so the server uses the model's
+    // Ensure --ctx-size is passed so the server uses the model's
     // real context (not the 4096 default). The renderer (ModelCard) is now the
     // source of truth for the EFFECTIVE context — it computes it from the
     // per-preset "Ignore Context Length Override" flag + the global Minimum
@@ -1802,7 +1814,7 @@ export function registerIpcHandlers(): void {
     // it in their own template args. Doesn't change behavior other than
     // exposing the /metrics endpoint — safe to always add.
     if (!finalArgs.includes('--metrics')) finalArgs.push('--metrics')
-    // Fix (override): Apply "Serve on local network" (--host 0.0.0.0) and
+    // Apply "Serve on local network" (--host 0.0.0.0) and
     // "API Key" (--api-key <key>) from the Base URL Override settings.
     {
       const s2 = await loadSettings()
@@ -1837,7 +1849,7 @@ export function registerIpcHandlers(): void {
     if (!allowedRoots.some(b => isSafePath(b, exePath))) return { success: false, error: 'Access denied' }
     if (!existsSync(exePath)) return { success: false, error: `Executable not found: ${exePath}` }
     try {
-      // Feature (logs): emit a launch event with the effective runtime params so
+      // Emit a launch event with the effective runtime params so
       // the user can see exactly what is being passed to llama.cpp.
       serverReadyFlags.delete(opts.id)
       modelLoadingFlags.delete(opts.id)
@@ -1871,14 +1883,14 @@ export function registerIpcHandlers(): void {
       // wholesale (covers llama-server's child threads). On Windows we rely on
       // `taskkill /F /T` instead, so detached doesn't matter there.
       const proc = spawn(exePath, finalArgs, { detached: process.platform !== 'win32', stdio: 'pipe', cwd: dirname(exePath), windowsHide: false })
-      // Fix 4: Stream server logs to all renderer windows for the Logs tab.
+      // Stream server logs to all renderer windows for the Logs tab.
       proc.stderr?.on('data', (d) => {
         const line = d.toString()
         console.error('[llama-server]', line)
         BrowserWindow.getAllWindows().forEach(win => {
           if (!win.isDestroyed()) win.webContents.send('server-log', { id: opts.id, name: opts.name, stream: 'stderr', line, ts: Date.now() })
         })
-        // Feature (logs): surface important stderr events (errors/fatals) as
+        // Surface important stderr events (errors/fatals) as
         // highlighted app-level logs so they aren't lost in the raw stream.
         try {
           const lower = line.toLowerCase()
@@ -1894,7 +1906,7 @@ export function registerIpcHandlers(): void {
         BrowserWindow.getAllWindows().forEach(win => {
           if (!win.isDestroyed()) win.webContents.send('server-log', { id: opts.id, name: opts.name, stream: 'stdout', line, ts: Date.now() })
         })
-        // Feature (logs): detect lifecycle / generation / chat-request markers in
+        // Detect lifecycle / generation / chat-request markers in
         // the llama-server output and emit enriched app-level logs for them.
         try {
           const lower = line.toLowerCase()
@@ -2166,7 +2178,7 @@ export function registerIpcHandlers(): void {
           return true
         })
       }
-      // Bug fix: llama.cpp started publishing periodic semantic-version
+      // Llama.cpp started publishing periodic semantic-version
       // milestone tags (e.g. "v0.3.0") ALONGSIDE the continuous per-commit
       // "bNNNNN" builds it's always used. The milestone tags are SOURCE-ONLY
       // (no built binaries attached at all) — but /releases/latest just
@@ -2201,7 +2213,7 @@ export function registerIpcHandlers(): void {
       }
       const latestNum = parseInt((release.tag_name || '').replace(/^b/, ''), 10)
       let isNewer = true
-      // Feature 20/21: Determine if a version of this tracked backend is already
+      // Determine if a version of this tracked backend is already
       // installed. The version folder name now matches the release tag exactly,
       // so we check for an exact match OR a numeric build-number match.
       const roots = await backendRoots()
@@ -2511,10 +2523,10 @@ export function registerIpcHandlers(): void {
   // file_type). Uses a typed reader that walks the metadata KV array and tensor
   // info array.
   ipcMain.handle('get-gguf-metadata', async (_e, modelPath: string) => {
-    // Task 1: check the persistent cache first — metadata is stable for a given
+    // Check the persistent cache first — metadata is stable for a given
     // file (it's read from the GGUF header), so caching avoids re-parsing on
     // every view. The cache is pruned in `list-models` when files disappear.
-    // Bug fix: only trust a cached entry if it was written by the CURRENT
+    // Only trust a cached entry if it was written by the CURRENT
     // metadata schema. Older entries (missing e.g. fullAttentionInterval,
     // or any other field added since) fall through and get re-extracted —
     // otherwise a stale cache silently masks any fix to the extraction logic.
@@ -2598,14 +2610,14 @@ export function registerIpcHandlers(): void {
           result.qkRopeHeadDim = resolve('attention.qk_rope_head_dim')
           result.expertUsedCount = resolve('expert_used_count')
           result.expertSharedCount = resolve('expert_shared_count')
-          // Task 6: hybrid SSM/attention — only every Nth layer carries KV.
+          // Hybrid SSM/attention — only every Nth layer carries KV.
           result.fullAttentionInterval = resolve('full_attention_interval') || resolve('attention.full_attention_interval')
           // file_type: numeric enum → human-readable name for the BPW table.
           const ftVal = resolve('file_type')
           result.fileTypeValue = ftVal
           result.fileTypeInternal = ftVal !== null ? ggufFileTypeName(ftVal) : null
           result.fileTypeFilenameHint = parseQuantFromFilename(modelPath)
-          // Bug fix (item 2, corrected): fileType now PRIMARILY reflects the
+          // FileType now PRIMARILY reflects the
           // internal metadata (matches what llama-server itself reports when
           // loading the model) — see parseQuantFromFilename comment above.
           // The filename-derived label is only used as a fallback when the
@@ -2627,7 +2639,7 @@ export function registerIpcHandlers(): void {
           // If we got the essential fields, return immediately — no need for JS fallback.
           if (result.blockCount && result.contextLength) {
             console.log('[GGUF] Native tool succeeded: blockCount=' + result.blockCount + ' contextLength=' + result.contextLength + ' chatTemplate=' + (result.chatTemplate ? 'yes' : 'no'))
-            // Bug fix: the native-tool path previously returned WITHOUT ever
+            // The native-tool path previously returned WITHOUT ever
             // writing to metadataCache/disk — every single call for a model
             // whose metadata only the native tool could resolve was forced to
             // re-run the tool from scratch (this branch), defeating the whole
@@ -2797,7 +2809,7 @@ export function registerIpcHandlers(): void {
         }
         return null
       }
-      // Fix 3: For MoE models, block_count might be stored as "llama.block_count"
+      // For MoE models, block_count might be stored as "llama.block_count"
       // but some converters store it differently. Try multiple variants.
       // Only set if the native tool didn't already find it.
       if (!result.blockCount) result.blockCount = resolve('block_count')
@@ -2832,7 +2844,7 @@ export function registerIpcHandlers(): void {
       if (!result.kvLoraRank) result.kvLoraRank = resolve('attention.kv_lora_rank')
       if (!result.qkRopeHeadDim) result.qkRopeHeadDim = resolve('attention.qk_rope_head_dim')
       if (!result.expertSharedCount) result.expertSharedCount = resolve('expert_shared_count')
-      // Task 6: hybrid SSM/attention — JS fallback extraction too.
+      // Hybrid SSM/attention — JS fallback extraction too.
       if (!(result as any).fullAttentionInterval) {
         (result as any).fullAttentionInterval = resolve('full_attention_interval') || resolve('attention.full_attention_interval')
       }
@@ -2841,7 +2853,7 @@ export function registerIpcHandlers(): void {
         result.fileTypeValue = ftv
         if (ftv !== null) (result as any).fileTypeInternal = ggufFileTypeName(ftv)
       }
-      // Bug fix (item 2, corrected): prefer internal metadata (matches
+      // Prefer internal metadata (matches
       // llama-server's own reporting) — see native-tool path above.
       if (!(result as any).fileTypeFilenameHint) {
         (result as any).fileTypeFilenameHint = parseQuantFromFilename(modelPath)
@@ -2854,7 +2866,7 @@ export function registerIpcHandlers(): void {
       if (!result.vocabSize) result.vocabSize = resolve('tokenizer.ggml.tokens.count') || resolve('vocab_size')
       if (!result.hasNativeMtp) result.hasNativeMtp = detectHasNativeMtp(allMeta)
 
-      // Fix 1/2: Fallback byte-scan — if the structured parse failed to find
+      // Fallback byte-scan — if the structured parse failed to find
       // block_count, context_length, or chat_template, do a raw byte search
       // in the first 8 MB of the file. This catches cases where the structured
       // parse broke partway through due to a large array or parse error.
@@ -3036,7 +3048,7 @@ export function registerIpcHandlers(): void {
         result.isMoe = result.expertCount > 0
       }
       await fd.close()
-      // Task 1: cache the extracted metadata + broadcast so the renderer updates
+      // Cache the extracted metadata + broadcast so the renderer updates
       // its store (and any open CmdParamsEditor) without a second fetch.
       if (modelPath && !result.error) {
         result.schemaVersion = METADATA_SCHEMA_VERSION
@@ -3193,8 +3205,8 @@ export function registerIpcHandlers(): void {
     const s = await loadSettings()
     s.modelDefaults = {
       autoFitEnabled: !!defaults.autoFitEnabled,
-      // Item 5: bumped ceiling from 200 000 → 2 097 152 (2M context era models).
-      // Item: allow 0 (no minimum — defers entirely to the template's own
+      // Bumped ceiling from 200 000 → 2 097 152 (2M context era models).
+      // Allow 0 (no minimum — defers entirely to the template's own
       // context). Use isNaN, not `|| 60000`, for the fallback — `0 || 60000`
       // would silently discard a deliberately-set 0 (falsy in JS).
       autoFitContextLength: (() => {

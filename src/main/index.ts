@@ -51,7 +51,7 @@ function createWindow(): void {
   }
 }
 app.whenReady().then(() => {
-  // Feature 31: Rebrand to XLM Studio — unique app user model id + standalone data dir.
+  // Rebrand to XLM Studio — unique app user model id + standalone data dir.
   electronApp.setAppUserModelId('com.renzekta.xlmstudio')
   app.on('browser-window-created', (_, window) => {
     optimizer.watchWindowShortcuts(window)
@@ -68,7 +68,7 @@ app.on('window-all-closed', () => {
   }
 })
 
-// Feature (stop/start race): before quitting, kill every still-running
+// Before quitting, kill every still-running
 // llama-server process tree so no orphan survives after XLM Studio closes
 // (previously a child could keep port 1234 alive, forcing a Task Manager kill).
 // `before-quit` fires before the app actually exits; we block the quit briefly

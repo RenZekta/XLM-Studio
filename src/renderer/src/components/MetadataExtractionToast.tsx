@@ -2,13 +2,11 @@ import React, { useState } from 'react'
 import { useStore } from '../store/useStore'
 import { Loader2, Database } from 'lucide-react'
 
-// Item 2 (from an earlier request, finally implemented here): a single
-// consolidated "Extracting model metadata" toast, instead of one stacked
-// toast PER model. Hovering it reveals a vertical list of every model
-// currently being extracted, rendered as an overlay ABOVE the rest of the
-// app (so long model names never get clipped by the toast's own width or
-// any container it sits in) rather than each name getting its own
-// permanently-visible stacked toast.
+// A single consolidated "Extracting model metadata" toast, instead of one
+// stacked toast per model. Hovering it reveals a vertical list of every
+// model currently being extracted, rendered as an overlay above the rest of
+// the app so long model names never get clipped by the toast's own width or
+// any container it sits in.
 export default function MetadataExtractionToast() {
   const { metadataExtractions } = useStore()
   const [hovered, setHovered] = useState(false)

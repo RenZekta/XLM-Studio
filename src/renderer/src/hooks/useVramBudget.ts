@@ -39,7 +39,7 @@ export interface VramBudget {
   overheadMB: number          // O
   bytesPerKvElement: number  // BPE of the active cache type (for display)
   kvArchitecture: 'gqa' | 'mha' | 'mla' | 'unknown'
-  // Task 2.2/2.3: exposed for the AutoFill + Memory Overhead UI:
+  // Exposed for the AutoFill + Memory Overhead UI:
   freeVRAMMB: number          // free VRAM after overhead reduction
   freeRAMMB: number           // free RAM after overhead reduction
   totalVRAMMB: number         // total VRAM (for the Memory Overhead slider max)
@@ -105,7 +105,7 @@ export function useVramBudget(opts: {
   kvQuantTypeV?: string      // '--cache-type-v' value (defaults to kvQuantType)
   memOverheadMB?: number     // Task 2.3: user-set memory overhead (reduces free VRAM then RAM)
   autoFillAuto?: boolean     // Task 2: dense AutoFill "Auto" — ignore ctx, fit model by speed priority
-  // Bug fix (KV-preview/launch mismatch report): whether this preset's
+  // Whether this preset's
   // "Ignore Context Length Override" toggle is ON. Needed so the VRAM/KV
   // preview computes `targetContext` with EXACTLY the same floor logic
   // ModelCard.tsx uses to build the real launch --ctx-size — previously this
@@ -114,7 +114,7 @@ export function useVramBudget(opts: {
   // toggle. That meant the KV number shown in Advanced Parameters could
   // silently diverge from what would actually be launched.
   ignoreCtxOverride?: boolean
-  // Bug fix (item 7): the "native context below Minimum AutoFit override"
+  // The "native context below Minimum AutoFit override"
   // guardrail warning must not fire for a model whose EFFECTIVE max context
   // has been raised past its raw GGUF native context via RoPE/YaRN scaling
   // (--rope-scaling yarn + --rope-scale). Pass the scaled ceiling (native ×
@@ -125,11 +125,11 @@ export function useVramBudget(opts: {
   const { vramInfo, modelDefaults, activeBackend, systemRam } = useStore()
 
   return useMemo(() => {
-    // Task 4: "Current Memory State use" — when OFF (default), use the static
+    // "Current Memory State use" — when OFF (default), use the static
     // maximum VRAM/RAM totals (conservative, stable). When ON, use the currently-
     // available free values (polled every 10s).
     const useCurrent = !!modelDefaults.useCurrentMemState
-    // Task 2.3: Memory Overhead reduces the chosen memory pool (VRAM first, then RAM).
+    // Memory Overhead reduces the chosen memory pool (VRAM first, then RAM).
     const overheadMB = Math.max(0, Number(opts.memOverheadMB) || 0)
     const totalVRAM = vramInfo?.totalVRAMMB || 0
     let freeVRAM = useCurrent ? (vramInfo?.freeVRAMMB || 0) : totalVRAM
@@ -178,7 +178,7 @@ export function useVramBudget(opts: {
       // MLA (DeepSeek-V2/V3, Kimi K2): one compressed latent per token per
       // layer. KV = ctx × layers × (kv_lora_rank + qk_rope_head_dim) × BPE(ctk)
       kvArchitecture = 'mla'
-      // Task 6: hybrid SSM — only every Nth layer carries KV.
+      // Hybrid SSM — only every Nth layer carries KV.
       const interval = (meta as any)?.fullAttentionInterval || 1
       const layers = Math.ceil((meta.blockCount || 0) / Math.max(1, interval))
       const rank = meta.kvLoraRank
@@ -191,7 +191,7 @@ export function useVramBudget(opts: {
       //   per_token  = head_count_kv × (head_dim_k × BPE(ctk) + head_dim_v × BPE(ctv))
       //   KV         = layers × ctx × per_token
       kvArchitecture = (meta.headCountKv === meta.headCount) ? 'mha' : 'gqa'
-      // Task 6: hybrid SSM — only every Nth layer carries KV (Qwen3.5/3.8 etc.).
+      // Hybrid SSM — only every Nth layer carries KV (Qwen3.5/3.8 etc.).
       const interval = (meta as any)?.fullAttentionInterval || 1
       const layers = Math.ceil(meta.blockCount / Math.max(1, interval))
       const hkv = meta.headCountKv
@@ -213,7 +213,7 @@ export function useVramBudget(opts: {
       // basic geometry was extracted. Uses head_dim = hidden / head_count and
       // assumes K and V share the same dim + same cache type.
       kvArchitecture = 'gqa'
-      // Task 6: hybrid SSM — divide layers by interval.
+      // Hybrid SSM — divide layers by interval.
       const interval = (meta as any)?.fullAttentionInterval || 1
       const layers = Math.ceil(meta.blockCount / Math.max(1, interval))
       const hdim = meta.hiddenSize / (meta.headCount || meta.kvHeads || 1)
@@ -244,7 +244,7 @@ export function useVramBudget(opts: {
     const vramMM = opts.mmprojEnabled ? opts.mmprojSizeMB : 0
 
     // ----- Remaining budget for weights (what can be GPU-offloaded) -----
-    // Task 2: when AutoFill "Auto" is active for a dense model, llama-server
+    // When AutoFill "Auto" is active for a dense model, llama-server
     // --fit decides the context — so the VRAM calculation should IGNORE the
     // user-selected ctx value and instead check if the MODEL FITS FULLY by
     // speed priority (VRAM > RAM > Storage). We use a small default ctx
@@ -283,7 +283,7 @@ export function useVramBudget(opts: {
     let recommendedLayers: number
     let modelFitsFully = false
     if (denseAutoFill) {
-      // Task 2: dense + AutoFill Auto — prioritize FULL FIT by speed priority.
+      // Dense + AutoFill Auto — prioritize FULL FIT by speed priority.
       // VRAM full → maxLayers; else RAM full → 0 GPU (pure CPU); else partial.
       // (llama-server --fit will handle the actual split + ctx.)
       if (vramForWeights >= weightMB) {
@@ -309,7 +309,7 @@ export function useVramBudget(opts: {
       recommendedLayers = 0
       modelFitsFully = true  // fits fully in RAM, just not on GPU
     } else if (isMoeModel && moeStrategy === 'max') {
-      // Bug fix (Task 4): "MAX GPU Layers and Force MoE Weights onto CPU" keeps
+      // "MAX GPU Layers and Force MoE Weights onto CPU" keeps
       // ALL non-expert layers resident on GPU always (that's the "MAX GPU
       // Layers" part) and only pushes SOME layers' MoE/expert weight tensors to
       // CPU RAM via --moe-cpu-layers to make room for the desired context.
@@ -362,7 +362,7 @@ export function useVramBudget(opts: {
     // known and is below the override value. Previously this compared the
     // *input* ctx to the override, which fired permanently for any model whose
     // slider sat below 60000 (the default override) even when it fit fine.
-    // Bug fix (item 7): (a) `.toLocaleString` was missing its call parens, so
+    // (a) `.toLocaleString` was missing its call parens, so
     // the warning literally printed the function's source ("function
     // toLocaleString() { [native code] }") instead of a formatted number.
     // (b) the check now also considers `ropeScaledMaxContext` — a model using
@@ -375,7 +375,7 @@ export function useVramBudget(opts: {
       : meta?.contextLength
     if (modelDefaults.autoFitEnabled && effectiveMaxContext && effectiveMaxContext > 0 &&
         effectiveMaxContext < modelDefaults.autoFitContextLength) {
-      // Bug fix: the message used to unconditionally claim the context "will be
+      // The message used to unconditionally claim the context "will be
       // capped at the model's maximum" — but ModelCard's actual launch-time
       // effectiveCtx computation NEVER caps; the override is a floor, so it
       // would actually pass a --ctx-size ABOVE the model's native/trained
@@ -418,7 +418,7 @@ export function useVramBudget(opts: {
 }
 
 // ===========================================================================
-// Task 2.2: Automatic Context Fill calculator.
+// Automatic Context Fill calculator.
 // Computes the MAX context window that fits into the available memory
 // (VRAM first, then RAM) given the model weights + KV cache + buffers.
 // Used by:
@@ -462,7 +462,7 @@ export interface AutoFillResult {
   warning?: string
 }
 
-// Item 3: MoE default-context estimation for Quick preset. MoE models
+// MoE default-context estimation for Quick preset. MoE models
 // tolerate offloading layers to RAM far better than Dense (that's the whole
 // premise of items 2/3 from an earlier round — llama.cpp's own "auto" MoE
 // split already does this well), so unlike Dense (which gets a flat capped
@@ -527,7 +527,7 @@ export function computeAutoFillContext(params: {
   if (!meta) return null
   const bpeK = kvBpe(kvQuantType)
   const bpeV = kvBpe(kvQuantTypeV || kvQuantType)
-  // Task 6: hybrid SSM — only every Nth layer carries KV.
+  // Hybrid SSM — only every Nth layer carries KV.
   const interval = meta.fullAttentionInterval || 1
   const layers = Math.ceil((meta.blockCount || 0) / Math.max(1, interval))
   if (layers <= 0) return null
@@ -539,7 +539,7 @@ export function computeAutoFillContext(params: {
   const moeScale = (isMoe && totalExperts && activeExperts && totalExperts > 0)
     ? Math.max(0.25, activeExperts / totalExperts) : 1.0
   const afOverheadMB = 1024 + (freeVRAMMB > 0 ? 512 : 0) // O
-  // Bug fix (item 8): the previous version computed a PARTIAL layer count
+  // The previous version computed a PARTIAL layer count
   // that fits in VRAM at minContext (layersAtVramFit), decided "VRAM usable"
   // if that was >=50% of the model — but then ran its context binary search
   // using totalAt(), which required the ENTIRE model's weight (modelSizeMB,

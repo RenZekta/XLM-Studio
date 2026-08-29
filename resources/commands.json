@@ -149,8 +149,7 @@
         { "arg": "--spec-ngram-map-k4v-min-hits", "label": "N-gram Map (K4V) Minimum Hits", "description": "N-gram map (k4v) minimum hits required", "type": "number", "default": 1, "min": 0, "max": 64, "env": "LLAMA_ARG_SPEC_NGRAM_MAP_K4V_MIN_HITS" },
         { "arg": "--spec-ngram-mod-n-match", "label": "N-gram Modifier Match Length", "description": "N-gram modifier match length", "type": "number", "default": 24, "min": 0, "max": 256, "env": "LLAMA_ARG_SPEC_NGRAM_MOD_N_MATCH" },
         { "arg": "--spec-ngram-mod-n-min", "label": "N-gram Modifier Minimum Size", "description": "N-gram modifier minimum n-gram size", "type": "number", "default": 48, "min": 0, "max": 512, "env": "LLAMA_ARG_SPEC_NGRAM_MOD_N_MIN" },
-        { "arg": "--spec-ngram-mod-n-max", "label": "N-gram Modifier Maximum Size", "description": "N-gram modifier maximum n-gram size", "type": "number", "default": 64, "min": 0, "max": 512, "env": "LLAMA_ARG_SPEC_NGRAM_MOD_N_MAX" },
-        { "arg": "--ctx-size-dft", "label": "Draft Context Size", "description": "Context size for the draft/n-gram model (0 = same as main context)", "type": "number", "default": 0, "min": 0, "max": 2097152, "env": "LLAMA_ARG_CTX_SIZE_DRAFT" }
+        { "arg": "--spec-ngram-mod-n-max", "label": "N-gram Modifier Maximum Size", "description": "N-gram modifier maximum n-gram size", "type": "number", "default": 64, "min": 0, "max": 512, "env": "LLAMA_ARG_SPEC_NGRAM_MOD_N_MAX" }
       ]
     }
   ]

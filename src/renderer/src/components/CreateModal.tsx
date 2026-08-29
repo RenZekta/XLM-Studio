@@ -44,34 +44,24 @@ export default function CreateModal() {
   const [backendVersion, setBackendVersion] = useState('')
   const [modelPath, setModelPath] = useState('')
   const [serverPort, setServerPort] = useState(8080)
-  // Bug fix (Task 1 follow-up): anchor DOM node for CmdParamsEditor's header
+  // Anchor DOM node for CmdParamsEditor's header
   // portal (Settings/Parameters toggles + CPU/model/Free-VRAM banners) — kept
   // in state (not a plain ref) so the portal target is available on the very
   // first render that has it, triggering the re-render createPortal needs.
   const [headerAnchor, setHeaderAnchor] = useState<HTMLDivElement | null>(null)
-  // Feature (sampling presets): NEW templates are seeded with the starred
+  // NEW templates are seeded with the starred
   // preset's sampling values (temperature/top-k/etc.) so the user doesn't have
   // to re-select a preset each time. This runs ONCE on mount for a new
   // template; existing templates keep their own args untouched.
   const [args, setArgs] = useState<Record<string, any>>(() => {
     if (editingTemplate) return { ...(editingTemplate.args || {}) }
     // New template: apply the starred sampling preset AND the Quick engine
-    // baseline, both synchronously, in this lazy initializer.
-    //
-    // Item 1.1 architectural fix: this used to only seed sampling values here,
-    // relying on a useEffect inside CmdParamsEditor (which might not even be
-    // mounted yet — see the collapsible-section history below) to apply the
-    // Quick engine baseline (threads/batch-size/flash-attn/etc.) afterward.
-    // That effect-based approach kept failing in new ways across many fix
-    // attempts: the component not mounting unless "Advanced Parameters" was
-    // expanded, then (after fixing that) a parent effect's redundant
-    // setArgs(seeded) clobbering the child's work due to effect ordering.
-    // A lazy useState initializer runs exactly once, synchronously, during
-    // the very first render — there is no effect, no ordering, no mount
-    // timing, and therefore no possible race: `args` is CORRECT from the very
-    // first frame, full stop. buildQuickEngineBaseline is the same pure
-    // function CmdParamsEditor's Quick button uses, so this can never drift
-    // from what clicking "Quick" manually would produce.
+    // baseline, both synchronously, in this lazy initializer. A useState
+    // initializer runs exactly once, synchronously, on the first render —
+    // no effect, no mount-order dependency, no race with CmdParamsEditor
+    // possibly not being mounted yet. buildQuickEngineBaseline is the same
+    // pure function the Quick button uses, so this can never drift from
+    // what clicking Quick manually would produce.
     const starred = samplingPresets.find(p => p.isStarred) || samplingPresets[0]
     const seeded: Record<string, any> = {}
     if (starred?.values) {
@@ -89,7 +79,7 @@ export default function CreateModal() {
         ? useStore.getState().modelDefaults.cpuThreadsOverridePercent
         : null
     }))
-    // Bug fix (preset toggle showing wrong mode): mark this as Quick
+    // Mark this as Quick
     // explicitly, matching handleQuickPreset's own marker — see
     // derivedPresetMode's comment in CmdParamsEditor.tsx.
     seeded['__lastPreset'] = 'quick'
@@ -100,7 +90,7 @@ export default function CreateModal() {
   const [showAdvanced, setShowAdvanced] = useState(false)
   const [showImport, setShowImport] = useState(false)
   const [importCmd, setImportCmd] = useState('')
-  // Bug fix (items 1/2, root cause finally isolated): effects fire AFTER every
+  // Effects fire AFTER every
   // render, regardless of dependency array contents — dependencies only decide
   // whether to SKIP a re-run, not whether the very first run happens. So the
   // seeding effect below always ran once on mount even after removing `cards`
@@ -134,7 +124,7 @@ export default function CreateModal() {
       setLaunchMode(editingTemplate.launchMode || 'chat')
     } else {
       if (activeBackend) setBackendVersion(activeBackend.name)
-      // Bug fix: skip the redundant (and destructive) reseed on the very
+      // Skip the redundant (and destructive) reseed on the very
       // first run — see seedEffectRanRef comment above. The lazy `args`
       // initializer already seeded sampling values identically, and calling
       // setArgs here again on mount is what was clobbering CmdParamsEditor's
@@ -175,7 +165,7 @@ export default function CreateModal() {
       while (usedPorts.has(port)) port++
       setServerPort(port)
     }
-    // Bug fix (Tasks 1/2 regression): this effect used to depend on `cards`
+    // This effect used to depend on `cards`
     // (only needed a few lines up to pick a free default port), so it re-ran —
     // and re-ran its ENTIRE new-template branch, including `setArgs(seeded)` —
     // every single time ANY card's status changed ANYWHERE in the app (e.g. a

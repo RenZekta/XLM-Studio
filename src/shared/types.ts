@@ -21,10 +21,10 @@ export interface MmprojFile {
   size: number
 }
 
-// Item 2/3 (Speculative Decoding rework): a sidecar draft/speculative-head
-// file detected alongside models in the same folder — same treatment as
-// MmprojFile (shown non-interactively in the Models tab, excluded from the
-// Template Model File dropdown), but tagged with its detected tier.
+// A sidecar draft/speculative-head file detected alongside models in the
+// same folder — same treatment as MmprojFile (shown non-interactively in the
+// Models tab, excluded from the Template Model File dropdown), but tagged
+// with its detected tier.
 export interface SpecDecodeSidecarFile {
   name: string
   path: string
@@ -163,13 +163,14 @@ export interface CpuInfo {
 }
 
 // Speculative decoding mode exposed in the Advanced Parameters UI.
-export type SpeculationMode = 'off' | 'mtp' | 'draft' | 'dspark'  // legacy, kept for the stored-detection-cache shape compatibility
-// Item 2 (Speculative Decoding rework): the full tier system.
+export type SpeculationMode = 'off' | 'mtp' | 'draft' | 'dspark'  // superseded by SpecMethod; kept for the stored detection-cache shape
+// Full speculative-decoding tier system: native model-embedded MTP, external
+// draft models, and EAGLE3/DSpark2/DFlash2 draft heads.
 export type SpecMethod = 'off' | 'native-mtp' | 'draft-model' | 'eagle3' | 'dspark2' | 'dflash2'
 export interface SpecCandidate { tier: number; method: SpecMethod; label: string; path: string | null; name: string | null; reason: string }
 export interface SpecDetectionResult { tier: number; method: SpecMethod; path?: string | null; reason?: string; candidates: SpecCandidate[]; error?: string }
 
-// GGUF model metadata extracted from the file header. Used by features 12/13/14/16/29.
+// GGUF model metadata extracted from the file header.
 export interface GgufMetadata {
   blockCount: number | null       // llama.block_count — GPU layer slider max
   contextLength: number | null    // llama.context_length — context slider max
@@ -181,7 +182,7 @@ export interface GgufMetadata {
   architecture: string | null     // general.architecture
   isMoe: boolean                  // derived: expert_count > 0 or expert tensors found
   fileSizeMB: number              // file size in MB for VRAM estimation
-  // --- BPW-based VRAM calculation (Task 3): full attention geometry + file type ---
+  // BPW-accurate VRAM math: full attention geometry + file type.
   headCount: number | null        // llama.attention.head_count — for head_dim = n_embd / n_head
   headCountKv: number | null      // alias of kvHeads (explicit name)
   keyLength: number | null        // llama.attention.key_length — explicit per-head K dim (overrides n_embd/n_head)
@@ -193,7 +194,7 @@ export interface GgufMetadata {
   expertSharedCount: number | null // llama.expert_shared_count
   fileType: string | null         // general.file_type — dominant quant enum (e.g. "Q4_K_M", "F16")
   fileTypeValue: number | null    // numeric general.file_type enum (for BPW lookup)
-  // Bug fix (item 2): `fileType` above is now the FILENAME-derived quant label
+  // `fileType` above is now the FILENAME-derived quant label
   // when the filename has a recognizable one (e.g. "...-UD-Q3_K_XL.gguf" ->
   // "Q3_K_XL"), since Unsloth's Dynamic/mixed quants can have an internal
   // general.file_type that legitimately disagrees with their own naming.
@@ -201,13 +202,13 @@ export interface GgufMetadata {
   // lookups (which need the ACTUAL dominant per-tensor type, not the
   // marketing label, for an accurate weight-memory estimate).
   fileTypeInternal: string | null
-  // Bug fix (item 2, corrected): the filename-derived quant label, kept
+  // The filename-derived quant label, kept
   // separately (never used to override fileType above) purely so the UI can
   // show it alongside the authoritative internal value when they disagree —
   // see the Quant display in CmdParamsEditor.tsx.
   fileTypeFilenameHint: string | null
   vocabSize: number | null         // tokenizer vocabulary size — logits buffer estimate
-  // Task 6: hybrid SSM/attention models (Qwen3-Next, Qwen3.5/3.8, gpt-oss) —
+  // Hybrid SSM/attention models (Qwen3-Next, Qwen3.5/3.8, gpt-oss) —
   // only every Nth layer (N = full_attention_interval) carries a KV cache.
   // The rest use linear-attention/RNN with constant-size state. Dividing the
   // layer count by this fixes the 3-4x KV overshoot for these architectures.
@@ -263,11 +264,11 @@ export interface ModelDefaultsSettings {
   autoFitContextLength: number
   guardrailMode: GuardrailMode
   customMaxSizeGB: number
-  // Task 4: when true, memory calculations use the currently-available Free
+  // When true, memory calculations use the currently-available Free
   // VRAM / Free RAM (polled every 10s). When false (default), they use the
   // static maximum VRAM / RAM totals — more conservative & stable.
   useCurrentMemState?: boolean
-  // Task 8: MoE offloading strategy. 'offload' = find a good GPU layer count
+  // MoE offloading strategy. 'offload' = find a good GPU layer count
   // (default). 'max' = push as many layers to GPU as possible, forcing MoE
   // expert weights onto CPU (--moe-cpu-layers). When 'max', the "Maximum
   // available" AutoFill option is disabled (it would conflict).

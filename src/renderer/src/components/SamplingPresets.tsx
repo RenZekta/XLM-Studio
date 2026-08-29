@@ -8,15 +8,15 @@ interface Props {
   disabled?: boolean
 }
 
-// Feature 28: Reusable sampling temperature presets manager.
-// Fix 6: The dropdown now tracks the currently-selected preset independently
+// Reusable sampling temperature presets manager.
+// The dropdown now tracks the currently-selected preset independently
 // of the starred preset, so selecting a preset updates the display.
 export default function SamplingPresets({ onApply, disabled }: Props) {
   const { samplingPresets, setSamplingPresets } = useStore()
   const [showAddModal, setShowAddModal] = useState(false)
   const [newName, setNewName] = useState('')
   const starred = samplingPresets.find(p => p.isStarred) || samplingPresets[0]
-  // Fix 6: Track the currently-selected preset (defaults to the starred one).
+  // Track the currently-selected preset (defaults to the starred one).
   const [selectedId, setSelectedId] = useState<string>(starred?.id || '')
   const selectedPreset = samplingPresets.find(p => p.id === selectedId) || starred
 

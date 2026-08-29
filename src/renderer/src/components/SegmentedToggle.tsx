@@ -9,8 +9,7 @@ interface Props<T extends string> {
 }
 
 // A reusable segmented toggle switch with a sliding blue accent highlight.
-// Used for "Settings: FULL AUTO / Quick / Clear" (feature 15/Task 5) and
-// "Parameters: Common / Full" (feature 30).
+// Used for "Settings: FULL AUTO / Quick / Clear" and "Parameters: Common / Full".
 // Multi-line labels (containing "\n") are stacked vertically inside the button
 // so a wide label like "FULL AUTO" fits without taking extra horizontal space.
 export default function SegmentedToggle<T extends string>({ label, options, value, onChange, disabled }: Props<T>) {

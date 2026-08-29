@@ -118,10 +118,10 @@ interface LlamaCppApi {
 
   // GGUF metadata + VRAM + system RAM
   getGgufMetadata: (modelPath: string) => Promise<any>
-  // Task 1: metadata cache
+  // Metadata cache
   getMetadataCache: () => Promise<Record<string, any>>
   clearMetadataCache: () => Promise<{ success: boolean; cleared: number }>
-  // Item 4: Monitoring tab.
+  // Monitoring tab.
   perfGetActiveSessions: () => Promise<{ sessionId: string; templateId: string; templateName: string; startedAt: number }[]>
   perfGetActiveSessionData: (templateId: string) => Promise<any>
   perfGetSessionHistory: () => Promise<any[]>
@@ -162,7 +162,7 @@ interface LlamaCppApi {
   onBackendsChanged: (cb: (data: { deleted: string[] }) => void) => void
   removeBackendsChangedListener: () => void
 
-  // Server log stream (Fix 4)
+  // Server log stream
   onServerLog: (cb: (data: { id: string; name: string; stream: string; line: string; ts: number }) => void) => void
   removeServerLogListener: () => void
 }

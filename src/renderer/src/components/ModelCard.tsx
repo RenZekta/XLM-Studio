@@ -7,7 +7,7 @@ interface Props { card: CardState }
 export default function ModelCard({ card }: Props) {
   const { toggleCardExpanded, updateCard, setCardStatus, removeCard, backends, activeBackend, commandsSchema, setShowCreateModal, models, modelDefaults, ggufMetadata } = useStore()
 
-  // Feature (context): compute the EFFECTIVE context that will be passed to
+  // Compute the EFFECTIVE context that will be passed to
   // llama.cpp on the next run. Precedence (Task 2.1/5):
   //   1. Per-preset "Ignore Context Length Override" (__ignoreCtxOverride) ON
   //      → use the preset's own --ctx-size (or AutoFill-computed value), ignoring
@@ -27,10 +27,10 @@ export default function ModelCard({ card }: Props) {
     const native = meta?.contextLength && meta.contextLength > 0 ? meta.contextLength : 0
     // Base value: preset ctx, else native, else 32768.
     let base = presetVal > 0 ? presetVal : (native > 0 ? native : 32768)
-    // Task 5: global override acts as a MINIMUM (floor), not a strict override.
+    // Global override acts as a MINIMUM (floor), not a strict override.
     // When the override is enabled and not ignored, ensure ctx >= autoFitContextLength.
     if (!ignoreCtxOverride && modelDefaults?.autoFitEnabled) {
-      // Bug fix: was `Math.max(2048, ... || 32768)` — a hard 2048 floor plus a
+      // Was `Math.max(2048, ... || 32768)` — a hard 2048 floor plus a
       // `||` fallback that treats 0 as falsy. Both defeated the point of
       // allowing 0 ("no minimum, defer to the template's/model's own
       // context") — 0 would get silently promoted to 32768 by the `||`, and
@@ -47,17 +47,17 @@ export default function ModelCard({ card }: Props) {
   // "from override" = the value comes from the global override (blue badge).
   // When the per-preset Ignore-Override is ON, the badge is neutral (preset).
   const ctxFromOverride = !ignoreCtxOverride && !!modelDefaults?.autoFitEnabled
-  // Task 2.1/2.2: when both Ignore-Override + AutoFill (Maximum) are ON, the
+  // When both Ignore-Override + AutoFill (Maximum) are ON, the
   // hint changes to "*Auto/Max Context Fill".
   const bothAutoFillOn = ignoreCtxOverride && autoCtxFill !== 'off'
 
-  // Item 6: Overrides tab → "Parallel Inference" block. Mirrors the same
+  // Overrides tab → "Parallel Inference" block. Mirrors the same
   // "global override wins" shape as the AutoFit context override above, but
   // --parallel is a hard override (not a floor) since there's no meaningful
   // "minimum parallel sequences" concept — either the override applies, or
   // the template's own value is used untouched.
   //
-  // Item (this round): "Unified/Separate" replaces the old MoE-only scoping
+  // "Unified/Separate" replaces the old MoE-only scoping
   // toggle — Unified applies ONE value to both Dense and MoE; Separate lets
   // Dense and MoE have their own independent override values.
   const meta = ggufMetadata[card.template.modelPath || '']
@@ -140,7 +140,7 @@ export default function ModelCard({ card }: Props) {
     if (!args.includes('--port') && card.template.serverPort) {
       args.push('--port', String(card.template.serverPort))
     }
-    // Feature (context): determine how --ctx-size / --fit are passed.
+    // Determine how --ctx-size / --fit are passed.
     // AutoFill "Auto" (dense OR MoE): defer to llama-server's --fit — do NOT
     //   pass --ctx-size at all, so llama-server decides context freely.
     //   Note: --fit is a SELECT arg (options on/off), so it must be passed as
@@ -177,7 +177,7 @@ export default function ModelCard({ card }: Props) {
     } else {
       setCtxArg(effectiveCtx)
     }
-    // Item 6: Parallel Inference override — hard-overrides --parallel (not a
+    // Parallel Inference override — hard-overrides --parallel (not a
     // floor like the context override; there's no "minimum parallel
     // sequences" that makes sense), scoped to MoE-only unless that scoping
     // is turned off in Overrides.

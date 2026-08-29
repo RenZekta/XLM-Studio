@@ -1,4 +1,4 @@
-// Item 4: Monitoring tab backend. Since "Chat UI" mode opens llama-server's
+// Monitoring tab backend. Since "Chat UI" mode opens llama-server's
 // web UI in the user's DEFAULT SYSTEM BROWSER (shell.openExternal — see
 // run-model in ipc.ts), the Electron main process has no visibility into
 // individual chat requests/responses at all. The only viable data source is
@@ -155,14 +155,14 @@ function poll(templateId: string) {
     if (dPromptTokens > 0 && dPromptSeconds > 0) {
       const promptTps = dPromptTokens / dPromptSeconds
       // Heuristic cold/warm classification — see module header comment.
-      // Bug fix: with very few samples, a single noisy early poll becomes
+      // With very few samples, a single noisy early poll becomes
       // the "median" outright, and normal poll-to-poll timing variance can
       // easily look like a big jump — spuriously flagging an otherwise
       // perfectly normal COLD burst as "cached". Require a minimum number
       // of genuine cold samples before ever classifying anything as cached,
       // so early-session noise can't trigger a false positive.
       //
-      // Bug fix (follow-up): the original 4x threshold turned out to never
+      // The original 4x threshold turned out to never
       // fire in practice. A real cache hit only skips compute for the
       // REUSED prefix — a typical chat turn reuses most of the previous
       // context but still has to cold-process the new user message, so the

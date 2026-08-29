@@ -14,10 +14,10 @@ interface Props {
   recommended?: number      // recommended value to badge
   recommendedLabel?: string
   disabled?: boolean
-  // Item 8: when true, the text field displays/accepts space-grouped numbers
+  // When true, the text field displays/accepts space-grouped numbers
   // ("2 097 152") instead of a plain <input type="number">.
   useSpacedFormat?: boolean
-  // Item 8: when true, the slider snaps to the fixed 2x ladder (2k, 4k, 8k, ...
+  // When true, the slider snaps to the fixed 2x ladder (2k, 4k, 8k, ...
   // up to 2 097 152) instead of moving continuously by `step`. `ladderSteps`
   // lets a caller supply a different ladder; defaults to the standard context one.
   use2xIncrements?: boolean

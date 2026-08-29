@@ -8,7 +8,7 @@ import {
   Tooltip, Legend
 } from 'recharts'
 
-// Item 4: Monitoring tab. Tracks generation speed and prefill (prompt-
+// Monitoring tab. Tracks generation speed and prefill (prompt-
 // processing) speed for every running template by polling llama-server's
 // own /metrics endpoint from the main process (see src/main/perfMonitor.ts
 // for the full rationale — Chat UI opens in an external browser, so the app
@@ -475,7 +475,7 @@ function PrefillChart({ sessions, onFullscreen, fullscreen, heightPx }: { sessio
         {' '}Solid line = cold, dashed line = cached (warm) — hover any point for the exact value.
       </div>
       {(() => {
-        // Bug fix: log scale needs the plotted values to span a wide ratio
+        // Log scale needs the plotted values to span a wide ratio
         // to generate sensible tick marks — with only a narrow range of
         // prompt sizes seen so far (e.g. early in a session), recharts'
         // log-scale tick generator could produce just ONE tick (or none),
@@ -505,7 +505,7 @@ function PrefillChart({ sessions, onFullscreen, fullscreen, heightPx }: { sessio
                 <Legend wrapperStyle={{ fontSize: 11 }} />
                 {sessions.map((s, i) => {
                   const base = SERIES_COLORS[i % SERIES_COLORS.length]
-                  // Bug fix (item 3): previously both cold/warm points used the
+                  // Previously both cold/warm points used the
                   // SAME color (just different opacity/shape), and the tooltip
                   // never actually said which was which — indistinguishable at a
                   // glance and on hover. Now cold is a SOLID line in the

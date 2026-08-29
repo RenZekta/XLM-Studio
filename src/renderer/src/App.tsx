@@ -70,13 +70,13 @@ export default function App() {
         setPaths(paths)
         setBackends(backendsData)
         setModels(modelsData)
-        // Task 1: bulk-load the GGUF metadata cache so metadata is instantly
+        // Bulk-load the GGUF metadata cache so metadata is instantly
         // available for every detected model (no re-extraction on view).
         try {
           const cache = await window.api?.getMetadataCache?.()
           if (cache && typeof cache === 'object') setGgufMetadataBulk(cache)
         } catch {}
-        // Task 1: trigger background extraction for any detected model that
+        // Trigger background extraction for any detected model that
         // isn't yet in the cache. The main process caches + broadcasts the
         // result; we show a "extracting…" notification meanwhile.
         try {
@@ -135,7 +135,7 @@ export default function App() {
     }
     init()
 
-    // Feature 33: Listen for silent backend check results broadcast on startup.
+    // Listen for silent backend check results broadcast on startup.
     try {
       window.api?.onBackendsCheckedSilent?.((data: any) => {
         if (data?.results) {
@@ -169,7 +169,7 @@ export default function App() {
       })
     } catch {}
 
-    // Task 1: metadata extraction lifecycle — show "extracting…" notification
+    // Metadata extraction lifecycle — show "extracting…" notification
     // and populate the store when the main process finishes caching.
     try {
       window.api?.onMetadataExtracting?.((data) => {
@@ -188,7 +188,7 @@ export default function App() {
       })
     } catch {}
 
-    // Bug fix (item 4): register the server-log listener ONCE here at the App
+    // Register the server-log listener ONCE here at the App
     // root (not inside LogsView, which used to only listen while mounted —
     // losing every log line that arrived while the user was on another tab).
     // appendLog writes into the global store, so logs now persist for the
@@ -199,7 +199,7 @@ export default function App() {
       })
     } catch {}
 
-    // Task 2.2: Poll Free VRAM + Free RAM every 10s so the VRAM banner + the
+    // Poll Free VRAM + Free RAM every 10s so the VRAM banner + the
     // Automatic Context Fill calculator always use the freshest memory data.
     // Without this, memory figures would be stale from the single init fetch.
     const memPoll = setInterval(async () => {

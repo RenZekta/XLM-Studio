@@ -12,8 +12,8 @@ interface LogEntry {
   ts: number
 }
 
-// Fix 4: Logs tab — displays a live streaming window of llama-server stdout/stderr.
-// Bug fix (item 4): logs now live in the global store (populated by a listener
+// Logs tab — displays a live streaming window of llama-server stdout/stderr.
+// Logs now live in the global store (populated by a listener
 // registered once at App root — see App.tsx) instead of local component state,
 // so they persist across tab navigation until the app closes or the user hits
 // Clear. This view is now a thin read-only + pause/filter layer over that
@@ -57,7 +57,7 @@ export default function LogsView() {
 
   function handleClear() { clearLogs(); setPausedSnapshot(null) }
 
-  // Bug fix (item 3): each log entry's `name` field is a SNAPSHOT taken at
+  // Each log entry's `name` field is a SNAPSHOT taken at
   // the moment that line was emitted (see App.tsx's server-log listener) —
   // if the template gets renamed later, old (and even new) log lines kept
   // showing the stale name baked in at emission time, while `id` (the
@@ -138,7 +138,7 @@ export default function LogsView() {
           fontSize: 13,
           lineHeight: 1.5,
           minHeight: 0,
-          // Item 5: the app disables text selection globally by default
+          // The app disables text selection globally by default
           // (body { user-select: none }), opted back in only for form
           // inputs — logs need it too, so users can select/copy a snippet
           // without exporting the whole file.
