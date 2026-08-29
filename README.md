@@ -1,7 +1,4 @@
-<img width="1264" height="760" alt="image" src="https://github.com/user-attachments/assets/c7688943-506d-4672-a990-927485e2decf" /><div align="center">
-  <img src="assets/github-logo-hexllama.png" alt="XLM Studio Logo" width="400" />
-</div>
-
+# XLM Studio
 <p align="center">
   <img src="https://img.shields.io/github/v/release/RenZekta/XLM-Studio?style=flat-square&color=black&label=version" alt="Latest Version" />
   <img src="https://img.shields.io/badge/Electron-191970?style=flat-square&logo=Electron&logoColor=white" alt="Electron" />
@@ -29,6 +26,7 @@ XLM Studio is a fork of [Hexllama](https://github.com/andersondanieln/hexllama),
 ## Features
 
 **Integrated Model Hub**
+
 Search Hugging Face directly within the application. Browse repositories, view file details, and download GGUF models with a single click without ever opening a browser.
 
 <img width="1258" height="780" alt="image" src="https://github.com/user-attachments/assets/4501f8fe-5b3a-4842-9d4b-2f2acfaab906" />
@@ -36,17 +34,19 @@ Search Hugging Face directly within the application. Browse repositories, view f
 
 
 **Smart Download Manager**
-Pause, resume, or cancel large model downloads reliably. You can also paste direct GGUF links. When a download completes, XLM Studio automatically generates an execution template with recommended settings tailored to the model's architecture and your hardware.
 
-![Model Download](assets/screenshots/model-download.png)
+Pause, resume, or cancel large model downloads reliably. You can also paste direct GGUF links. When a download completes, XLM Studio automatically generates an execution template with recommended settings tailored to the model's architecture and your hardware. If you prefer to interact with HF CLI, I have a project to greatly improve the HF CLI experience and control over it: https://github.com/RenZekta/HF-CFD
+
 
 **Automatic Metadata Extraction**
+
 Every detected model gets its GGUF metadata (architecture, layer/expert counts, context length, quantization, KV-cache geometry, chat template, speculative-decoding tensors) extracted and cached the moment it's discovered — scanned in parallel at launch, with a single consolidated "Extracting model metadata" notification (hover it to see which models are still being processed) instead of one popup per model. A "Reextract model data" button in the Models tab lets you force a clean re-scan of everything, e.g. after replacing a file in place or updating the app.
 
-<img width="1264" height="760" alt="image" src="https://github.com/user-attachments/assets/fba42b64-223e-40e4-9191-7c82276782fe" />
+<img width="1248" height="790" alt="image" src="https://github.com/user-attachments/assets/8594dcd9-53c9-4cd0-b900-ff0faf5e2141" />
 
 
 **Memory-Aware VRAM/RAM Budget Calculator**
+
 Every template shows a live Free VRAM breakdown (model weight, KV cache, compute buffer, runtime overhead) computed from the model's actual attention geometry — including MLA, grouped-query attention, sliding-window attention, and hybrid SSM/attention architectures (e.g. Qwen3-Next-style models where only a fraction of layers carry a KV cache). It tells you, in plain language:
 - **Dense models:** how many of the model's layers fit on your GPU at the selected context, and — separately — how much context you'd get if you kept (ideally) all layers on the fastest tier available.
 - **MoE models:** how many layers need to be offloaded to (or forced onto CPU from) VRAM to fit the selected context, honoring whichever MoE offload strategy you've picked.
@@ -61,6 +61,7 @@ Dense:
 
 
 **Three-Way Configuration Presets**
+
 Every template has a **Quick** / **FULL AUTO** / **Clear** switch:
 - **Quick** applies good fast-starting engine baseline (threads, batch sizes, flash attention, KV cache quantization, speculative decoding drafting parameters) and, for Dense models max GPU layers so llama.cpp will offload as much as it can; MoE models are left on llama.cpp's auto offloading (it's good for MoE). Context defaults to the model's native context (capped at 32K for Dense for a reasoble baseline; for MoE set to max, since MoE tolerates RAM-resident layers well).
 - **FULL AUTO** starts from the same baseline but hands context and GPU-layer placement over to llama.cpp's own `--fit` auto-sizing. If you need more space for context or GPU offloading, turn off Multimodal Projector and Speculative Decoding, and you'll get the most out of your available VRAM.
@@ -69,12 +70,14 @@ Every template has a **Quick** / **FULL AUTO** / **Clear** switch:
 Parameters that differ from the currently-selected preset (or, for sampling values, from your starred sampling preset) are highlighted with a reset-to-default button.
 
 **Visual Command Editor**
+
 No need to memorize execution flags or save your commands in an endless unreadable diary. Edit backend-specific commands through a structured user interface, with a "Common" view for everyday parameters and a "Full" view for everything the backend schema exposes. Toggle booleans, set limits on numerical inputs, and define default parameter values. You can still input commands directly in the Import section.
 
 <img width="327" height="123" alt="image" src="https://github.com/user-attachments/assets/6bff1dd2-3759-470a-8468-d1db2ee01cd5" />
 
 
 **Speculative Decoding — full tier system, auto-detected**
+
 XLM Studio recognizes five tiers of speculative decoding, from best to most basic, and automatically selects the highest tier actually available for a model:
 
 | Tier | Method | Detected via |
@@ -90,50 +93,59 @@ Sidecar draft/speculative-head files are detected the same way multimodal projec
 <img width="503" height="306" alt="image" src="https://github.com/user-attachments/assets/db72733c-acc5-4d46-85f6-2912c5f02215" />
 
 **Multimodal Projector Auto-Detection**
+
 Multimodal projector (mmproj) files are detected and auto-attached (configurable to default off in Settings, to save memory when you don't need vision). 
 <img width="1013" height="408" alt="image" src="https://github.com/user-attachments/assets/fddb0a4d-c09c-4431-8936-7c5c17559336" />
 
 **Chat Template Auto-Detection**
+
 A model's native Jinja chat template, if present, is detected and shown for reference/editing without ever being silently overwritten.
 <img width="469" height="400" alt="image" src="https://github.com/user-attachments/assets/a99553c1-8081-4eac-9c3d-26275a6d1ee3" />
 
 
 **Monitoring**
+
 A dedicated tab tracks real generation speed and prompt-processing (prefill) speed for every running template, by polling llama-server's own `/metrics` endpoint (since Chat UI mode opens in your default browser, this is the only way to see live performance without proxying every request). Switch between active sessions and saved session history, compare multiple sessions side by side on the same charts, export/import session data as JSON, and configure how many past sessions to keep.
 
 <img width="2543" height="1198" alt="image" src="https://github.com/user-attachments/assets/79ce5b75-ead2-4306-a637-6c0ea3cb0b5b" />
 
 
 **Overrides**
+
 Global settings that apply across every template in one place: the Base URL override, per-model defaults (AutoFit context minimum, MoE offload strategy, CPU-threads recommendation percentage, mmproj auto-enable, and more), and a Parallel Inference override that can force `--parallel`/`-np` to a single value for all models, or independent values for Dense vs. MoE.
 
 <img width="1261" height="791" alt="image" src="https://github.com/user-attachments/assets/a6824c82-f195-44da-b5ce-1551c0c4ef63" />
 
 **YaRN Context Scaling**
+
 Need more context than a model's native window? Turn on Automatic YaRN scaling control (per-template, or globally as an "upscale to AutoFit" override) and XLM Studio computes and applies `--rope-scaling yarn`, `--rope-scale`, and `--yarn-orig-ctx` for you as you move the context slider — no manual RoPE math required.
 
 <img width="503" height="269" alt="image" src="https://github.com/user-attachments/assets/90ca473e-1153-49c3-90cd-06c33acf2ffb" />
 
 
 **Command Preview**
+
 Every template shows a live preview of the exact `llama-server` command that will run — including values that only get resolved at launch time (the AutoFit context-override floor, `--fit`/`--no-webui` flags, the default port), clearly marked when they differ from what's literally saved in the template. Switch to the stacked view to see it as one flag per line instead of a single long string.
 
 <img width="515" height="276" alt="image" src="https://github.com/user-attachments/assets/1da56562-01ef-4954-be6a-befb9e7b9901" />
 
 
 **Template-Based Execution**
+
 Save your configurations as reusable templates. Run multiple models simultaneously on different ports without conflict. Launch them in "Chat UI" mode to automatically open the built-in llama.cpp web interface, or "API Only" mode to serve them silently in the background.
 
 <img width="1257" height="690" alt="image" src="https://github.com/user-attachments/assets/ea45d530-cb5e-4321-b38f-37e16f47479c" />
 
 
 **Version and Backend Management**
+
 Running cutting-edge models sometimes requires different builds of llama.cpp (or compatible forks, e.g. TurboQuant-enabled builds). XLM Studio lets you maintain and seamlessly switch between multiple backend binaries, and can check upstream repositories for new releases and download/extract them straight from the settings panel.
 
 <img width="806" height="733" alt="image" src="https://github.com/user-attachments/assets/8fb6f00f-2099-4b64-94df-437006f39fbf" />
 
 
 **Persistent Logs**
+
 Server logs are collected in the background for the life of the app — switching tabs no longer loses in-flight output — and stay available until you clear them manually or close the app.
 
 <img width="2129" height="777" alt="image" src="https://github.com/user-attachments/assets/113dfc32-4bc4-4e3f-883b-bbbcde0df009" />
@@ -161,7 +173,7 @@ Clone the repository in desired destination. Copy the destination.
 git clone https://github.com/RenZekta/XLM-Studio
 ```
 
-Run Powershell 7 as an administrator (open filder, install dependencies, build and package installer
+Run Powershell 7 as an administrator (open folder, install dependencies, build and package installer
 ```
 cd X:\(your chosen destination)\XLM-Studio && npm install && npm run build && npm run package
 ```
