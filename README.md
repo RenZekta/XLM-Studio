@@ -103,6 +103,7 @@ Multimodal projector (mmproj) files are detected and auto-attached (configurable
 **Chat Template Auto-Detection**
 
 A model's native Jinja chat template, if present, is detected and shown for reference/editing without ever being silently overwritten.
+
 <img width="469" height="400" alt="image" src="https://github.com/user-attachments/assets/a99553c1-8081-4eac-9c3d-26275a6d1ee3" />
 
 
