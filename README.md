@@ -13,15 +13,6 @@ XLM Studio is a fast, native desktop interface for discovering, downloading, con
 
 XLM Studio is a fork of [Hexllama](https://github.com/andersondanieln/hexllama), heavily extended with many features, including a memory-aware configuration engine: it reads a model's actual GGUF metadata (architecture, layer count, KV-cache geometry, MoE expert layout, quantization, speculative-decoding tensors, native chat template) and uses it to compute real VRAM/RAM budgets and recommend settings, instead of asking you to guess.
 
-<!-- NOTE TO SELF: replace the screenshots below with current ones once the new
-     UI has settled — several older screenshots (model-hub, model-download,
-     my-templates, settings) are from before this fork's changes and may not
-     reflect the current look. Every "SCREENSHOT NEEDED" comment inline below
-     marks a spot for a new one; the main ones still missing are: the Quick/
-     FULL AUTO/Clear preset switch + parameter diff highlighting, the Free
-     VRAM recommendation panel, the Monitoring tab, the Overrides tab, and
-     the reworked Speculative Decoding block (tier picker + candidate list +
-     stackable n-gram modifiers). -->
 
 ## Features
 
@@ -111,7 +102,10 @@ A model's native Jinja chat template, if present, is detected and shown for refe
 
 A dedicated tab tracks real generation speed and prompt-processing (prefill) speed for every running template, by polling llama-server's own `/metrics` endpoint (since Chat UI mode opens in your default browser, this is the only way to see live performance without proxying every request). Switch between active sessions and saved session history, compare multiple sessions side by side on the same charts, export/import session data as JSON, and configure how many past sessions to keep.
 
-<img width="2543" height="1198" alt="image" src="https://github.com/user-attachments/assets/79ce5b75-ead2-4306-a637-6c0ea3cb0b5b" />
+(Qwen3.8-27B-i1-IQ4_XS-GGUF-Smaller.gguf running on 16 gb RX 9070 XT with automatic 60k context. In memory-constrained scenarios results depends on GPU usage, but with XLM Studio you can squeeze more out of your hardware, thanks to design that does not limit your options.)
+
+<img width="2552" height="1184" alt="image" src="https://github.com/user-attachments/assets/34e69e37-6c2f-423c-bdc2-68984506ab82" />
+
 
 
 **Overrides**
