@@ -124,7 +124,7 @@ export default function App() {
       }
       // Load CPU info for thread slider bounds + recommended defaults.
       try { setCpuInfo(await window.api?.getCpuInfo?.()) } catch {}
-      // Load VRAM + system RAM for the budgeting algorithm (feature 14/19).
+      // Load VRAM + system RAM for the budgeting algorithm.
       try { setVramInfo(await window.api?.getVramInfo?.()) } catch {}
       try { setSystemRam(await window.api?.getSystemRam?.()) } catch {}
       // Load model defaults + base URL override + sampling presets (features 18/24/28).

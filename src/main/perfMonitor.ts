@@ -237,10 +237,9 @@ export function stopTracking(templateId: string) {
   clearInterval(entry.timer)
   active.delete(templateId)
   entry.session.endedAt = Date.now()
-  // Bug fix pattern (item 3/4's "dynamically change if template name
-  // changes"): snapshot the CURRENT live name (not whatever it was at
-  // startTracking time) when the session actually ends and gets archived,
-  // so a rename mid-session is reflected in the persisted history entry.
+  // Snapshot the CURRENT live name (not whatever it was at startTracking
+  // time) when the session actually ends and gets archived, so a rename
+  // mid-session is reflected in the persisted history entry.
   const liveName = getLiveTemplateName(templateId)
   if (liveName) entry.session.templateNameSnapshot = liveName
   saveSessionToDisk(entry.session)
@@ -259,7 +258,7 @@ export function getActiveSessionsList(): { sessionId: string; templateId: string
   return Array.from(active.entries()).map(([templateId, e]) => ({
     sessionId: e.session.id,
     templateId,
-    // Live name lookup — see item 3/4's "dynamically reflect renames" requirement.
+    // Live name lookup, so a rename is reflected immediately.
     templateName: getLiveTemplateName(templateId) || e.session.templateNameSnapshot,
     startedAt: e.session.startedAt
   }))

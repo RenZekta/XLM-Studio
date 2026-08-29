@@ -417,16 +417,14 @@ export default function CreateModal() {
                   style={{ marginLeft: 'auto', transform: showAdvanced ? 'rotate(180deg)' : 'none', transition: 'transform 180ms' }}
                 />
               </button>
-              {/* Bug fix (Task 1): CmdParamsEditor must always be mounted, even while
-                  this section is collapsed. CmdParamsEditor's own "auto-apply Quick
-                  preset on mount for a new template" effect (and the MTP/speculation
-                  auto-detect effect) only run once, when the component first mounts.
-                  Previously this div — and therefore CmdParamsEditor — only rendered
-                  after the user manually expanded "Advanced Parameters", so on submit
-                  without ever opening this section the Quick baseline (and detected
-                  MTP speculation type) was never applied to the template's args. We
-                  now always mount it and just hide it visually via CSS when collapsed,
-                  so its mount-effects fire immediately when the modal opens. */}
+              {/* CmdParamsEditor must always be mounted, even while this
+                  section is collapsed — its mount-time effects ("auto-apply
+                  Quick preset for a new template", MTP/speculation
+                  auto-detect) only run once, when the component first
+                  mounts, and need to fire as soon as the modal opens rather
+                  than only after the user expands "Advanced Parameters".
+                  Hidden visually via CSS when collapsed instead of being
+                  unmounted. */}
               <div className="collapsible-body" style={showAdvanced ? undefined : { display: 'none' }}>
                 <CmdParamsEditor
                   args={args}

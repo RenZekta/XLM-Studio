@@ -274,11 +274,9 @@ export default function MonitoringView() {
             <div style={{ flex: 1 }} />
 
             {/* Export / Import / Export all */}
-            {/* Bug fix (item 4): kept the icons in the same positions, but
-                swapped what they DO — a down-arrow ("Download") reads as
-                "bring something INTO the app" (import), and an up-arrow
-                ("Upload") reads as "send something OUT" (export), which is
-                the opposite of what they used to do. */}
+            {/* Icon convention: a down-arrow ("Download") reads as "bring
+                something INTO the app" (import), an up-arrow ("Upload")
+                reads as "send something OUT" (export). */}
             <button className="btn btn-ghost btn-icon" title="Import a session" disabled={importBusy} onClick={handleImport}>
               <Download size={14} />
             </button>
@@ -353,15 +351,12 @@ export default function MonitoringView() {
           <div style={{ display: 'flex', justifyContent: 'flex-end', marginBottom: 12, flexShrink: 0 }}>
             <button className="btn btn-ghost btn-icon" onClick={() => setFullscreenChart(null)}><X size={18} /></button>
           </div>
-          {/* Bug fix (item 2): the old fullscreen container relied on a chain
-              of height:'100%' divs to reach the chart's ResponsiveContainer —
-              but ResponsiveContainer needs every ancestor in that chain to
-              have a DEFINITE (non-percentage) height for percentages to
-              resolve at all, and .settings-section (TsChart/PrefillChart's
-              own root wrapper) doesn't set one, breaking the chain silently
-              (no error, just a 0-height chart — "shows the block but not the
-              chart"). Pass a concrete pixel height down explicitly instead,
-              computed from the viewport, sidestepping the whole chain. */}
+          {/* ResponsiveContainer needs every ancestor to have a DEFINITE
+              (non-percentage) height for percentages to resolve, and
+              .settings-section (TsChart/PrefillChart's own root wrapper)
+              doesn't set one — a chain of height:'100%' divs would silently
+              collapse to a 0-height chart. Pass a concrete pixel height down
+              explicitly instead, computed from the viewport. */}
           <div style={{ flex: 1, minHeight: 0 }}>
             {fullscreenChart === 'ts'
               ? <TsChart sessions={selectedSessions} fullscreen heightPx={window.innerHeight - 140} />
@@ -375,8 +370,8 @@ export default function MonitoringView() {
 
 // Shared custom tooltip so the T/s and Prefill charts can clearly label
 // which session (and, for prefill, whether the point is a cold or cached/
-// warm burst — item 3) a hovered point belongs to, instead of relying on
-// color/shape alone.
+// warm burst) a hovered point belongs to, instead of relying on color/shape
+// alone.
 function ChartTooltip({ active, payload }: any) {
   if (!active || !payload || !payload.length) return null
   const p = payload[0]?.payload
@@ -405,20 +400,13 @@ function TsChart({ sessions, onFullscreen, fullscreen, heightPx }: { sessions: {
       </div>
       <div style={{ width: '100%', height: heightPx ?? 320 }}>
         <ResponsiveContainer>
-          {/* Bug fix (item 1, then item 2's follow-up): switched from
-              ScatterChart (unconnected dots) to ComposedChart + <Line>, which
-              connects points of the same session with a line in that
-              session's color. The line initially connected points in the
-              order they were RECORDED (chronological) — but the X axis here
-              is context size, not time, so if a later point happened to have
-              a SMALLER context size than an earlier one (e.g. a shorter
-              follow-up prompt after a longer one), the line would visibly
-              double back leftward, producing the "backwards" crisscrossing
-              the user reported. Sorting each session's points by X (context
-              size) before drawing fixes this by construction — the line can
-              only ever move left-to-right, tracing out speed-vs-size as a
-              proper function curve, which is also the more conventional way
-              to read a "Y vs X" chart in the first place. */}
+          {/* ComposedChart + <Line> connects points of the same session with
+              a line in that session's color. The X axis here is context
+              size, not time, so each session's points are sorted by X before
+              drawing — otherwise a later point with a smaller context size
+              than an earlier one (e.g. a shorter follow-up prompt after a
+              longer one) would make the line double back leftward instead of
+              tracing speed-vs-size as a proper left-to-right function curve. */}
           <ComposedChart margin={{ top: 10, right: 20, bottom: 10, left: 0 }}>
             <CartesianGrid strokeDasharray="3 3" stroke="var(--border)" />
             <XAxis type="number" dataKey="contextTokens" name="Context size" unit=" tok" stroke="var(--text-muted)" tick={{ fontSize: 11 }} />

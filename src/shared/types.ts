@@ -222,7 +222,7 @@ export interface GgufMetadata {
   error?: string
 }
 
-// VRAM telemetry returned by the main process for the budgeting algorithm (feature 14).
+// VRAM telemetry returned by the main process for the budgeting algorithm.
 export interface VramInfo {
   freeVRAMMB: number       // free VRAM in MB (0 if unavailable)
   totalVRAMMB: number      // total VRAM in MB (0 if unavailable)
@@ -233,16 +233,16 @@ export interface VramInfo {
   error?: string
 }
 
-// System RAM info for guardrail enforcement (feature 19).
+// System RAM info for guardrail enforcement.
 export interface SystemRamInfo {
   totalRAMMB: number
   freeRAMMB: number
 }
 
-// Model Loading Guardrail mode (feature 19).
+// Model Loading Guardrail mode.
 export type GuardrailMode = 'off' | 'relaxed' | 'balanced' | 'strict' | 'custom'
 
-// Sampling preset for the presets manager (feature 28).
+// Sampling preset for the presets manager.
 export interface SamplingPreset {
   id: string
   name: string
@@ -258,7 +258,7 @@ export interface SamplingPreset {
   }
 }
 
-// Model Defaults settings (feature 18).
+// Model Defaults settings.
 export interface ModelDefaultsSettings {
   autoFitEnabled: boolean
   autoFitContextLength: number
@@ -275,7 +275,7 @@ export interface ModelDefaultsSettings {
   moeOffloadStrategy?: 'offload' | 'max'
 }
 
-// Base URL Override settings (feature 24).
+// Base URL Override settings.
 // The override forces every launched backend onto a single configurable port
 // (default 1234). Only the port number is user-editable; the URL is always
 // `http://localhost:<port>/v1`. Optionally the server can bind to all

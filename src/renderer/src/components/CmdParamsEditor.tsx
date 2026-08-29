@@ -320,8 +320,6 @@ export default function CmdParamsEditor({ templateId, args, onChange, modelPathF
   // default value is 2.5 GB (2560 MB). The overhead reduces Free VRAM then RAM.
   const memOverheadEnabled = args['__memOverheadEnabled'] === true
   const memOverheadMB = memOverheadEnabled ? (Number(args['__memOverheadMB']) || 2560) : 0
-  // (moeStrategy local var removed — item 7 eliminated its only two call
-  // sites; call sites elsewhere read modelDefaults.moeOffloadStrategy directly.)
   // Pass whether AutoFill "Auto" is active so useVramBudget can ignore
   // the selected ctx and check full-fit by speed priority for dense models.
   const autoFillAuto = ignoreCtxOverride && autoCtxFill === 'auto'
@@ -346,18 +344,17 @@ export default function CmdParamsEditor({ templateId, args, onChange, modelPathF
     autoFillAuto,
     ignoreCtxOverride,
     ropeScaledMaxContext
-  })  // Task 4: Removed the gpu-layers auto-apply effect. The VRAM-recommended GPU
-  // layers are now only a DISPLAY value (shown in the VRAM banner) — the user
-  // must manually set --gpu-layers if they want to use it. Settings must not
-  // turn themselves on/off (per the user's earlier directive), so Quick no
-  // longer forces --gpu-layers either.
+  })
+  // The VRAM-recommended GPU layer count is a display value only (shown in
+  // the VRAM banner) — the user must manually set --gpu-layers to use it.
+  // Settings never turn themselves on/off, so Quick doesn't force it either.
 
-  // Item 7 (backfill) — updated for item 5: Dense models under Quick/FullAuto
-  // now just get "all layers" (gpuLayersMax), known synchronously the moment
-  // GGUF metadata (blockCount) is available — no need to wait on a VRAM
-  // budget calculation at all. This still needs to be a backfill (not just
-  // the button click / buildQuickEngineBaseline) because for a brand-new
-  // template metadata usually isn't loaded yet at either of those moments.
+  // Dense models under Quick/FullAuto just get "all layers" (gpuLayersMax),
+  // known synchronously the moment GGUF metadata (blockCount) is available —
+  // no need to wait on a VRAM budget calculation. This still needs to be a
+  // backfill (not just the button click / buildQuickEngineBaseline) because
+  // for a brand-new template metadata usually isn't loaded yet at either of
+  // those moments.
   //
   // This used to re-fire and FORCE
   // --gpu-layers back to gpuLayersMax on ANY divergence — including a value
@@ -411,21 +408,12 @@ export default function CmdParamsEditor({ templateId, args, onChange, modelPathF
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [disabled, derivedPresetMode, isMoe, meta?.contextLength, vramBudget?.freeVRAMMB, vramBudget?.freeRAMMB, modelSizeMB, kvQuantK, kvQuantV, mmprojEnabled, mmprojSizeMB])
 
-  // "Maximum available" AutoFill used to force-switch back to 'auto'
-  // whenever the MoE strategy was "MAX GPU Layers and Force MoE Weights onto
-  // CPU", on the assumption the two conflicted. That's no longer true — the
-  // recommendation engine (Task 4 fix) now correctly computes how many
-  // layers to force onto CPU to fit a given context under this strategy, so
-  // "Maximum available" (fit the biggest context by moving layers to CPU as
-  // needed) works fine together with it. This effect — and the disabled
-  // state on the "Maximum available" button below — has been removed.
-
-  // Item 8 (+ item 5's global "upscale to AutoFit"): "Automatic YaRN scaling
-  // control" — while active (per-template switch, OR the global override
-  // switch kicking in because this preset isn't ignoring an AutoFit override
-  // that exceeds the model's native context), force RoPE scaling to yarn and
-  // auto-compute the scale factor + original-context needed to reach the
-  // relevant target context, per the reference formula:
+  // "Automatic YaRN scaling control" — while active (per-template switch, OR
+  // the global override switch kicking in because this preset isn't
+  // ignoring an AutoFit override that exceeds the model's native context),
+  // force RoPE scaling to yarn and auto-compute the scale factor +
+  // original-context needed to reach the relevant target context, per the
+  // reference formula:
   //   --rope-scaling yarn
   //   --rope-scale       = target_ctx / native_ctx   (>= 1)
   //   --yarn-orig-ctx     = native_ctx (the model's own trained context)
@@ -460,9 +448,8 @@ export default function CmdParamsEditor({ templateId, args, onChange, modelPathF
   }, [effectiveYarnAutoScale, globalYarnUpscale, currentCtx, contextLength, disabled, modelDefaults.autoFitContextLength])
 
   // Automatic Context Fill — compute the max context that fits and
-  // auto-write it into --ctx-size ONLY when AutoFill is "Maximum available"
-  // (the only case where ctx is auto-applied, per the user's spec). Dense 'auto'
-  // and MoE 'auto' defer to llama-server --fit (no ctx forced).
+  // auto-write it into --ctx-size ONLY when AutoFill is "Maximum available".
+  // Dense 'auto' and MoE 'auto' defer to llama-server --fit (no ctx forced).
   const autoFillActive = ignoreCtxOverride && autoCtxFill === 'maximum'
   const autoFillResult = (autoFillActive && meta && vramBudget) ? computeAutoFillContext({
     meta,
@@ -527,7 +514,7 @@ export default function CmdParamsEditor({ templateId, args, onChange, modelPathF
     totalExperts: expertCount || undefined
   }) : null
 
-  // ----- mmproj widget state (Task 2.1) -----
+  // ----- mmproj widget state -----
   // If mmproj detected → ON + Automatic. If not detected → OFF + Manual.
   // The user can manually override at any time (tracked via __mmproj_manual).
   const mmprojArgValue = args['--mmproj']
@@ -567,43 +554,28 @@ export default function CmdParamsEditor({ templateId, args, onChange, modelPathF
   }, [detectedMmproj, disabled, mmprojOn, mmprojManuallyToggled])
 
   function commit(newArgs: Record<string, any>) {
-    // Bug fix (item 1 — MTP detected but not applied for vision+MTP models
-    // like Qwen3.8-27B): multiple mount-time auto-apply effects (mmproj
-    // detection, MTP/speculation detection, Jinja auto-enable, etc.) can all
-    // become ready and fire within the SAME synchronous effect flush (e.g.
-    // right after picking a model that has both an mmproj file AND a cached
-    // speculation-detection result). Each one calls commit({ ...args, ownKey })
-    // built from its own closure over `args` — but since no re-render happens
-    // BETWEEN sibling effects in the same flush, every one of them reads the
-    // exact same pre-flush `args` snapshot. React just applies each
-    // setArgs(...) call in order as a full replacement, so only the LAST
-    // effect's change survives — every earlier one is silently discarded.
-    // This isn't the "async resolves late" staleness argsRef already guarded
-    // against; it's two effects resolving in the SAME tick. Fixing it
-    // requires argsRef to be current not just across renders but WITHIN a
-    // single flush — so commit() now updates it eagerly and synchronously,
-    // and every auto-apply effect below reads argsRef.current (not `args`)
-    // as the base for its patch, so each one builds on top of whatever the
-    // previous one in the same flush already committed.
+    // Multiple mount-time auto-apply effects (mmproj detection,
+    // MTP/speculation detection, Jinja auto-enable, etc.) can become ready
+    // and fire within the same synchronous effect flush. Each one calls
+    // commit({ ...args, ownKey }) from its own closure over `args`, but
+    // since no re-render happens between sibling effects in the same flush,
+    // every one of them would otherwise see the same pre-flush `args`
+    // snapshot and clobber each other (only the last effect's change would
+    // survive). argsRef is updated eagerly here, synchronously, and every
+    // auto-apply effect below reads argsRef.current (not `args`) as the base
+    // for its patch, so each one builds on whatever the previous one in the
+    // same flush already committed.
     argsRef.current = newArgs
     if (onChange) onChange(newArgs)
     else if (templateId) {
       updateCard(templateId, { args: newArgs })
-      // Bug fix ("closing and reopening the app deselects settings I
-      // toggled inline"): this `templateId` branch is what backs the LIVE
-      // editor embedded directly in an expanded card (ModelCard passes
-      // `templateId`, not `onChange` — CreateModal's Save button handles
-      // its own persistence separately via the `onChange` branch above).
-      // updateCard() only ever wrote to the in-memory zustand store — there
-      // was NOTHING, anywhere, that flushed an inline edit back to the
-      // template's own JSON file on disk. So any setting toggled/edited
-      // here (n-gram map/mod, or genuinely anything else touched this way)
-      // silently reverted to whatever was last actually saved the moment
-      // the app restarted and template list reloaded fresh from disk —
-      // while a setting only ever touched through the Create/Edit modal
-      // stayed correct, since THAT flow does persist properly. Debounced
-      // (400ms) so rapid consecutive edits (typing in a number field,
-      // dragging a slider) settle to one write instead of one per keystroke.
+      // This `templateId` branch backs the live editor embedded directly in
+      // an expanded card (ModelCard passes `templateId`, not `onChange` —
+      // CreateModal's Save button handles its own persistence separately via
+      // the `onChange` branch above). updateCard() only writes to the
+      // in-memory store, so this also flushes the change to the template's
+      // JSON file on disk, debounced (400ms) so rapid consecutive edits
+      // (typing in a number field, dragging a slider) settle to one write.
       if (saveTimeoutRef.current) clearTimeout(saveTimeoutRef.current)
       const idToSave = templateId
       saveTimeoutRef.current = setTimeout(() => {
@@ -658,27 +630,26 @@ export default function CmdParamsEditor({ templateId, args, onChange, modelPathF
     if (f) setMmprojManualPath(f)
   }
 
-  // ----- Speculation auto-detection (Item 2: full tier rework) -----
+  // ----- Speculation auto-detection -----
   // Detection runs AND auto-applies the detected method so the
   // user doesn't have to manually enable it. If not detected, stays off.
   //
-  // Rewrite (this round — matches the intended design): Tier 1 (embedded
-  // native MTP) is a STATIC fact of the model's own GGUF metadata — it's
-  // extracted exactly once, as part of the same metadata parse that already
-  // populates `ggufMetadata` (see hasNativeMtp on GgufMetadata / the main
-  // process's detectHasNativeMtp), and persisted to disk with the rest of
-  // that metadata. It never needs to be re-scanned here; `meta.hasNativeMtp`
-  // IS the answer, whenever metadata for this model has loaded.
+  // Tier 1 (embedded native MTP) is a static fact of the model's own GGUF
+  // metadata — it's extracted exactly once, as part of the same metadata
+  // parse that already populates `ggufMetadata` (see hasNativeMtp on
+  // GgufMetadata / the main process's detectHasNativeMtp), and persisted to
+  // disk with the rest of that metadata. It never needs to be re-scanned
+  // here; `meta.hasNativeMtp` is the answer, whenever metadata for this
+  // model has loaded.
   //
   // Sidecar files (Tiers 2-5) are just files sitting in the model's folder —
-  // the user can add or remove them at any time — so THAT part genuinely
-  // does need to be checked live rather than trusted from a one-time cache.
-  // This effect re-runs the (now cheap — just a folder listing + filename
-  // classification, no per-model file parsing) sidecar scan whenever the
-  // model changes or its metadata finishes loading, and always writes a
-  // fresh result rather than skipping because something was already cached
-  // — a stale/negative sidecar result should never be able to get "stuck"
-  // the way the old combined metadata+sidecar scan could.
+  // the user can add or remove them at any time — so that part genuinely
+  // needs to be checked live rather than trusted from a one-time cache. This
+  // effect re-runs the sidecar scan (a cheap folder listing + filename
+  // classification, no per-model file parsing) whenever the model changes or
+  // its metadata finishes loading, and always writes a fresh result rather
+  // than skipping because something was already cached, so a stale/negative
+  // sidecar result can never get stuck.
   const hasNativeMtp = !!meta?.hasNativeMtp
   useEffect(() => {
     if (!effectiveModelPath || disabled) return
@@ -817,21 +788,17 @@ export default function CmdParamsEditor({ templateId, args, onChange, modelPathF
     commit(newArgs)
   }
 
-  // ----- Jinja Chat Template (feature 13/Fix 5/Task 6) -----
-  // Jinja used to default to ON unconditionally (`args['--jinja']
-  // !== false`), regardless of whether a native chat_template was actually found in
-  // the GGUF metadata — so it looked "on everywhere" even for models with no
-  // template to apply. It should default ON only when a native template was
-  // actually detected, same "auto unless manually touched" pattern as mmproj.
+  // ----- Jinja Chat Template -----
+  // Jinja defaults ON only when a native chat_template was actually
+  // detected in the GGUF metadata — same "auto unless manually touched"
+  // pattern as mmproj.
   const jinjaManuallyToggled = args['__jinja_manual'] === true
   const jinjaOn = jinjaManuallyToggled ? (args['--jinja'] !== false) : !!nativeChatTemplate
-  // Distinguish "no override yet, showing native template
-  // for reference" from "user explicitly cleared the box" — previously these
-  // were indistinguishable (both = args['--chat-template'] absent/empty), so
-  // clearing the box just made it immediately snap back to showing the native
-  // template on the next render, making it impossible to actually see an
-  // empty box to paste a new template into. __jinja_cleared (UI-only, never
-  // reaches the command) remembers the user's explicit "I cleared this" intent.
+  // __jinja_cleared (UI-only, never reaches the command) distinguishes "no
+  // override yet, showing the native template for reference" from "user
+  // explicitly cleared the box" — without it, clearing the box would
+  // immediately snap back to showing the native template on the next
+  // render, making it impossible to paste a new template into an empty box.
   const explicitChatTemplate = typeof args['--chat-template'] === 'string' ? args['--chat-template'] : undefined
   const jinjaUserCleared = args['__jinja_cleared'] === true
   const jinjaValue = explicitChatTemplate !== undefined
@@ -957,7 +924,7 @@ export default function CmdParamsEditor({ templateId, args, onChange, modelPathF
   function setReasoningPreserveOn(on: boolean) {
     commit({ ...args, '--reasoning-preserve': on })  }
 
-  // ----- Reasoning Budget (feature 17) -----
+  // ----- Reasoning Budget -----
   const reasoningOn = args['--reasoning-budget'] !== undefined && args['--reasoning-budget'] !== -1 && args['--reasoning-budget'] !== '' && args['--reasoning-budget'] !== false
   const reasoningValue = reasoningOn ? Number(args['--reasoning-budget']) : 8192
   const reasoningMessage = typeof args['--reasoning-budget-message'] === 'string' ? args['--reasoning-budget-message'] : ''
@@ -975,13 +942,13 @@ export default function CmdParamsEditor({ templateId, args, onChange, modelPathF
     commit(newArgs)
   }
 
-  // ----- MoE controls (feature 16) -----
+  // ----- MoE controls -----
   const moeCpuLayers = args['--moe-cpu-layers']
   const moeCpuLayersSet = moeCpuLayers !== undefined && moeCpuLayers !== '' && moeCpuLayers !== false
   // Inverse locking — MoE-CPU control is ONLY active when GPU layers is manually set.
   const gpuLayersManuallySet = args['--gpu-layers'] !== undefined && args['--gpu-layers'] !== '' && args['--gpu-layers'] !== false && args['--gpu-layers'] !== 'auto'
 
-  // ----- handleUpdate + changed-state tracking (feature 8/25) -----
+  // ----- handleUpdate + changed-state tracking -----
   const handleUpdate = (argName: string, value: any) => {
     const newArgs = { ...args }
     if (value === null || value === false || value === '') delete newArgs[argName]
@@ -1003,21 +970,17 @@ export default function CmdParamsEditor({ templateId, args, onChange, modelPathF
   }
 
   function isChanged(cmd: CommandParam, val: any): boolean {
-    // Unify the two previously-separate highlight
-    // systems into one, driven by whichever preset is ACTUALLY selected:
+    // The highlight is driven by whichever preset is ACTUALLY selected:
     //  - Clear: no preset is applied, so there's no baseline to diff against
-    //    at all — nothing is ever highlighted as "changed" (this also
-    //    replaces the old hexllama-era "active-param" contour, which used to
-    //    highlight ANY set value regardless of preset — see item 1.7,
-    //    removed below where the className is built).
+    //    at all — nothing is ever highlighted as "changed".
     //  - Quick / FullAuto: both share the exact same engine baseline (see
     //    buildQuickEngineBaseline) — diff against THAT, not a stale
     //    hardcoded copy that could drift from what the button actually sets.
     // Sampling keys (temperature/top-p/etc.) are compared separately,
     // against the CURRENTLY STARRED sampling preset — never against the
-    // engine preset (Quick/FullAuto/Clear never touch them, per item 1.2),
-    // and this comparison applies regardless of derivedPresetMode/Clear,
-    // since it's an independent axis from the engine baseline.
+    // engine preset (Quick/FullAuto/Clear never touch them), and this
+    // comparison applies regardless of derivedPresetMode/Clear, since it's
+    // an independent axis from the engine baseline.
     if (SAMPLING_KEYS.includes(cmd.arg)) {
       const target = getStarredSamplingValue(cmd.arg)
       if (target === undefined) return false
@@ -1026,11 +989,10 @@ export default function CmdParamsEditor({ templateId, args, onChange, modelPathF
       return String(val) !== String(target)
     }
     if (derivedPresetMode === 'clear') return false
-    // --gpu-layers isn't a static
-    // baseline value — Quick/FullAuto set it dynamically based on Dense-vs-
-    // MoE (see the identical isMoe branch in handleQuickPreset/
-    // handleFullAutoPreset): MoE leaves it unset ("auto"), Dense sets it to
-    // gpuLayersMax (item 5: "just request all layers", not a computed VRAM
+    // --gpu-layers isn't a static baseline value — Quick/FullAuto set it
+    // dynamically based on Dense-vs-MoE (see the identical isMoe branch in
+    // handleQuickPreset/handleFullAutoPreset): MoE leaves it unset ("auto"),
+    // Dense sets it to gpuLayersMax (request all layers, not a computed VRAM
     // recommendation). Handle it explicitly, mirroring the actual preset logic.
     if (cmd.arg === '--gpu-layers') {
       const expectedUnset = isMoe || !blockCount || blockCount <= 0
@@ -1078,7 +1040,7 @@ export default function CmdParamsEditor({ templateId, args, onChange, modelPathF
     }
     // Mirror the same explicit --gpu-layers handling as
     // isChanged() above — reset to "unset/auto" for MoE, or gpuLayersMax
-    // (item 5: "all layers", not a computed VRAM recommendation) for Dense.
+    // (all layers, not a computed VRAM recommendation) for Dense.
     if (cmd.arg === '--gpu-layers' && derivedPresetMode !== 'clear') {
       if (isMoe || !blockCount || blockCount <= 0) {
         delete newArgs[cmd.arg]
@@ -1110,7 +1072,7 @@ export default function CmdParamsEditor({ templateId, args, onChange, modelPathF
     commit(newArgs)
   }
 
-  // ----- Quick / Clear presets (feature 10/15/25/27) -----
+  // ----- Quick / Clear presets -----
   // Helper — only set a sampling value if it isn't already present (so
   // the starred preset's values seeded by CreateModal are preserved when Quick
   // is auto-applied on a new template).
@@ -1119,9 +1081,9 @@ export default function CmdParamsEditor({ templateId, args, onChange, modelPathF
   }
   function handleQuickPreset() {
     const newArgs = { ...args }
-    // Item 1.1 refactor: engine baseline now comes from the same pure
-    // function CreateModal's lazy initializer uses, so the button and the
-    // "apply on template creation" path can never drift apart.
+    // The engine baseline comes from the same pure function CreateModal's
+    // lazy initializer uses, so the button and "apply on template creation"
+    // can never drift apart.
     Object.assign(newArgs, buildQuickEngineBaseline({ cpuInfo, backendKey: activeBackend?.backendKey, cpuThreadsOverridePercent }))
     // ctx-size needs model metadata, which the shared baseline function
     // doesn't have access to — set it here only if not already present.
@@ -1143,33 +1105,30 @@ export default function CmdParamsEditor({ templateId, args, onChange, modelPathF
         setIfAbsent(newArgs, '--ctx-size', Math.min(meta.contextLength, 32768))
       }
     }
-    // Quick/FullAuto/Clear must NEVER touch sampling
-    // values (temperature, top-p, top-k, min-p, repeat-penalty, presence-
-    // penalty) — those are per-model/user-preferred and set once at template
-    // creation from the starred sampling preset (see CreateModal), then only
-    // ever edited directly by the user or via the separate "apply sampling
-    // preset" action. Switching Quick/FullAuto/Clear must leave them exactly
-    // as they were. (Previously Quick used setIfAbsent — which still clobbered
-    // them the moment Clear had wiped them out first — and FullAuto
-    // unconditionally overwrote them with LM Studio's hardcoded defaults
-    // every time it was clicked, even over a value the user had deliberately
-    // set.)
-    // Item 5 (superseding the note above): rather than computing a specific
-    // "how many layers fit" recommendation for Dense models, just request
-    // ALL layers on GPU (llama.cpp clamps to the model's actual layer count,
-    // and — especially combined with FULL AUTO's --fit below — figures out
-    // itself how much actually ends up GPU-resident to fit the requested
-    // context, no separate VRAM-budget calculation needed on our end). MoE
-    // still leaves --gpu-layers unset entirely so llama.cpp's own MoE-aware
-    // auto-split heuristic decides layer placement.
+    // Quick/FullAuto/Clear must never touch sampling values (temperature,
+    // top-p, top-k, min-p, repeat-penalty, presence-penalty) — those are
+    // per-model/user-preferred and set once at template creation from the
+    // starred sampling preset (see CreateModal), then only ever edited
+    // directly by the user or via the separate "apply sampling preset"
+    // action. Switching Quick/FullAuto/Clear must leave them exactly as
+    // they were.
+    //
+    // Rather than computing a specific "how many layers fit" recommendation
+    // for Dense models, just request ALL layers on GPU (llama.cpp clamps to
+    // the model's actual layer count, and — especially combined with FULL
+    // AUTO's --fit below — figures out itself how much actually ends up
+    // GPU-resident to fit the requested context, no separate VRAM-budget
+    // calculation needed on our end). MoE still leaves --gpu-layers unset
+    // entirely so llama.cpp's own MoE-aware auto-split heuristic decides
+    // layer placement.
     if (isMoe) {
       delete newArgs['--gpu-layers']
     } else {
       newArgs['--gpu-layers'] = gpuLayersMax
     }
-    // Explicit per-template
-    // marker for derivedPresetMode above — see its comment for why this
-    // replaced the old __ignoreCtxOverride-based heuristic.
+    // Explicit per-template marker for derivedPresetMode above — see its
+    // comment for why this replaced the old __ignoreCtxOverride-based
+    // heuristic.
     newArgs['__lastPreset'] = 'quick'
     commit(newArgs)
     // Mark Quick as the active baseline so blue lines DON'T appear.
@@ -1178,12 +1137,8 @@ export default function CmdParamsEditor({ templateId, args, onChange, modelPathF
   function handleClearPreset() {
     const newArgs: Record<string, any> = {}
     if (args['--mmproj'] !== undefined) newArgs['--mmproj'] = args['--mmproj']
-    // Clear must preserve sampling values too — it wipes
-    // the ENGINE args (everything else), not the model's/user's sampling
-    // setup. Previously `newArgs = {}` dropped temperature/top-p/etc.
-    // entirely, and then re-selecting Quick or FullAuto would silently
-    // refill them with hardcoded LM Studio defaults instead of what was
-    // actually there before.
+    // Clear must preserve sampling values too — it wipes the engine args
+    // (everything else), not the model's/user's sampling setup.
     for (const k of SAMPLING_KEYS) {
       if (args[k] !== undefined) newArgs[k] = args[k]
     }
@@ -1200,8 +1155,8 @@ export default function CmdParamsEditor({ templateId, args, onChange, modelPathF
   // Auto-Context-Fill ON (Auto mode — llama-server handles offloading + ctx).
   // Stacks the best defaults so the user can "set it and forget it".
   function handleFullAutoPreset() {
-    // Item 1.1 refactor: same shared baseline as Quick, then override the
-    // two advanced context toggles for FULL AUTO's "set it and forget it" behavior.
+    // Same shared baseline as Quick, then override the two advanced context
+    // toggles for FULL AUTO's "set it and forget it" behavior.
     const newArgs: Record<string, any> = { ...args }
     Object.assign(newArgs, buildQuickEngineBaseline({ cpuInfo, backendKey: activeBackend?.backendKey, cpuThreadsOverridePercent }))
     // Same MoE-aware default as Quick (see the identical note there).
@@ -1578,7 +1533,7 @@ export default function CmdParamsEditor({ templateId, args, onChange, modelPathF
     )
   }
 
-  // ----- mmproj widget (feature 22: auto-toggle + unlock manual) -----
+  // ----- mmproj widget (auto-toggle + unlock manual) -----
   const renderMmprojWidget = () => (
     <div className="mmproj-widget">
       <div className="mmproj-widget-title"><ImageIcon size={15} /> Multimodal Projector</div>
@@ -1618,7 +1573,7 @@ export default function CmdParamsEditor({ templateId, args, onChange, modelPathF
     </div>
   )
 
-  // ----- Jinja Chat Template widget (feature 13) -----
+  // ----- Jinja Chat Template widget -----
   const renderJinjaWidget = () => (
     <div className={`mmproj-widget ${jinjaChanged ? 'changed-param' : ''}`}>
       {jinjaChanged && <div className="changed-indicator" />}
@@ -1680,16 +1635,14 @@ export default function CmdParamsEditor({ templateId, args, onChange, modelPathF
     </div>
   )
 
-  // ----- Speculative Decoding widget (Item 2: full tier rework) -----
+  // ----- Speculative Decoding widget -----
   const renderSpecWidget = () => {
     const detected = effectiveModelPath ? detectedSpeculation[effectiveModelPath] : null
     const candidates = detected?.candidates || []
-    // 
-    // draft-max/min/p-min act as each tier's own "preset" (per the user's
-    // comparison table) — diff-highlight them against the CURRENTLY
-    // SELECTED tier's own values, not a fixed hardcoded baseline, and offer
-    // a reset-to-tier-default button, matching how every other preset-diff
-    // in this app works.
+    // draft-max/min/p-min act as each tier's own "preset" — diff-highlight
+    // them against the CURRENTLY SELECTED tier's own values, not a fixed
+    // hardcoded baseline, and offer a reset-to-tier-default button, matching
+    // how every other preset-diff in this app works.
     const draftMaxVal = args['--spec-draft-n-max']
     const draftMinVal = args['--spec-draft-n-min']
     const draftPMinVal = args['--spec-draft-p-min']
@@ -1850,7 +1803,7 @@ export default function CmdParamsEditor({ templateId, args, onChange, modelPathF
     )
   }
 
-  // ----- MoE widget (feature 16) -----
+  // ----- MoE widget -----
   const renderMoeWidget = () => {
     if (!isMoe) return null
     const moeMax = expertCount > 0 ? expertCount : 256
@@ -1887,7 +1840,7 @@ export default function CmdParamsEditor({ templateId, args, onChange, modelPathF
             )}
           </div>
         </div>
-        {/* Force MoE weights onto CPU layers (feature 16: inverse locking) */}
+        {/* Force MoE weights onto CPU layers (inverse locking) */}
         <div className={`cmd-row cmd-row-hybrid ${moeCpuLayersSet ? 'changed-param' : ''}`} style={{ padding: '8px 12px', border: '1px solid var(--border)', background: 'var(--surface)', position: 'relative', overflow: 'visible' }}
           title={!gpuLayersManuallySet ? 'Accessible only when GPU Offload is configured manually' : ''}>
           {moeCpuLayersSet && <div className="changed-indicator" />}
@@ -1924,7 +1877,7 @@ export default function CmdParamsEditor({ templateId, args, onChange, modelPathF
     )
   }
 
-  // ----- Reasoning Budget widget (feature 17) -----
+  // ----- Reasoning Budget widget -----
   // ALL parameters need blue line + reset button.
   const reasoningBudgetChanged = reasoningOn && reasoningValue !== 8192
   const reasoningMsgChanged = reasoningOn && reasoningMessage !== '' && reasoningMessage !== 'I have to answer now.'
@@ -1980,7 +1933,7 @@ export default function CmdParamsEditor({ templateId, args, onChange, modelPathF
     </div>
   )
 
-  // ----- Context block (Task 2.1/2.2/2.3): Ignore-Override + AutoFill + Memory Overhead -----
+  // ----- Context block: Ignore-Override + AutoFill + Memory Overhead -----
   // (autoFillResult + its effect are computed in the component body above/below)
   const renderContextBlock = () => {
     const totalMemMB = (vramBudget?.totalVRAMMB || 0) + (vramBudget?.totalRAMMB || 0)
@@ -2096,7 +2049,7 @@ export default function CmdParamsEditor({ templateId, args, onChange, modelPathF
     )
   }
 
-  // ----- VRAM budget display (feature 14) -----
+  // ----- VRAM budget display -----
   // Apply the recommended GPU-layers / CPU-forced-layers value from
   // line 1 (L1) into --gpu-layers or --moe-cpu-layers depending on strategy.
   function applyLine1Recommendation() {
@@ -2128,7 +2081,7 @@ export default function CmdParamsEditor({ templateId, args, onChange, modelPathF
     const kv = vramBudget as any
     const isMaxStrategy = isMoe && modelDefaults.moeOffloadStrategy === 'max'
     const c1 = formatWithSpaces(vramBudget.autoFitContext)
-    // Item 6, line 1: label depends on Dense vs MoE (vs MoE+"max" strategy).
+    // Label depends on Dense vs MoE (vs MoE+"max" strategy).
     const line1Label = !isMoe
       ? `${vramBudget.recommendedLayers}/${vramBudget.maxLayers} layers fit on your GPU with ${c1} context window`
       : isMaxStrategy
@@ -2234,7 +2187,7 @@ export default function CmdParamsEditor({ templateId, args, onChange, modelPathF
           <span className="cpu-info-rec">Thread slider max: {physicalCores} · Recommended: {recommendedThreads}</span>
         </div>
       )}
-      {/* Feature 29: Model context info (Task 3: + file_type/BPW + attention geometry) */}
+      {/* Model context info: file_type/BPW + attention geometry */}
       {meta && (
         <div className="cpu-info-banner">
           <Layers size={13} />

@@ -1,8 +1,8 @@
-// Items 5 & 8: shared helpers for context-length number inputs/sliders —
-// space-grouped display formatting ("2 097 152") and "Use 2x increments"
-// power-of-two step snapping (2k, 4k, 8k, 16k, ... 2M), used by both the
-// global Minimum AutoFit override slider (Settings) and the per-template
-// Context Size slider (Context and Performance block).
+// Shared helpers for context-length number inputs/sliders — space-grouped
+// display formatting ("2 097 152") and "Use 2x increments" power-of-two step
+// snapping (2k, 4k, 8k, 16k, ... 2M), used by both the global Minimum
+// AutoFit override slider (Settings) and the per-template Context Size
+// slider (Context and Performance block).
 
 // Format an integer with a plain space as the thousands separator, e.g.
 // 2097152 -> "2 097 152". Deliberately NOT using toLocaleString(), which

@@ -186,9 +186,9 @@ function ModelFileRow({
     if (res.success) { setEditing(false); onDeleted() }
     else alert('Rename failed: ' + res.error)
   }
-  // Always create a NEW template for this model (never edit an existing one).
-  // The user wants to be able to quickly create many templates even with the
-  // same model, so the button never switches to "edit existing" mode.
+  // Always create a NEW template for this model (never edit an existing
+  // one), so this button can be used to quickly create many templates even
+  // for the same model — it never switches to "edit existing" mode.
   function handleTemplate() {
     setView('cards')
     setPrefillModelPath(path)

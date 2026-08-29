@@ -116,10 +116,9 @@ const DEFAULT_BASE_URL_OVERRIDE: BaseUrlOverride = {
 // Legacy format: { enabled: boolean, url: string }
 // New format:     { enabled, port, serveOnLocalNetwork, apiKeyEnabled, apiKey }
 //
-// The override is now ON by default (the user requested this). Legacy users
-// who had the old default (enabled=false) are migrated to enabled=true so they
-// pick up the new default behaviour. Users on the new format keep their
-// explicit enabled choice.
+// The override defaults to ON. Legacy users who had the old default
+// (enabled=false) are migrated to enabled=true so they pick up the new
+// default behaviour. Users on the new format keep their explicit enabled choice.
 function migrateBaseUrlOverride(raw: any): BaseUrlOverride {
   if (!raw || typeof raw !== 'object') return { ...DEFAULT_BASE_URL_OVERRIDE }
   // Legacy: had a `url` field instead of `port`.
@@ -198,14 +197,14 @@ async function loadSettings(): Promise<AppSettings> {
         // 2x-increment context-slider lock + YaRN auto-scaling override.
         autoFitUse2xIncrements: data.modelDefaults?.autoFitUse2xIncrements ?? false,
         autoFitYarnAutoScale: data.modelDefaults?.autoFitYarnAutoScale ?? false,
-        // New Settings toggle: "Enable Multimodal Projector automatically in
+        // Settings toggle: "Enable Multimodal Projector automatically in
         // new Template if mmproj was detected" — ON by default.
         autoEnableMmproj: data.modelDefaults?.autoEnableMmproj ?? true,
-        // New: "Recommended CPU Threads override" — off by default (uses the
+        // "Recommended CPU Threads override" — off by default (uses the
         // built-in 75%-of-physical-cores default), value 100% when enabled.
         cpuThreadsOverrideEnabled: data.modelDefaults?.cpuThreadsOverrideEnabled ?? false,
         cpuThreadsOverridePercent: data.modelDefaults?.cpuThreadsOverridePercent ?? 100,
-        // New: Overrides tab → "Parallel Inference" block.
+        // Overrides tab -> "Parallel Inference" block.
         parallelOverrideEnabled: data.modelDefaults?.parallelOverrideEnabled ?? false,
         parallelInferenceMode: (data.modelDefaults?.parallelInferenceMode === 'separate') ? 'separate' : 'unified',
         parallelOverrideValue: data.modelDefaults?.parallelOverrideValue ?? 4,
@@ -357,13 +356,12 @@ async function waitForPortFree(port: number, timeoutMs = 8000, intervalMs = 100)
 const MODEL_EXTS = ['.gguf', '.bin', '.ggml']
 const MMPROJ_REGEX = /mmproj/i
 
-// Item 2 (Speculative Decoding rework): the full tier system, per the user's
-// comparison table. Higher tier = better/newer method, and a higher tier
-// always wins when multiple are detected (T5 > T1, T2 > T1, etc.) — see
-// classifySpecTier's ordering below, which checks the highest tiers FIRST so
-// a compound filename like "Qwen-DFlash2-mtp-draft.gguf" (containing both a
-// T5 and a T2 signal) is correctly classified as T5, not accidentally
-// matched by the more generic "draft"/"mtp" substring first.
+// Full speculative-decoding tier system. Higher tier = better/newer method,
+// and a higher tier always wins when multiple are detected (T5 > T1, T2 > T1,
+// etc.) — see classifySpecTier's ordering below, which checks the highest
+// tiers FIRST so a compound filename like "Qwen-DFlash2-mtp-draft.gguf"
+// (containing both a T5 and a T2 signal) is correctly classified as T5, not
+// accidentally matched by the more generic "draft"/"mtp" substring first.
 export type SpecMethod = 'off' | 'native-mtp' | 'draft-model' | 'eagle3' | 'dspark2' | 'dflash2'
 export interface SpecTierDef { tier: number; method: SpecMethod; label: string; flag: string | null; draftMax: number; draftMin: number; draftPMin: number }
 export const SPEC_TIER_DEFS: SpecTierDef[] = [
@@ -377,7 +375,7 @@ export const SPEC_TIER_DEFS: SpecTierDef[] = [
 
 // Classify a SIDECAR filename by its highest-tier keyword match. Checked in
 // descending tier order (5 down to 2) so a compound name matches its
-// highest-tier signal first, per the user's explicit example.
+// highest-tier signal first.
 function classifySidecarFilename(name: string): SpecTierDef | null {
   const lower = name.toLowerCase()
   if (/dflash2|dflash/.test(lower)) return SPEC_TIER_DEFS[5]
@@ -402,31 +400,13 @@ function isSpecDecodeSidecarFile(name: string, sizeBytes: number): boolean {
   return sizeBytes <= SIDECAR_MAX_SIZE_MB * 1024 * 1024
 }
 
-// The original MTP
-// scanner read a fixed N-MB window from the start of the file and searched
-// it as raw latin1 text for substrings like "mtp". For any model whose
-// metadata+tensor-name section is smaller than that window (the vast
-// majority, especially smaller/heavily-quantized ones), most of that window
-// is actually raw QUANTIZED TENSOR WEIGHT DATA — high-entropy binary noise,
-// not text — and over enough megabytes of it, short substrings like "mtp"
-// can and do appear by pure chance, exactly as happened here. The fix is to
-// stop guessing a byte window entirely and instead properly parse the GGUF
-// binary structure (magic/version/counts, then each metadata KV pair, then
-// each tensor's name) — reusing the same well-tested parsing approach as
-// the JS-fallback metadata extractor elsewhere in this file — so the search
-// text is built ONLY from genuine structural strings (metadata keys,
-// string-typed metadata values, and tensor names), and NEVER touches a
-// single byte of actual tensor weight data. This can't produce a false
-// positive from quantized noise, no matter how large the file is.
-// Speculative decoding, Tier 1 (Native MTP): whether the model's own GGUF
-// metadata declares an embedded Multi-Token-Prediction head. This is a
-// STATIC fact of the model file (metadata doesn't change), so it's detected
-// here — as part of the SAME metadata-KV walk get-gguf-metadata already does
-// for every other field — and cached right alongside the rest of that
-// metadata, rather than via a separate dedicated file scan. The canonical
-// signal is the `{arch}.nextn_predict_layers` metadata key (llama.cpp's own
-// convention for MTP-capable checkpoints); `multi_token_prediction` is kept
-// as a secondary alias some converters use.
+// Whether the model's own GGUF metadata declares an embedded
+// Multi-Token-Prediction head — a static fact of the model file, detected
+// here as part of the same metadata-KV walk get-gguf-metadata already does
+// for every other field, and cached alongside the rest of that metadata
+// rather than via a separate file scan. The canonical signal is the
+// `{arch}.nextn_predict_layers` metadata key; `multi_token_prediction` is a
+// secondary alias some converters use.
 function detectHasNativeMtp(metaKv: Record<string, any>): boolean {
   for (const k of Object.keys(metaKv)) {
     if (k.includes('nextn_predict_layers') || k.includes('multi_token_prediction')) {
@@ -468,11 +448,10 @@ async function scanModelFolder(folderPath: string, external: boolean): Promise<M
   }
   const models: ModelEntry[] = []
   let mmproj: MmprojFile | null = null
-  // Sidecar speculative-decoding files — kept SEPARATE from
-  // `models` (so the Template Model File dropdown never shows them, per
-  // item 4) but still returned to the renderer (so the Models tab CAN show
-  // them, non-interactively, inside their folder — same treatment as
-  // mmproj, per item 2).
+  // Sidecar speculative-decoding files — kept separate from `models` (so the
+  // Template Model File dropdown never shows them) but still returned to the
+  // renderer (so the Models tab can show them, non-interactively, inside
+  // their folder — same treatment as mmproj).
   const specDecodeSidecars: SpecDecodeSidecarFile[] = []
   for (const e of entries) {
     if (!e.isFile()) continue
@@ -711,7 +690,7 @@ async function runGgufTool(ggufToolPath: string, modelPath: string): Promise<str
 }
 
 // ---------------------------------------------------------------------------
-// GGUF file_type enum → human-readable quant name (Task 3: BPW math).
+// GGUF file_type enum → human-readable quant name, used for BPW math.
 // Source: ggml.h GGML_FTYPE values. Used to label the dominant quantization
 // and (via the BPW table) to estimate weight bits-per-weight when the exact
 // per-tensor census isn't available.
@@ -1208,9 +1187,9 @@ export async function cleanupAllProcesses(): Promise<void> {
   if (runningProcesses.size === 0) return
   const entries = Array.from(runningProcesses.entries())
   runningProcesses.clear()
-  // Item 4 (Monitoring): stop polling timers + archive any still-active
-  // perf sessions before the processes actually die, so their data gets
-  // persisted to history instead of just vanishing.
+  // Stop polling timers + archive any still-active perf sessions before the
+  // processes actually die, so their data gets persisted to history instead
+  // of just vanishing.
   stopAllTracking()
   await Promise.all(entries.map(([_id, e]) => killProcessTree(e.proc).catch(() => {})))
 }
@@ -1225,10 +1204,9 @@ export function getRunningProcessCount(): number {
 // IPC handlers
 // ==========================================================================
 export function registerIpcHandlers(): void {
-  // Item 4 (Monitoring): read a template's CURRENT name directly from disk,
-  // by id — used so session tracking always reflects live renames rather
-  // than a name snapshotted at session-start (same pattern as the Logs
-  // rename fix — see LogsView.tsx's liveName()).
+  // Read a template's CURRENT name directly from disk, by id — used so
+  // session tracking always reflects live renames rather than a name
+  // snapshotted at session-start (same pattern as LogsView.tsx's liveName()).
   function getLiveTemplateName(templateId: string): string | undefined {
     try {
       const fp = join(TEMPLATES_DIR, `${templateId}.json`)
@@ -1809,10 +1787,10 @@ export function registerIpcHandlers(): void {
         if (idx === -1 && sIdx === -1) finalArgs.push('--ctx-size', '0')
       }
     }
-    // Item 4 (Monitoring tab): force-enable llama-server's --metrics endpoint
-    // so performance data can be polled, regardless of whether the user has
-    // it in their own template args. Doesn't change behavior other than
-    // exposing the /metrics endpoint — safe to always add.
+    // Force-enable llama-server's --metrics endpoint so performance data can
+    // be polled, regardless of whether the user has it in their own template
+    // args. Doesn't change behavior other than exposing the /metrics
+    // endpoint — safe to always add.
     if (!finalArgs.includes('--metrics')) finalArgs.push('--metrics')
     // Apply "Serve on local network" (--host 0.0.0.0) and
     // "API Key" (--api-key <key>) from the Base URL Override settings.
@@ -1953,7 +1931,7 @@ export function registerIpcHandlers(): void {
         _e.sender.send('model-error', { id: opts.id, error: msg })
       })
       runningProcesses.set(opts.id, { proc, port: finalPort })
-      // Item 4 (Monitoring): begin polling this instance's /metrics endpoint.
+      // Begin polling this instance's /metrics endpoint.
       startTracking(opts.id, finalPort, opts.name)
       proc.on('exit', () => {
         runningProcesses.delete(opts.id)
@@ -2435,39 +2413,24 @@ export function registerIpcHandlers(): void {
     }
   })
 
-  // ----- GGUF speculation auto-detection (Item 2: full tier rework) -----
+  // ----- GGUF speculation auto-detection -----
   // Returns the HIGHEST-tier speculative decoding method detected for a
   // model, considering both:
   //  (a) internal metadata (Tier 1, Native MTP) — a static fact of the
   //      model's own GGUF metadata (see detectHasNativeMtp / get-gguf-metadata's
-  //      hasNativeMtp field). Passed in by the caller (already known from the
-  //      SAME cached, disk-persisted metadata the rest of the UI reads —
-  //      extracted once per model, never re-scanned here).
-  //  (b) sidecar files (Tiers 2-5 — separate .gguf files in the SAME folder
+  //      hasNativeMtp field). Passed in by the caller, from the same cached,
+  //      disk-persisted metadata the rest of the UI reads — extracted once
+  //      per model, never re-scanned here.
+  //  (b) sidecar files (Tiers 2-5 — separate .gguf files in the same folder
   //      as the base model, classified by filename keyword per the tier
   //      table), the same general pattern as mmproj sidecar detection. This
   //      part IS re-scanned every call — sidecars are just files, the user
   //      can add or remove them at any time, so this should always reflect
   //      the current folder contents rather than a cached-forever answer.
-  // Also returns every OTHER candidate found (not just the winner), so the
+  // Also returns every other candidate found (not just the winner), so the
   // UI can offer manual selection among them — e.g. switching to a lower-
   // tier Draft Model even when a higher-tier method was auto-selected, or
   // choosing between multiple same-tier sidecar files.
-  //
-  // Rewrite (this round): this used to ALSO do its own internal MTP scan via
-  // readGgufStructuralText — a full sequential walk of every tensor's
-  // name/dims/type/offset (thousands of small file reads for a model with a
-  // large tensor count), independent of and redundant with the metadata
-  // parser that get-gguf-metadata already runs and caches. That redundant
-  // scan was slow enough on cold disk I/O to occasionally not complete
-  // before something gave up on it, and any error anywhere in its very long
-  // sequential read chain silently produced "nothing found" with no
-  // indication why — which is exactly what "randomly doesn't detect
-  // anything, but works if you leave it open a while / re-extract metadata
-  // first (warms the OS page cache)" looks like. Since Tier 1 status is a
-  // static fact of the model file that get-gguf-metadata already establishes
-  // once and caches to disk, there's no reason to ever re-derive it here at
-  // all — the caller just passes it in.
   ipcMain.handle('detect-speculation', async (_e, modelPath: string, hasNativeMtp?: boolean) => {
     try {
       if (!modelPath || !existsSync(modelPath)) return { tier: 0, method: 'off' as const, candidates: [] }
@@ -2544,7 +2507,7 @@ export function registerIpcHandlers(): void {
       blockCount: null, contextLength: null, expertCount: null,
       chatTemplate: null, hiddenSize: null, kvHeads: null,
       modelName: null, architecture: null, isMoe: false, fileSizeMB: 0,
-      // BPW-accurate VRAM math (Task 3):
+      // BPW-accurate VRAM math: full attention geometry + file type.
       headCount: null, headCountKv: null, keyLength: null, valueLength: null,
       slidingWindow: null, kvLoraRank: null, qkRopeHeadDim: null,
       expertUsedCount: null, expertSharedCount: null,
@@ -2600,7 +2563,7 @@ export function registerIpcHandlers(): void {
           result.expertCount = resolve('expert_count')
           result.hiddenSize = resolve('embedding_length')
           result.kvHeads = resolve('attention.head_count_kv')
-          // BPW math (Task 3): full attention geometry.
+          // BPW math: full attention geometry.
           result.headCount = resolve('attention.head_count')
           result.headCountKv = result.kvHeads
           result.keyLength = resolve('attention.key_length')
@@ -2792,8 +2755,6 @@ export function registerIpcHandlers(): void {
           break
         }
       }
-      // Debug: log all metadata keys to help diagnose missing fields.
-      console.log('[GGUF] architecture:', architecture, '| metadata keys found:', Object.keys(allMeta).length, '| keys:', Object.keys(allMeta).join(', '))
       // Resolve architecture-specific keys AFTER the full walk (architecture
       // might be set late in the metadata). Check arch-prefixed, then any key
       // ending with the suffix.
@@ -2835,7 +2796,7 @@ export function registerIpcHandlers(): void {
         })()
         result.kvHeads = kvHeadsVal
       }
-      // BPW math (Task 3): full attention geometry from the JS fallback too.
+      // BPW math: full attention geometry from the JS fallback too.
       if (!result.headCount) result.headCount = resolve('attention.head_count')
       if (!result.headCountKv) result.headCountKv = result.kvHeads
       if (!result.keyLength) result.keyLength = resolve('attention.key_length')
@@ -3075,7 +3036,7 @@ export function registerIpcHandlers(): void {
     }
   })
 
-  // ----- VRAM telemetry (feature 14) -----
+  // ----- VRAM telemetry -----
   // GPU detection strategy (in priority order):
   //   1. nvidia-smi            → NVIDIA GPUs (free + total + name, accurate).
   //   2. systeminformation     → AMD / Intel GPUs (name + total VRAM via WMI/PCI).
@@ -3183,7 +3144,7 @@ export function registerIpcHandlers(): void {
     }
   })
 
-  // ----- System RAM info (feature 19) -----
+  // ----- System RAM info -----
   ipcMain.handle('get-system-ram', async () => {
     const os = await import('os')
     const total = os.totalmem()
@@ -3236,7 +3197,7 @@ export function registerIpcHandlers(): void {
     return { success: true }
   })
 
-  // ----- Base URL Override (feature 24) -----
+  // ----- Base URL Override -----
   ipcMain.handle('get-base-url-override', async () => {
     const s = await loadSettings()
     return s.baseUrlOverride || { ...DEFAULT_BASE_URL_OVERRIDE }
@@ -3254,7 +3215,7 @@ export function registerIpcHandlers(): void {
     return { success: true }
   })
 
-  // ----- Sampling presets (feature 28) -----
+  // ----- Sampling presets -----
   ipcMain.handle('list-sampling-presets', async () => {
     const s = await loadSettings()
     // Always include the 3 hardcoded presets; merge any user-added ones.
@@ -3300,7 +3261,7 @@ export function registerIpcHandlers(): void {
     return { success: true }
   })
 
-  // ----- Model loading guardrail check (feature 19) -----
+  // ----- Model loading guardrail check -----
   // Pre-flight check before spawning llama-server. Returns { allowed, reason }.
   ipcMain.handle('check-model-loading-guardrail', async (_e, opts: {
     modelSizeMB: number
@@ -3332,7 +3293,7 @@ export function registerIpcHandlers(): void {
   // Apply the persisted theme on startup.
   loadSettings().then(s => applyNativeTheme(s.theme))
 
-  // ----- Silent automated multi-backend check on startup (feature 33) -----
+  // ----- Silent automated multi-backend check on startup -----
   // Runs check-all-backends in the background without spawning UI; results are
   // broadcast to all windows so the UpdateBanner / tracker cards can react.
   loadSettings().then(async (s) => {
@@ -3358,7 +3319,7 @@ function readU64(buf: Buffer, offset: number): bigint {
   return buf.readBigUInt64LE(offset)
 }
 
-// The 3 hardcoded, immutable sampling presets (feature 28).
+// The 3 hardcoded, immutable sampling presets.
 function getHardcodedPresets(): any[] {
   // NOTE: isStarred is always false here on purpose. The starred preset is
   // determined by the persisted `starredPresetId` in settings.json, applied

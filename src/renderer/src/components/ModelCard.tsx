@@ -8,7 +8,7 @@ export default function ModelCard({ card }: Props) {
   const { toggleCardExpanded, updateCard, setCardStatus, removeCard, backends, activeBackend, commandsSchema, setShowCreateModal, models, modelDefaults, ggufMetadata } = useStore()
 
   // Compute the EFFECTIVE context that will be passed to
-  // llama.cpp on the next run. Precedence (Task 2.1/5):
+  // llama.cpp on the next run. Precedence:
   //   1. Per-preset "Ignore Context Length Override" (__ignoreCtxOverride) ON
   //      → use the preset's own --ctx-size (or AutoFill-computed value), ignoring
   //      the global Minimum AutoFit override from Settings.
@@ -145,7 +145,7 @@ export default function ModelCard({ card }: Props) {
     //   pass --ctx-size at all, so llama-server decides context freely.
     //   Note: --fit is a SELECT arg (options on/off), so it must be passed as
     //   "--fit on" (a bare "--fit" flag crashes llama-server → server closes
-    //   instantly). This was the root cause of Task 3.
+    //   instantly).
     // AutoFill "Maximum": force --ctx-size to the computed max-fitting context.
     // Otherwise: force --ctx-size to the effective context.
     const autoFitMode = ignoreCtxOverride && autoCtxFill  // 'off' | 'auto' | 'maximum'

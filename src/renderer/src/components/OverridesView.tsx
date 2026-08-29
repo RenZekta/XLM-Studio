@@ -112,11 +112,11 @@ export default function OverridesView() {
     modelDefaults, setModelDefaults, baseUrlOverride, setBaseUrlOverride, cpuInfo,
     vramInfo, systemRam
   } = useStore()
-  // New: "Recommended CPU Threads override" — local text-input draft state so
+  // "Recommended CPU Threads override" — local text-input draft state so
   // the user can type any % while editing, snapping to a whole-core-accurate
   // value only on Enter/blur (not on every keystroke).
   const [cpuThreadsPercentDraft, setCpuThreadsPercentDraft] = useState<string | null>(null)
-  // New: "Parallel Sequences override" — draft-input state, keyed per slider
+  // "Parallel Sequences override" — draft-input state, keyed per slider
   // (unified/dense/moe) since Separate mode needs two independent drafts.
   const [parallelValueDraft, setParallelValueDraft] = useState<Record<string, string | null> | null>(null)
 

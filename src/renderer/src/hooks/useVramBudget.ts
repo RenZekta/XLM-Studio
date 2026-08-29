@@ -3,9 +3,9 @@ import { useStore } from '../store/useStore'
 import { formatWithSpaces } from '../utils/contextFormat'
 
 // ===========================================================================
-// BPW-accurate VRAM budget (Task 3).
+// BPW-accurate VRAM budget.
 // ---------------------------------------------------------------------------
-// Implements the formula from the Kimi K3 guide:
+// The formula:
 //   TOTAL = W + KV + B + O
 //   W  = weight memory        (≈ model file size — mmap upper bound)
 //   KV = KV-cache memory       (ctx × layers × per-token bytes, BPW-accurate,
@@ -103,21 +103,18 @@ export function useVramBudget(opts: {
   mmprojSizeMB: number
   kvQuantType: string        // '--cache-type-k' value (q8_0, f16, turbo3, …)
   kvQuantTypeV?: string      // '--cache-type-v' value (defaults to kvQuantType)
-  memOverheadMB?: number     // Task 2.3: user-set memory overhead (reduces free VRAM then RAM)
-  autoFillAuto?: boolean     // Task 2: dense AutoFill "Auto" — ignore ctx, fit model by speed priority
-  // Whether this preset's
-  // "Ignore Context Length Override" toggle is ON. Needed so the VRAM/KV
-  // preview computes `targetContext` with EXACTLY the same floor logic
-  // ModelCard.tsx uses to build the real launch --ctx-size — previously this
-  // hook always used the raw contextSize (or, when unset, a hardcoded 32768),
-  // completely ignoring the global Minimum AutoFit override regardless of the
-  // toggle. That meant the KV number shown in Advanced Parameters could
-  // silently diverge from what would actually be launched.
+  memOverheadMB?: number     // user-set memory overhead (reduces free VRAM then RAM)
+  autoFillAuto?: boolean     // dense AutoFill "Auto" — ignore ctx, fit model by speed priority
+  // Whether this preset's "Ignore Context Length Override" toggle is ON.
+  // Needed so the VRAM/KV preview computes `targetContext` with exactly the
+  // same floor logic ModelCard.tsx uses to build the real launch --ctx-size,
+  // so the KV number shown in Advanced Parameters can't diverge from what
+  // would actually be launched.
   ignoreCtxOverride?: boolean
-  // The "native context below Minimum AutoFit override"
-  // guardrail warning must not fire for a model whose EFFECTIVE max context
-  // has been raised past its raw GGUF native context via RoPE/YaRN scaling
-  // (--rope-scaling yarn + --rope-scale). Pass the scaled ceiling (native ×
+  // The "native context below Minimum AutoFit override" guardrail warning
+  // must not fire for a model whose EFFECTIVE max context has been raised
+  // past its raw GGUF native context via RoPE/YaRN scaling (--rope-scaling
+  // yarn + --rope-scale). Pass the scaled ceiling (native ×
   // rope-scale when yarn is active, else undefined) so the warning compares
   // against the right number.
   ropeScaledMaxContext?: number
@@ -300,9 +297,9 @@ export function useVramBudget(opts: {
       recommendedLayers = maxLayers
       modelFitsFully = true
     } else if (freeVRAM <= 0 && !isMoeModel && ramForWeights >= weightMB) {
-      // Task 2/6 fix: ONLY force 0 GPU layers when there is literally no VRAM
-      // (no GPU / unified memory) AND the dense model fits fully in RAM — pure
-      // CPU inference is the only option. When VRAM IS available, even a big
+      // Only force 0 GPU layers when there is literally no VRAM (no GPU /
+      // unified memory) AND the dense model fits fully in RAM — pure CPU
+      // inference is the only option. When VRAM IS available, even a big
       // dense model (e.g. Qwen 27B) should partially offload to GPU (partial
       // GPU offload is much faster than pure CPU), so we fall through to the
       // proportional partial-offload branch below.
@@ -381,9 +378,9 @@ export function useVramBudget(opts: {
       // would actually pass a --ctx-size ABOVE the model's native/trained
       // context. Without RoPE/YaRN scaling configured, that's not a safe cap,
       // it's a likely startup failure or garbage output. Reflect the two real
-      // outcomes accurately depending on whether YaRN auto-scaling (item 5's
-      // global "upscale to AutoFit" switch, or this preset's own item-8
-      // switch) is actually going to handle it.
+      // outcomes accurately depending on whether YaRN auto-scaling (the
+      // global "upscale to AutoFit" switch, or this preset's own switch) is
+      // actually going to handle it.
       warning = (opts.ropeScaledMaxContext && opts.ropeScaledMaxContext >= modelDefaults.autoFitContextLength)
         ? `Model's native context (${formatWithSpaces(meta?.contextLength || 0)}) is below the Minimum AutoFit override (${formatWithSpaces(modelDefaults.autoFitContextLength)}) — YaRN scaling is active and will extend it to reach the override.`
         : `Model's native context (${formatWithSpaces(effectiveMaxContext)}) is below the Minimum AutoFit override (${formatWithSpaces(modelDefaults.autoFitContextLength)}). Enable "Automatic YaRN scaling control" (per-preset, or globally in Settings) to actually reach the override — otherwise the launch context will exceed the model's trained maximum and may fail to start.`
@@ -427,9 +424,9 @@ export function useVramBudget(opts: {
 //   - MoE models with "Maximum available" → same fill logic.
 //   - MoE "Auto" → NOT used (llama-server --fit handles it).
 //
-// For MoE, the compute buffer B is scaled by the active-expert ratio per the
-// user's request ("make the MoE side of calculations scale with Active Experts
-// amount"). All experts are still resident in weights (W is the full file).
+// For MoE, the compute buffer B is scaled by the active-expert ratio, since
+// only active experts participate in the forward pass. All experts are
+// still resident in weights (W is the full file).
 // ===========================================================================
 
 // Per-token KV bytes for a given metadata + cache type (used by the fill search).
@@ -463,14 +460,13 @@ export interface AutoFillResult {
 }
 
 // MoE default-context estimation for Quick preset. MoE models
-// tolerate offloading layers to RAM far better than Dense (that's the whole
-// premise of items 2/3 from an earlier round — llama.cpp's own "auto" MoE
-// split already does this well), so unlike Dense (which gets a flat capped
-// default), Quick's MoE default context should reflect the COMBINED
-// (VRAM + RAM) pool minus the model's own weight, rather than assuming
-// VRAM-only residency. This is intentionally a simple, direct estimate (NOT
-// the layer-aware binary search computeAutoFillContext does) — it's a
-// baseline default for a brand-new template, not a "maximize everything"
+// tolerate offloading layers to RAM far better than Dense (llama.cpp's own
+// "auto" MoE split already does this well), so unlike Dense (which gets a
+// flat capped default), Quick's MoE default context should reflect the
+// COMBINED (VRAM + RAM) pool minus the model's own weight, rather than
+// assuming VRAM-only residency. This is intentionally a simple, direct
+// estimate (NOT the layer-aware binary search computeAutoFillContext does)
+// — it's a baseline default for a brand-new template, not a "maximize everything"
 // optimizer; the user can always switch to "Maximum available" AutoFill for
 // the more precise search.
 export function estimateMoeDefaultContext(params: {
@@ -616,7 +612,7 @@ export function computeAutoFillContext(params: {
   }
   // Full fit isn't possible even at minContext — report the partial-layer
   // answer AT minContext (maximize layers on the fast tier over maximizing
-  // context, per the user's stated priority — see the item 4/8 notes above).
+  // context — see the notes above).
   const partialLayers = layersAt(minContext, freeVRAMMB)
   return {
     context: minContext, fitsFully: false, usedVRAM: true, overflowedToRAM: false, layers: partialLayers, maxLayers,

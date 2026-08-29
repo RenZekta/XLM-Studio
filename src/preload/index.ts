@@ -172,17 +172,17 @@ const api = {
   setModelDefaults: (defaults: any) => ipcRenderer.invoke('set-model-defaults', defaults) as Promise<{ success: boolean }>,
   checkModelLoadingGuardrail: (opts: any) => ipcRenderer.invoke('check-model-loading-guardrail', opts) as Promise<{ allowed: boolean; reason: string }>,
 
-  // ----- Base URL Override (feature 24) -----
+  // ----- Base URL Override -----
   getBaseUrlOverride: () => ipcRenderer.invoke('get-base-url-override') as Promise<any>,
   setBaseUrlOverride: (opts: any) => ipcRenderer.invoke('set-base-url-override', opts) as Promise<{ success: boolean }>,
 
-  // ----- Sampling presets (feature 28) -----
+  // ----- Sampling presets -----
   listSamplingPresets: () => ipcRenderer.invoke('list-sampling-presets') as Promise<any[]>,
   addSamplingPreset: (name: string, values: any) => ipcRenderer.invoke('add-sampling-preset', name, values) as Promise<any>,
   deleteSamplingPreset: (id: string) => ipcRenderer.invoke('delete-sampling-preset', id) as Promise<{ success: boolean }>,
   starSamplingPreset: (id: string) => ipcRenderer.invoke('star-sampling-preset', id) as Promise<{ success: boolean }>,
 
-  // ----- Silent backend check listener (feature 33) -----
+  // ----- Silent backend check listener -----
   onBackendsCheckedSilent: (cb: (data: any) => void) => {
     ipcRenderer.removeAllListeners('backends-checked-silent')
     ipcRenderer.on('backends-checked-silent', (_e, data) => cb(data))

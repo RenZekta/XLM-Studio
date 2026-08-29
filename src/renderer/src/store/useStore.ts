@@ -73,13 +73,10 @@ interface AppStore {
   // 'fullauto' = Quick baselines + Ignore-Context-Override + Auto-Context-Fill ON.
   presetMode: 'clear' | 'quick' | 'fullauto'
 
-  // Logs used to live in LogsView's local component state and
-  // the IPC listener was only registered while that view was mounted — so
-  // navigating away lost every log that arrived in the meantime (not just
-  // hid them). Logs now live in the global store (populated by a listener
-  // registered once at App root) so they persist for the life of the app,
-  // exactly like the user asked: "Logs must persist until the app is closed,
-  // or they are cleared manually."
+  // Logs live in the global store, populated by a listener registered once
+  // at App root, so they persist until the app is closed or cleared
+  // manually — a listener scoped to LogsView's own mount would lose every
+  // log that arrived while the view wasn't mounted, not just hide them.
   logs: { id: string; name: string; stream: 'stdout' | 'stderr' | 'app'; line: string; ts: number }[]
 
   setCompactSidebarEnabled: (enabled: boolean) => void
@@ -175,12 +172,12 @@ export const useStore = create<AppStore>((set) => ({
   metadataExtractions: {},
   vramInfo: null,
   systemRam: null,
-  modelDefaults: { autoFitEnabled: true, autoFitContextLength: 60000, guardrailMode: 'strict', customMaxSizeGB: 0, useCurrentMemState: false, moeOffloadStrategy: 'max' /* item 6: default to MAX+ForceMoEtoCPU */, autoEnableMmproj: true, cpuThreadsOverrideEnabled: false, cpuThreadsOverridePercent: 100, parallelOverrideEnabled: false, parallelInferenceMode: 'unified', parallelOverrideValue: 4, parallelOverrideValueDense: 4, parallelOverrideValueMoe: 4, perfMaxSessions: 20 },
+  modelDefaults: { autoFitEnabled: true, autoFitContextLength: 60000, guardrailMode: 'strict', customMaxSizeGB: 0, useCurrentMemState: false, moeOffloadStrategy: 'max' /* default to MAX+ForceMoEtoCPU */, autoEnableMmproj: true, cpuThreadsOverrideEnabled: false, cpuThreadsOverridePercent: 100, parallelOverrideEnabled: false, parallelInferenceMode: 'unified', parallelOverrideValue: 4, parallelOverrideValueDense: 4, parallelOverrideValueMoe: 4, perfMaxSessions: 20 },
   baseUrlOverride: { enabled: true, port: 1234, serveOnLocalNetwork: false, apiKeyEnabled: false, apiKey: '' },
   samplingPresets: [],
   paramViewMode: 'common',
-  quickBaselineActive: true,  // Fix 5: Quick settings is the default baseline
-  presetMode: 'quick',        // Task 5: default to Quick (matches quickBaselineActive)
+  quickBaselineActive: true,  // Quick settings is the default baseline
+  presetMode: 'quick',        // default to Quick (matches quickBaselineActive)
   logs: [],
 
   setCompactSidebarEnabled: (enabled) => {
