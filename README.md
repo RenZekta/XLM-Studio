@@ -42,7 +42,8 @@ Pause, resume, or cancel large model downloads reliably. You can also paste dire
 
 Every detected model gets its GGUF metadata (architecture, layer/expert counts, context length, quantization, KV-cache geometry, chat template, speculative-decoding tensors) extracted and cached the moment it's discovered — scanned in parallel at launch, with a single consolidated "Extracting model metadata" notification (hover it to see which models are still being processed) instead of one popup per model. A "Reextract model data" button in the Models tab lets you force a clean re-scan of everything, e.g. after replacing a file in place or updating the app.
 
-<img width="1248" height="790" alt="image" src="https://github.com/user-attachments/assets/8594dcd9-53c9-4cd0-b900-ff0faf5e2141" />
+<img width="472" height="203" alt="image" src="https://github.com/user-attachments/assets/e4be6d3f-de6f-484f-8f5a-cf1555895c9c" />
+
 
 
 **Memory-Aware VRAM/RAM Budget Calculator**
@@ -69,11 +70,13 @@ Every template has a **Quick** / **FULL AUTO** / **Clear** switch:
 
 Parameters that differ from the currently-selected preset (or, for sampling values, from your starred sampling preset) are highlighted with a reset-to-default button.
 
+<img width="327" height="123" alt="image" src="https://github.com/user-attachments/assets/6bff1dd2-3759-470a-8468-d1db2ee01cd5" />
+
 **Visual Command Editor**
 
 No need to memorize execution flags or save your commands in an endless unreadable diary. Edit backend-specific commands through a structured user interface, with a "Common" view for everyday parameters and a "Full" view for everything the backend schema exposes. Toggle booleans, set limits on numerical inputs, and define default parameter values. You can still input commands directly in the Import section.
 
-<img width="327" height="123" alt="image" src="https://github.com/user-attachments/assets/6bff1dd2-3759-470a-8468-d1db2ee01cd5" />
+<img width="482" height="500" alt="image" src="https://github.com/user-attachments/assets/272b4189-ee5f-43b0-8446-1e372828ced5" />
 
 
 **Speculative Decoding — full tier system, auto-detected**
