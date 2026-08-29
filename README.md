@@ -11,7 +11,7 @@
 
 XLM Studio is a fast, native desktop interface for discovering, downloading, configuring, and serving local Large Language Models with llama.cpp-compatible backends. It strips away the friction of command-line execution and manual VRAM math, giving you a single workspace that goes from "found a GGUF on Hugging Face" to "running server with sane defaults" in a couple of clicks.
 
-XLM Studio is a fork of [Hexllama](https://github.com/andersondanieln/hexllama), heavily extended with a memory-aware configuration engine: it reads a model's actual GGUF metadata (architecture, layer count, KV-cache geometry, MoE expert layout, quantization, speculative-decoding tensors, native chat template) and uses it to compute real VRAM/RAM budgets and recommend settings, instead of asking you to guess.
+XLM Studio is a fork of [Hexllama](https://github.com/andersondanieln/hexllama), heavily extended with many features, including a memory-aware configuration engine: it reads a model's actual GGUF metadata (architecture, layer count, KV-cache geometry, MoE expert layout, quantization, speculative-decoding tensors, native chat template) and uses it to compute real VRAM/RAM budgets and recommend settings, instead of asking you to guess.
 
 <!-- NOTE TO SELF: replace the screenshots below with current ones once the new
      UI has settled — several older screenshots (model-hub, model-download,
