@@ -131,7 +131,8 @@ Need more context than a model's native window? Turn on Automatic YaRN scaling c
 
 Every template shows a live preview of the exact `llama-server` command that will run — including values that only get resolved at launch time (the AutoFit context-override floor, `--fit`/`--no-webui` flags, the default port), clearly marked when they differ from what's literally saved in the template. Switch to the stacked view to see it as one flag per line instead of a single long string.
 
-<img width="515" height="276" alt="image" src="https://github.com/user-attachments/assets/1da56562-01ef-4954-be6a-befb9e7b9901" />
+<img width="503" height="338" alt="image" src="https://github.com/user-attachments/assets/252df95b-d6f1-4c6e-953b-17744c109a34" />
+
 
 
 **Template-Based Execution**
