@@ -59,7 +59,9 @@ Every template has a **Quick** / **FULL AUTO** / **Clear** switch:
 - **FULL AUTO** starts from the same baseline but hands context and GPU-layer placement over to llama.cpp's own `--fit` auto-sizing. If you need more space for context or GPU offloading, turn off Multimodal Projector and Speculative Decoding, and you'll get the most out of your available VRAM.
 - **Clear** wipes engine settings back to nothing, without touching your sampling parameters (temperature, top-p, top-k, min-p, penalties) — those are considered separate, per-preference settings that no engine preset should ever silently overwrite.
 
-Parameters that differ from the currently-selected preset (or, for sampling values, from your starred sampling preset) are highlighted with a reset-to-default button.
+Common parameters shows only the most impactful parameters (LM Studio style), Full shows all menu control supported parameters.
+
+Parameters that differ from the currently-selected preset (or, for sampling values, from your main selected sampling preset) are highlighted with a reset-to-default button.
 
 <img width="327" height="123" alt="image" src="https://github.com/user-attachments/assets/6bff1dd2-3759-470a-8468-d1db2ee01cd5" />
 
@@ -172,9 +174,9 @@ Clone the repository in desired destination. Copy the destination.
 git clone https://github.com/RenZekta/XLM-Studio
 ```
 
-Run Powershell 7 as an administrator (open folder, install dependencies, build and package installer
+Run Powershell 7 as an administrator (open folder, install dependencies, build and package installer in one task)
 ```
-cd X:\(your chosen destination)\XLM-Studio && npm install && npm run build && npm run package
+cd (X:\your\chosen\destination)\XLM-Studio && npm install && npm run build && npm run package
 ```
 
 ## Roadmap (hexllama + XLM-Studio)
@@ -200,6 +202,7 @@ cd X:\(your chosen destination)\XLM-Studio && npm install && npm run build && np
 ### Phase 3: Enhanced Inference & Native UI (Short to Mid-Term)
 - [ ] **Built-in Chat Interface**: Native chat client to interact with models directly within XLM Studio without launching external browser tabs — would also let Monitoring see real per-request data instead of polling `/metrics`. Optional goal, it works just fine with a separate chat window too.
 - [ ] **Multi-Language Support**: Complete internationalization (i18n) to support languages beyond English.
+- [ ] MCP control over XLM Studio
 
 ### Phase 4: Multi-Backend & Advanced Engines (Long-Term)
 - [ ] Optional **Alternative Backend Integration**: Expand support beyond `llama.cpp` to include:
