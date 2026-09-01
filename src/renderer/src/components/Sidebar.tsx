@@ -2,14 +2,18 @@ import React from 'react'
 import { useStore } from '../store/useStore'
 import { LayoutGrid, Settings, FolderOpen, HardDrive, Search, Database, Terminal, SlidersHorizontal, Activity } from 'lucide-react'
 import { StarIcon as StarShape } from '../utils/format'
+import type { BackendVersion } from '../../../shared/types'
 
 export default function Sidebar() {
   const { view, setView, backends, activeBackend, setActiveBackend, setCommandsSchema, paths, compactSidebarEnabled,
           mainModelFolder, mainBackendFolder } = useStore()
 
-  async function switchBackend(name: string) {
-    const b = backends.find((x) => x.name === name || x.id === name)
-    if (!b) return
+  // Takes the BackendVersion object directly rather than looking it up by
+  // name/id -- the caller already has the exact entry from `backends`, and a
+  // name-based lookup here would be ambiguous whenever two forks share a
+  // version tag (see ModelCard's targetBackend resolution for the same
+  // concern on the run-model path).
+  async function switchBackend(b: BackendVersion) {
     setActiveBackend(b)
     const cmds = await window.api.getCommands(b.backendKey)
     if (cmds) setCommandsSchema(cmds)
@@ -184,7 +188,7 @@ export default function Sidebar() {
             <button
               key={b.id}
               className={`nav-item ${activeBackend?.id === b.id ? 'active' : ''}`}
-              onClick={() => switchBackend(b.name)}
+              onClick={() => switchBackend(b)}
               title={b.displayName}
             >
               <HardDrive size={16} />

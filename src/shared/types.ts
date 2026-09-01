@@ -93,7 +93,14 @@ export interface Template {
   id: string
   name: string
   description?: string
+  // backendVersion is the version subfolder name (BackendVersion.name), which
+  // is only unique within a single fork. backendKey (BackendVersion.backendKey)
+  // pins the fork itself, since forks tracking the same upstream can end up
+  // with identical version tags (e.g. two forks both cutting a "b10448"
+  // release). Templates saved before this field existed have no backendKey
+  // and fall back to a name-only match at run time.
   backendVersion?: string
+  backendKey?: string
   modelPath?: string
   serverPort: number
   args: Record<string, string | number | boolean | null>

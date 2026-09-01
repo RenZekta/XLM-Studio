@@ -93,20 +93,39 @@ export default function ModelCard({ card }: Props) {
       else { setCardStatus(card.template.id, 'running'); alert(`Failed to stop: ${res.error}`) }
       return
     }
-    let targetBackend = backends.find(b => b.name === card.template.backendVersion || b.version === card.template.backendVersion || b.id === card.template.backendVersion)
+    // backendVersion (the version subfolder name) is only unique within a
+    // single fork -- forks that track the same upstream can cut releases
+    // under an identical version tag. backendKey pins the fork itself, so it
+    // takes precedence. Templates saved before backendKey existed fall back
+    // to the old name-only match, which stays ambiguous for those templates
+    // until they're re-saved.
+    let targetBackend = card.template.backendKey
+      ? backends.find(b => b.backendKey === card.template.backendKey && b.name === card.template.backendVersion)
+      : undefined
+    if (!targetBackend && card.template.backendVersion) {
+      targetBackend = backends.find(b => b.name === card.template.backendVersion || b.version === card.template.backendVersion || b.id === card.template.backendVersion)
+    }
     if (!targetBackend && activeBackend) targetBackend = activeBackend
     if (!targetBackend || !targetBackend.exe) {
       alert('Backend not found or has no executable.')
       return
     }
+    // The schema used to decide which args are "known" (and thus how they're
+    // serialized, e.g. bare boolean flags) must come from the backend that is
+    // actually about to run, not whatever backend is active in the sidebar --
+    // otherwise a template pinned to one fork gets launched using another
+    // fork's command shape.
+    const runSchema = targetBackend.backendKey === activeBackend?.backendKey
+      ? commandsSchema
+      : await window.api.getCommands(targetBackend.backendKey)
     const args: string[] = []
     const tArgs = card.template.args
     if (card.template.modelPath) args.push('-m', card.template.modelPath)
     // Helper to check if a key is an internal UI flag (not a real CLI arg).
     const isInternal = (k: string) => k.startsWith('__')
-    if (commandsSchema) {
+    if (runSchema) {
       const knownArgs = new Set<string>()
-      for (const cat of commandsSchema.categories) {
+      for (const cat of runSchema.categories) {
         for (const cmd of cat.commands) {
           knownArgs.add(cmd.arg)
           const val = tArgs[cmd.arg]

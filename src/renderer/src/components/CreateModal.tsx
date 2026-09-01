@@ -42,6 +42,7 @@ export default function CreateModal() {
   const [name, setName] = useState('')
   const [description, setDescription] = useState('')
   const [backendVersion, setBackendVersion] = useState('')
+  const [backendKey, setBackendKey] = useState('')
   const [modelPath, setModelPath] = useState('')
   const [serverPort, setServerPort] = useState(8080)
   // Anchor DOM node for CmdParamsEditor's header
@@ -117,13 +118,14 @@ export default function CreateModal() {
       setName(editingTemplate.name)
       setDescription(editingTemplate.description || '')
       setBackendVersion(editingTemplate.backendVersion || '')
+      setBackendKey(editingTemplate.backendKey || '')
       setModelPath(editingTemplate.modelPath || '')
       setServerPort(editingTemplate.serverPort || 8080)
       setArgs(editingTemplate.args || {})
       setTagsStr(editingTemplate.tags?.join(', ') || '')
       setLaunchMode(editingTemplate.launchMode || 'chat')
     } else {
-      if (activeBackend) setBackendVersion(activeBackend.name)
+      if (activeBackend) { setBackendVersion(activeBackend.name); setBackendKey(activeBackend.backendKey) }
       // Skip the redundant (and destructive) reseed on the very
       // first run — see seedEffectRanRef comment above. The lazy `args`
       // initializer already seeded sampling values identically, and calling
@@ -202,6 +204,7 @@ export default function CreateModal() {
       name,
       description,
       backendVersion,
+      backendKey,
       modelPath,
       serverPort,
       args,
@@ -219,6 +222,7 @@ export default function CreateModal() {
         name,
         description,
         backendVersion,
+        backendKey,
         modelPath,
         serverPort,
         args,
@@ -320,12 +324,23 @@ export default function CreateModal() {
                 <label className="form-label">Backend Version</label>
                 <select
                   className="form-select"
-                  value={backendVersion}
-                  onChange={e => setBackendVersion(e.target.value)}
+                  // The option value is the backend's unique id (fork + version + root),
+                  // not just its version name -- two forks can legitimately share a
+                  // version tag, and matching on the tag alone would silently resolve
+                  // to whichever one happens to sort first. The id only has to be
+                  // unique among the currently-listed options, so its rootIndex
+                  // component being positional is fine here; backendKey + version is
+                  // what actually gets persisted onto the template below.
+                  value={backends.find(b => b.backendKey === backendKey && b.name === backendVersion)?.id || ''}
+                  onChange={e => {
+                    const b = backends.find(x => x.id === e.target.value)
+                    setBackendVersion(b?.name || '')
+                    setBackendKey(b?.backendKey || '')
+                  }}
                 >
                   <option value="">Default (Active)</option>
                   {backends.map(b => (
-                    <option key={b.id} value={b.name}>{b.displayName}</option>
+                    <option key={b.id} value={b.id}>{b.displayName}</option>
                   ))}
                 </select>
               </div>

@@ -234,7 +234,8 @@ export default function App() {
           data.filename,
           data.destPath,
           cards.map(c => c.template),
-          backend?.name || ''
+          backend?.name || '',
+          backend?.backendKey || ''
         )
         const res = await window.api.saveTemplate(template)
         if (res.success) add({ ...template, id: res.id })
@@ -265,7 +266,8 @@ export default function App() {
           data.filename,
           data.destPath,
           cards.map(c => c.template),
-          backend?.name || ''
+          backend?.name || '',
+          backend?.backendKey || ''
         )
         const res = await window.api.saveTemplate(template)
         if (res.success) add({ ...template, id: res.id })

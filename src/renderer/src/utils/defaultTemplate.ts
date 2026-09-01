@@ -98,7 +98,8 @@ export function buildDefaultTemplate(
   filename: string,
   modelPath: string,
   existingTemplates: Template[] = [],
-  backendName = ''
+  backendName = '',
+  backendKey = ''
 ): Template {
   const settings = getRecommendedSettings(filename)
   const port = getNextPort(existingTemplates)
@@ -120,6 +121,7 @@ export function buildDefaultTemplate(
     modelPath,
     serverPort: port,
     backendVersion: backendName,
+    backendKey,
     args,
     launchMode: 'chat',
     createdAt: new Date().toISOString(),
