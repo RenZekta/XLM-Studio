@@ -37,7 +37,6 @@ dist-ssr/
 out/
 release/
 build/
-*.tsbuildinfo
 
 # App-specific runtime/download folders
 models/*
