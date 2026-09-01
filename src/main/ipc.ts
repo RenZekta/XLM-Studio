@@ -1085,7 +1085,26 @@ async function smartExtractBackend(opts: {
         p.on('exit', code => code === 0 ? resolve() : reject(new Error(`tar exited with code ${code}`)))
       })
     } else {
-      await extract(opts.archivePath, { dir: staging })
+      // extract-zip (as of the latest published release, 2.0.1) validates
+      // that a regular file entry's own path stays within the target
+      // directory, but never validates a symlink entry's TARGET — so a
+      // malicious archive can plant a symlink pointing anywhere on disk
+      // (e.g. "../../../../etc/passwd") and extract-zip will create it
+      // without complaint (CVE-2026-56876 / GHSA-jmr9-qjv8-65gv). There is
+      // no patched release to upgrade to. Backend release archives never
+      // legitimately contain symlinks, so reject any symlink entry outright
+      // via onEntry rather than trusting the archive's contents.
+      const IFMT = 61440
+      const IFLNK = 40960
+      await extract(opts.archivePath, {
+        dir: staging,
+        onEntry: (entry) => {
+          const mode = (entry.externalFileAttributes >> 16) & 0xFFFF
+          if ((mode & IFMT) === IFLNK) {
+            throw new Error(`Refusing to extract symlink entry "${entry.fileName}" from archive`)
+          }
+        }
+      })
     }
   } catch (err) {
     // Cleanup staging on failure.
