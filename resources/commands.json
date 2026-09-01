@@ -55,8 +55,8 @@
       "name": "KV Cache",
       "icon": "Database",
       "commands": [
-        { "arg": "--cache-type-k", "short": "-ctk", "label": "KV Cache Type (K)", "description": "KV cache data type for Keys", "type": "select", "options": ["f16", "f32", "bf16", "q8_0", "q4_0", "q4_1", "iq4_nl", "q5_0", "q5_1"], "default": "f16", "env": "LLAMA_ARG_CACHE_TYPE_K" },
-        { "arg": "--cache-type-v", "short": "-ctv", "label": "KV Cache Type (V)", "description": "KV cache data type for Values", "type": "select", "options": ["f16", "f32", "bf16", "q8_0", "q4_0", "q4_1", "iq4_nl", "q5_0", "q5_1"], "default": "f16", "env": "LLAMA_ARG_CACHE_TYPE_V" },
+        { "arg": "--cache-type-k", "short": "-ctk", "label": "KV Cache Type (K)", "description": "KV cache data type for Keys", "type": "select", "options": ["f16", "f32", "bf16", "q8_0", "q4_0", "q4_1", "iq4_nl", "q5_0", "q5_1"], "default": "f16", "requireValue": true, "env": "LLAMA_ARG_CACHE_TYPE_K" },
+        { "arg": "--cache-type-v", "short": "-ctv", "label": "KV Cache Type (V)", "description": "KV cache data type for Values", "type": "select", "options": ["f16", "f32", "bf16", "q8_0", "q4_0", "q4_1", "iq4_nl", "q5_0", "q5_1"], "default": "f16", "requireValue": true, "env": "LLAMA_ARG_CACHE_TYPE_V" },
         { "arg": "--repack", "label": "Weight Repacking", "description": "Enable weight repacking for performance", "type": "boolean", "default": true, "env": "LLAMA_ARG_REPACK" }
       ]
     },

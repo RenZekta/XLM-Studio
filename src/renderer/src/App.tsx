@@ -1,4 +1,4 @@
-import React, { useEffect } from 'react'
+import React, { useEffect, useRef } from 'react'
 import { useStore } from './store/useStore'
 import Titlebar from './components/Titlebar'
 import Sidebar from './components/Sidebar'
@@ -302,7 +302,27 @@ export default function App() {
     }
   }
 
-  function renderView() {
+  // '.content' is one shared scroll container reused by every view. Leaving
+  // My Templates for a shorter view (e.g. Logs) lets the browser clamp its
+  // scrollTop down to fit the shorter content, so simply keeping CardsView
+  // mounted underneath isn't enough to bring the page back where it was.
+  // Track and restore its scroll position across the view switch, in memory
+  // for the life of the window (an actual mid-session position isn't
+  // meaningful to persist to disk).
+  const contentRef = useRef<HTMLElement>(null)
+  const cardsScrollTop = useRef(0)
+  useEffect(() => {
+    if (view === 'cards' && contentRef.current) {
+      contentRef.current.scrollTop = cardsScrollTop.current
+    }
+  }, [view])
+  function handleContentScroll() {
+    if (view === 'cards' && contentRef.current) {
+      cardsScrollTop.current = contentRef.current.scrollTop
+    }
+  }
+
+  function renderOtherView() {
     if (view === 'hub') return <HuggingFaceView />
     if (view === 'settings') return <SettingsView />
     if (view === 'models') return <ModelsView />
@@ -310,7 +330,7 @@ export default function App() {
     if (view === 'monitoring') return <MonitoringView />
     if (view === 'overrides') return <OverridesView />
     if (view === 'about') return <AboutView />
-    return <CardsView />
+    return null
   }
 
   if (loading) {
@@ -351,8 +371,15 @@ export default function App() {
       <UpdateBanner />
       <div className="main-layout">
         <Sidebar />
-        <main className="content">
-          {renderView()}
+        <main className="content" ref={contentRef} onScroll={handleContentScroll}>
+          {/* CardsView (My Templates) stays mounted behind other views instead of
+              being torn down on navigation, so its own scroll position and each
+              expanded template's scroll position survive a trip to Logs/Settings/etc
+              and back, instead of remounting at scrollTop 0 every time. */}
+          <div style={{ display: view === 'cards' ? 'contents' : 'none' }}>
+            <CardsView />
+          </div>
+          {view !== 'cards' && renderOtherView()}
         </main>
       </div>
       {showCreateModal && <CreateModal />}

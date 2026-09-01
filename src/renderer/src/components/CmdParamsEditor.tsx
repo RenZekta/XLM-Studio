@@ -919,6 +919,63 @@ export default function CmdParamsEditor({ templateId, args, onChange, modelPathF
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [disabled])
+  // '--cache-type-k'/'--cache-type-v' backfill: same reasoning as
+  // '--load-mode' above (requireValue, so no synthetic empty "Default"
+  // choice to fall back to). Resolves to the backend-appropriate baseline
+  // (turbo4/turbo3 for the TurboQuant fork, q8_0/q8_0 otherwise) so the
+  // dropdown always shows a concrete, diffable value instead of blank.
+  //
+  // On a backend switch this also has to decide whether the current value
+  // still reflects a deliberate choice or was just riding the old
+  // backend's default. A value that isn't valid for the new backend's
+  // options is always reset (it can no longer be passed to llama-server at
+  // all). A value that IS still valid gets reset only if it exactly
+  // matched the PREVIOUS backend's default — e.g. it was left on q8_0
+  // under stock llama.cpp and the backend switches to the TurboQuant fork,
+  // whose default is turbo4/turbo3, not q8_0 — so the template keeps
+  // tracking "whatever this backend recommends" instead of freezing at
+  // whichever backend happened to be active when the value was last
+  // implicitly set. Anything that diverges from the previous backend's
+  // default is treated as a deliberate override and survives the switch
+  // unchanged (as long as it's still a valid option).
+  const prevKvBackendKeyRef = useRef<string | null | undefined>(activeBackend?.backendKey)
+  useEffect(() => {
+    if (disabled || !commandsSchema) return
+    const curArgs = argsRef.current
+    const prevBackendKey = prevKvBackendKeyRef.current
+    prevKvBackendKeyRef.current = activeBackend?.backendKey
+    const prevDefaultK = defaultKvQuantFor(prevBackendKey)
+    const prevDefaultV = defaultKvQuantVFor(prevBackendKey)
+    const findOptions = (arg: string): string[] | undefined => {
+      for (const cat of commandsSchema.categories) {
+        const cmd = cat.commands.find(c => c.arg === arg)
+        if (cmd) return cmd.options
+      }
+      return undefined
+    }
+    const kOptions = findOptions('--cache-type-k')
+    const vOptions = findOptions('--cache-type-v')
+    const newArgs: Record<string, any> = { ...curArgs }
+    let changed = false
+    const curK = curArgs['--cache-type-k']
+    const kUnset = curK === undefined || curK === ''
+    const kInvalid = !kUnset && !!kOptions && !kOptions.includes(String(curK))
+    const kOnPriorDefault = !kUnset && String(curK) === String(prevDefaultK)
+    if (kUnset || kInvalid || kOnPriorDefault) {
+      newArgs['--cache-type-k'] = defaultKvQuantK
+      changed = true
+    }
+    const curV = curArgs['--cache-type-v']
+    const vUnset = curV === undefined || curV === ''
+    const vInvalid = !vUnset && !!vOptions && !vOptions.includes(String(curV))
+    const vOnPriorDefault = !vUnset && String(curV) === String(prevDefaultV)
+    if (vUnset || vInvalid || vOnPriorDefault) {
+      newArgs['--cache-type-v'] = defaultKvQuantV
+      changed = true
+    }
+    if (changed) commit(newArgs)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [disabled, defaultKvQuantK, defaultKvQuantV, commandsSchema, activeBackend?.backendKey])
 
   const reasoningPreserveOn = args['--reasoning-preserve'] !== false
   function setReasoningPreserveOn(on: boolean) {
