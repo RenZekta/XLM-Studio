@@ -287,8 +287,7 @@ export default function OverridesView() {
               <div style={{ width: '100%' }}>
                 <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 4 }}>
                   <span style={{ fontSize: 12, color: 'var(--text-secondary)' }}>Parallel Inference overrides for Dense and MoE:</span>
-                  <div className="segmented-toggle" style={{ width: 'auto' }}>
-                    <div className="segmented-toggle-highlight" style={{ width: 'calc(100% / 2)', transform: `translateX(${mode === 'separate' ? 100 : 0}%)` }} />
+                  <div className="segmented-toggle">
                     <button type="button" className={`segmented-toggle-btn ${mode === 'unified' ? 'active' : ''}`} onClick={() => setMode('unified')}>Unified</button>
                     <button type="button" className={`segmented-toggle-btn ${mode === 'separate' ? 'active' : ''}`} onClick={() => setMode('separate')}>Separate</button>
                   </div>
