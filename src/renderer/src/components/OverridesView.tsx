@@ -262,7 +262,7 @@ export default function OverridesView() {
                     <input type="range" min={1} max={64} step={1} value={currentValue} style={{ flex: 1 }}
                       onChange={(e) => commitValue(Number(e.target.value))} />
                     <input
-                      type="text" inputMode="numeric" className="form-input" style={{ width: 70, textAlign: 'right' }}
+                      type="text" inputMode="numeric" className="form-input" style={{ width: 70, textAlign: 'center' }}
                       value={draft ?? String(currentValue)}
                       onChange={(e) => setParallelValueDraft((prev: any) => ({ ...(prev || {}), [draftKey]: e.target.value.replace(/[^\d]/g, '') }))}
                       onBlur={() => {
@@ -340,7 +340,7 @@ export default function OverridesView() {
                   type="text"
                   inputMode="numeric"
                   className="form-input"
-                  style={{ width: 110 }}
+                  style={{ width: 110, textAlign: 'center' }}
                   value={formatWithSpaces(modelDefaults.autoFitContextLength)}
                   onChange={async (e) => {
                     const raw = parseSpacedNumber(e.target.value)
@@ -459,6 +459,29 @@ export default function OverridesView() {
               </label>
             </div>
           </div>
+          {/* Chat UI/API Only was a per-Template switch; removed in favor of
+              always serving the bundled webui and always offering "Open Chat"
+              once a Template is running. This is the only remaining control
+              over whether that window pops open BY ITSELF the moment a
+              Template starts — off by default so nothing opens unless the
+              user explicitly clicks "Open Chat". */}
+          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', width: '100%', marginTop: 8 }}>
+            <div>
+              <div className="settings-row-label">Open Chat UI automatically on Template startup</div>
+              <div className="settings-row-sub">
+                Off by default — "Open Chat" is always available once a Template is running, whether or not this is on.
+              </div>
+            </div>
+            <div className="toggle-wrap">
+              <label className="toggle">
+                <input type="checkbox" checked={modelDefaults.autoOpenChatUI === true} onChange={async (e) => {
+                  const d = { ...modelDefaults, autoOpenChatUI: e.target.checked }
+                  setModelDefaults(d); try { await window.api?.setModelDefaults?.(d) } catch {}
+                }} />
+                <span className="toggle-track"></span><span className="toggle-thumb"></span>
+              </label>
+            </div>
+          </div>
           {/* New: "Recommended CPU Threads override" — controls what
               Template -> CPU Threads defaults to for new templates (normally
               75% of physical cores). Off by default; when on, defaults to
@@ -520,7 +543,7 @@ export default function OverridesView() {
                     type="text"
                     inputMode="numeric"
                     className="form-input"
-                    style={{ width: 70, textAlign: 'right' }}
+                    style={{ width: 70, textAlign: 'center' }}
                     value={cpuThreadsPercentDraft ?? String(currentPercent)}
                     onChange={(e) => setCpuThreadsPercentDraft(e.target.value.replace(/[^\d]/g, ''))}
                     onBlur={() => {
@@ -598,7 +621,7 @@ export default function OverridesView() {
           {modelDefaults.guardrailMode === 'custom' && (
             <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginTop: 8 }}>
               <span style={{ fontSize: 12 }}>Max model size (GB):</span>
-              <input type="number" className="form-input" style={{ width: 100 }} min={0} step={0.5} value={modelDefaults.customMaxSizeGB}
+              <input type="number" className="form-input" style={{ width: 100, textAlign: 'center' }} min={0} step={0.5} value={modelDefaults.customMaxSizeGB}
                 onChange={async (e) => {
                   const d = { ...modelDefaults, customMaxSizeGB: Number(e.target.value) }
                   setModelDefaults(d); try { await window.api?.setModelDefaults?.(d) } catch {}

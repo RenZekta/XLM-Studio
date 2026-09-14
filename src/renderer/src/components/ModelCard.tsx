@@ -1,11 +1,11 @@
 import React, { useState, useEffect, useRef, useMemo } from 'react'
 import { useStore } from '../store/useStore'
-import { Play, Square, Settings, ChevronDown, MoreVertical, Copy, Trash, Download, Globe, Server, AlertCircle, Gauge, Loader2 } from 'lucide-react'
+import { Play, Square, Settings, ChevronDown, MoreVertical, Copy, Trash, Download, Globe, AlertCircle, Gauge, Loader2 } from 'lucide-react'
 import type { CardState } from '../../../shared/types'
 import CmdParamsEditor from './CmdParamsEditor'
 interface Props { card: CardState }
 export default function ModelCard({ card }: Props) {
-  const { toggleCardExpanded, updateCard, setCardStatus, removeCard, backends, activeBackend, commandsSchema, setShowCreateModal, models, modelDefaults, ggufMetadata } = useStore()
+  const { toggleCardExpanded, setCardStatus, removeCard, backends, activeBackend, commandsSchema, setShowCreateModal, models, modelDefaults, ggufMetadata } = useStore()
 
   // Compute the EFFECTIVE context that will be passed to
   // llama.cpp on the next run. Precedence:
@@ -73,7 +73,6 @@ export default function ModelCard({ card }: Props) {
   const isRunning = card.status === 'running'
   const isStopping = card.status === 'stopping'
   const isExpanded = card.expanded
-  const launchMode = card.template.launchMode || 'chat'
   const modelExists = !card.template.modelPath || models.some(g => g.models.some(m => m.path === card.template.modelPath))
   useEffect(() => {
     function handleClickOutside(e: MouseEvent) {
@@ -209,11 +208,10 @@ export default function ModelCard({ card }: Props) {
         else args.push('--parallel', String(effectiveParallel))
       }
     }
-    // If not set, llama-server uses the model's native context length (ctx=0).
-    if (launchMode === 'api' && !args.includes('--no-webui')) {
-      args.push('--no-webui')
-    }
-    const openBrowser = launchMode === 'chat'
+    // The bundled webui is always available now (Chat UI/API Only per-
+    // Template switch was removed) — "Open Chat" is always offered once
+    // running, so --no-webui is never passed.
+    const openBrowser = useStore.getState().modelDefaults?.autoOpenChatUI === true
     const res = await window.api.runModel({
       id: card.template.id,
       name: card.template.name,
@@ -221,7 +219,8 @@ export default function ModelCard({ card }: Props) {
       exe: targetBackend.exe,
       args,
       openBrowser,
-      port: card.template.serverPort || 8080
+      port: card.template.serverPort || 8080,
+      ignoreBaseUrlOverride: card.template.args?.['__ignoreBaseUrlOverride'] === true
     })
     if (res.success) setCardStatus(card.template.id, 'running', res.pid, res.port)
     else { alert(`Failed to run: ${res.error}`); setCardStatus(card.template.id, 'error') }
@@ -239,10 +238,6 @@ export default function ModelCard({ card }: Props) {
     const t = { ...card.template, id: Date.now().toString(), name: `${card.template.name} (Copy)` }
     window.api.saveTemplate(t).then(res => { if (res.success) useStore.getState().addCard(t) })
     setShowMenu(false)
-  }
-  function setLaunchMode(mode: 'chat' | 'api') {
-    updateCard(card.template.id, { launchMode: mode })
-    window.api.saveTemplate({ ...card.template, launchMode: mode })
   }
   return (
     <div className={`model-card ${isRunning ? 'running' : ''}`} style={{ overflow: 'visible' }}>
@@ -323,7 +318,7 @@ export default function ModelCard({ card }: Props) {
         </span>
         <span className="card-tag">
           <span className={`status-dot ${isRunning ? 'running' : isStopping ? 'stopping' : 'idle'}`} />
-          {isRunning ? `Port ${card.tempPort || card.template.serverPort || 8080}${useStore.getState().baseUrlOverride?.enabled ? ' (Overridden)' : ''}` : isStopping ? 'Stopping…' : 'Ready'}
+          {isRunning ? `Port ${card.tempPort || card.template.serverPort || 8080}${(useStore.getState().baseUrlOverride?.enabled && card.template.args?.['__ignoreBaseUrlOverride'] !== true) ? ' (Overridden)' : ''}` : isStopping ? 'Stopping…' : 'Ready'}
         </span>
         {card.template.tags?.map(t => (
           <span key={t} className="card-tag" style={{ background: 'var(--surface-2, rgba(255,255,255,0.05))', border: '1px solid var(--border)' }}>
@@ -338,35 +333,17 @@ export default function ModelCard({ card }: Props) {
         </div>
       )}
       {}
-      <div className="card-launch-mode">
-        <button
-          className={`launch-mode-btn ${launchMode === 'chat' ? 'active' : ''}`}
-          onClick={() => setLaunchMode('chat')}
-          title="Open chat web UI when started"
-          disabled={isRunning}
-        >
-          <Globe size={12} /> Chat UI
-        </button>
-        <button
-          className={`launch-mode-btn ${launchMode === 'api' ? 'active' : ''}`}
-          onClick={() => setLaunchMode('api')}
-          title="Serve API only, no web UI"
-          disabled={isRunning}
-        >
-          <Server size={12} /> API Only
-        </button>
-      </div>
       <div className="card-actions">
         <button
           className={`btn card-run-btn ${isRunning ? 'btn-danger' : 'btn-primary'}`}
           onClick={handleRunToggle}
           disabled={isStopping || (!isRunning && !modelExists)}
-          style={isRunning && launchMode === 'chat' ? { flex: 0.5 } : {}}
+          style={isRunning ? { flex: 0.5 } : {}}
           title={isStopping ? 'Stopping… waiting for the port to be released' : (!isRunning && !modelExists ? 'Cannot start: model file is missing' : '')}
         >
           {isStopping ? <><Loader2 size={14} className="spin" /> Stopping…</> : isRunning ? <><Square size={14} /> Stop</> : <><Play size={14} /> Start</>}
         </button>
-        {isRunning && launchMode === 'chat' && (
+        {isRunning && (
           <button
             className="btn card-run-btn"
             style={{ flex: 0.5, background: 'var(--accent)', color: 'var(--accent-fg)' }}
@@ -390,7 +367,7 @@ export default function ModelCard({ card }: Props) {
       </div>
       <div className={`card-expanded ${isExpanded ? 'open' : ''}`}>
         <div className="expanded-inner">
-          <CmdParamsEditor templateId={card.template.id} args={card.template.args} launchMode={card.template.launchMode} />
+          <CmdParamsEditor templateId={card.template.id} args={card.template.args} />
         </div>
       </div>
     </div>

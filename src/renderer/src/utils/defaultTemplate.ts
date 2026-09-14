@@ -123,7 +123,6 @@ export function buildDefaultTemplate(
     backendVersion: backendName,
     backendKey,
     args,
-    launchMode: 'chat',
     createdAt: new Date().toISOString(),
     updatedAt: new Date().toISOString()
   }

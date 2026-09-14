@@ -104,8 +104,25 @@ export default function App() {
           setMainBackendFolder(mb.isDefault ? null : mb.folder)
         } catch {}
         if (backendsData.length > 0) {
-          setActiveBackend(backendsData[0])
-          const cmds = await window.api.getCommands(backendsData[0].backendKey)
+          let initialBackend = backendsData[0]
+          try {
+            const persisted = await window.api.getGlobalBackend()
+            if (persisted) {
+              const match = backendsData.find(b => b.backendKey === persisted.backendKey && b.name === persisted.backendVersion)
+              if (match) initialBackend = match
+            }
+          } catch {}
+          setActiveBackend(initialBackend)
+          // Keep settings.globalBackend in sync even when nothing was
+          // persisted yet (fresh install, or the persisted backend is gone)
+          // — otherwise the MCP layer's own backend resolution never learns
+          // what the renderer is actually using until the user happens to
+          // click "Set Active" explicitly, and falls back to a generic
+          // "newest llama.cpp" guess that can silently pick the wrong fork
+          // (see Sidebar.tsx/SettingsView.tsx's switchBackend for the other
+          // half of this sync).
+          window.api.setGlobalBackend({ backendKey: initialBackend.backendKey, backendVersion: initialBackend.name }).catch(() => {})
+          const cmds = await window.api.getCommands(initialBackend.backendKey)
           if (cmds) setCommandsSchema(cmds)
         } else {
           const cmds = await window.api.getCommands('')
@@ -150,6 +167,31 @@ export default function App() {
       })
     } catch {}
 
+    // Reconcile the Templates list whenever the main process writes a
+    // template outside of this window's own action — in particular
+    // MCP/skill-triggered template-create/-duplicate/-edit, which write
+    // straight to disk with no renderer round-trip, so without this the new
+    // or edited Template stayed invisible until the app was restarted.
+    // Merges by id rather than replacing `cards` wholesale, so a currently
+    // running card's live status/expanded/tempPort survive the refresh.
+    try {
+      window.api?.onTemplatesChanged?.(async () => {
+        try {
+          const templates = await window.api.listTemplates() as Template[]
+          const { cards: currentCards, addCard: add, updateCard: update, removeCard: remove } = useStore.getState()
+          const onDiskIds = new Set(templates.map(t => t.id))
+          for (const c of currentCards) {
+            if (!onDiskIds.has(c.template.id)) remove(c.template.id)
+          }
+          const cardIds = new Set(useStore.getState().cards.map(c => c.template.id))
+          for (const t of templates) {
+            if (cardIds.has(t.id)) update(t.id, t)
+            else add(t)
+          }
+        } catch {}
+      })
+    } catch {}
+
     window.api.onModelError((data) => {
       useStore.getState().setCardStatus(data.id, 'error')
       alert(`Model execution error:\n\n${data.error}`)
@@ -158,6 +200,17 @@ export default function App() {
       const s = useStore.getState()
       const card = s.cards.find(c => c.template.id === data.id)
       if (card && card.status === 'running') s.setCardStatus(data.id, 'idle')
+    })
+    // A model can be started by something other than this window's own
+    // Start button — MCP/skill-triggered template-action/switch-template
+    // calls straight into the main process with no renderer round-trip —
+    // so without this, a card kept showing "idle" (Start enabled) for a
+    // Template that was actually already running, and clicking Start then
+    // failed with "Already running".
+    window.api?.onModelStarted?.((data) => {
+      const s = useStore.getState()
+      const card = s.cards.find(c => c.template.id === data.id)
+      if (card && card.status !== 'running') s.setCardStatus(data.id, 'running', data.pid, data.port)
     })
 
     // Refresh the backends list when the main process reports a change

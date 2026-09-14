@@ -105,10 +105,85 @@ export interface Template {
   serverPort: number
   args: Record<string, string | number | boolean | null>
   tags?: string[]
+  // Deprecated: the per-Template Chat UI/API Only switch was removed (the
+  // bundled webui is always available, "Open Chat" is always offered once
+  // running — see settings.modelDefaults.autoOpenChatUI for the one
+  // remaining auto-open control). Kept only so old Templates that still
+  // have this field don't fail to parse; no longer read anywhere.
   launchMode?: 'chat' | 'api'
   createdAt: string
   updatedAt: string
+  // First-poll and mean generation speed (tokens/sec) observed during the
+  // most recently ENDED perf session for this template. Null until the
+  // template has completed at least one tracked session; a template that
+  // ran but never produced a generation data point (no completions sent)
+  // keeps these null rather than 0, so callers can distinguish "no data
+  // yet" from "measured zero".
+  lastSessionFirstTps?: number | null
+  lastSessionAvgTps?: number | null
+  lastSessionAt?: number | null
+  // Last N benchmark runs for this Template (N = settings.mcp.maxBenchmarkHistory),
+  // newest first, trimmed on write. See mcpControl.ts's toolBenchmark/
+  // toolDisplayBenchmark.
+  benchmarkHistory?: BenchmarkRecord[]
   _file?: string
+}
+
+export interface BenchmarkRecord {
+  tag: string          // ISO date-time the benchmark ran, doubles as its identifier
+  ranAt: number         // epoch ms, same instant as `tag`
+  results: { prompt: string; kind: 'cold' | 'warm'; ttftMs: number; totalMs: number; tokensPredicted: number; genTps: number }[]
+  measurementConditions: string
+  error: string | null
+  // The Template's full args dict AT THE TIME this benchmark ran — what
+  // display-benchmark's diff/full modes compare against the Template's
+  // CURRENT args.
+  paramsSnapshot: Record<string, any>
+}
+
+// MCP tool identifiers exposed by the control layer. Kept as a single list
+// (rather than scattering string literals) so Settings, the control API and
+// the skill generator all enumerate the exact same set.
+export const MCP_TOOL_IDS = [
+  'template-action',
+  'info-templates',
+  'info-models',
+  'info-backends',
+  'info-tracked-backends',
+  'template-duplicate',
+  'template-create',
+  'template-edit',
+  'total-ram',
+  'free-ram',
+  'apply-parameters-preset',
+  'display-parameters-common',
+  'display-parameters-full',
+  'display-preview',
+  'display-ts',
+  'benchmark',
+  'display-benchmark',
+  'switch-template'
+] as const
+export type McpToolId = typeof MCP_TOOL_IDS[number]
+
+export interface McpSettings {
+  enabled: boolean
+  // When true, an MCP-capable client connects over HTTP instead of the
+  // skill being written to disk (mutually exclusive with skillMode: the
+  // live protocol server is the "no skill" path).
+  skillMode: boolean
+  port: number
+  // Random per-install token, sent as a bearer/header credential by both
+  // the MCP transport and the skill scripts, so a skill script left behind
+  // by a previous install (or another local process) can't drive the
+  // control API without it.
+  token: string
+  tools: Record<McpToolId, boolean>
+  // Only Templates tagged "MCP-made" can be changed by template-edit.
+  restrictEditToMcpMade: boolean
+  // How many of a Template's most recent benchmark runs to keep (1-20).
+  // Older ones are trimmed on write. See toolBenchmark/toolDisplayBenchmark.
+  maxBenchmarkHistory: number
 }
 export interface ReleaseAsset {
   name: string
@@ -280,6 +355,12 @@ export interface ModelDefaultsSettings {
   // expert weights onto CPU (--moe-cpu-layers). When 'max', the "Maximum
   // available" AutoFill option is disabled (it would conflict).
   moeOffloadStrategy?: 'offload' | 'max'
+  // "Open Chat UI automatically on Template startup" — off by default. The
+  // per-Template Chat UI/API Only switch was removed: the bundled webui is
+  // always available, "Open Chat" is always offered once a Template is
+  // running, and this is the only remaining control over auto-popping it
+  // open on startup.
+  autoOpenChatUI?: boolean
 }
 
 // Base URL Override settings.

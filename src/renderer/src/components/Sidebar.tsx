@@ -15,6 +15,7 @@ export default function Sidebar() {
   // concern on the run-model path).
   async function switchBackend(b: BackendVersion) {
     setActiveBackend(b)
+    window.api.setGlobalBackend({ backendKey: b.backendKey, backendVersion: b.name }).catch(() => {})
     const cmds = await window.api.getCommands(b.backendKey)
     if (cmds) setCommandsSchema(cmds)
   }

@@ -2,6 +2,7 @@ import { app, shell, BrowserWindow } from 'electron'
 import { join } from 'path'
 import { electronApp, optimizer, is } from '@electron-toolkit/utils'
 import { registerIpcHandlers, cleanupAllProcesses, getRunningProcessCount } from './ipc'
+import { shutdownMcpLayer } from './mcpServer'
 import { existsSync } from 'fs'
 function resolveIcon(): string | undefined {
   const candidates = [
@@ -76,6 +77,7 @@ app.on('window-all-closed', () => {
 let _cleaningUp = false
 app.on('before-quit', (event) => {
   if (_cleaningUp) return
+  shutdownMcpLayer().catch(() => {})
   if (getRunningProcessCount() > 0) {
     _cleaningUp = true
     event.preventDefault()

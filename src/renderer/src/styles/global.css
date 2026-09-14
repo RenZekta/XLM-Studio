@@ -669,10 +669,6 @@ input[type="number"] {
 .hub-dl-strip-bar { width: 120px; height: 3px; background: rgba(255,255,255,.3); border-radius: 99px; overflow: hidden; flex-shrink: 0; }
 .hub-dl-strip-fill { height: 100%; background: white; border-radius: 99px; transition: width 300ms linear; }
 .hub-dl-strip-pct { font-size: 11px; opacity: .8; min-width: 30px; text-align: right; }
-.card-launch-mode {
-  display: flex; gap: 4px; padding: 0 18px 12px;
-}
-.launch-mode-row { display: flex; gap: 6px; margin-bottom: 6px; }
 .launch-mode-btn {
   display: inline-flex; align-items: center; gap: 5px;
   padding: 5px 12px; border-radius: 99px;
@@ -1610,6 +1606,17 @@ input[type="number"] {
   cursor: pointer;
   transition: color 180ms ease;
   white-space: nowrap;
+  /* Bug fix: with no explicit focus styling, clicking a button left the
+     browser's OWN default focus outline in place — drawn around the
+     button's box, then unevenly clipped by .segmented-toggle's
+     overflow:hidden (which crops it flush on the sides but not the same way
+     top/bottom), looking like a mismatched, off-color border and making the
+     centered label look off-center. An inset box-shadow stays inside the
+     button's own box instead, so it can never be clipped or look uneven. */
+  outline: none;
+}
+.segmented-toggle-btn:focus-visible {
+  box-shadow: inset 0 0 0 2px var(--accent);
 }
 .segmented-toggle-btn.active {
   color: #ffffff;

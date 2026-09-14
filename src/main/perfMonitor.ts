@@ -43,6 +43,7 @@ let SESSIONS_DIR = ''
 let INDEX_PATH = ''
 let getLiveTemplateName: (templateId: string) => string | undefined = () => undefined
 let getMaxSessions: () => number = () => 20
+let onSessionEnded: ((templateId: string, summary: { firstTps: number | null; avgTps: number | null; endedAt: number }) => void) | undefined
 
 // Active (currently running) sessions, keyed by templateId.
 const active = new Map<string, {
@@ -203,11 +204,17 @@ function poll(templateId: string) {
 export function initPerfMonitor(appRoot: string, opts: {
   getLiveTemplateName: (templateId: string) => string | undefined
   getMaxSessions: () => number
+  // Called once a session ends, with the first-poll and mean generation
+  // tok/s observed during it (or null for either if no generation data
+  // point was ever recorded). Used to persist "last session" speed stats
+  // onto the Template itself (see Template.lastSessionFirstTps/AvgTps).
+  onSessionEnded?: (templateId: string, summary: { firstTps: number | null; avgTps: number | null; endedAt: number }) => void
 }) {
   SESSIONS_DIR = join(appRoot, 'perf-sessions')
   INDEX_PATH = join(SESSIONS_DIR, 'index.json')
   getLiveTemplateName = opts.getLiveTemplateName
   getMaxSessions = opts.getMaxSessions
+  onSessionEnded = opts.onSessionEnded
   if (!existsSync(SESSIONS_DIR)) { try { mkdirSync(SESSIONS_DIR, { recursive: true }) } catch {} }
 }
 
@@ -251,6 +258,16 @@ export function stopTracking(templateId: string) {
   })
   saveIndex(index)
   pruneHistory()
+  // First-detected and average generation tok/s for this session, for
+  // display-ts / the templates list. Null (never 0) when no generation
+  // point was ever recorded, so callers can tell "no data" from "measured
+  // zero" — e.g. a session that only ever received an empty/aborted prompt.
+  if (onSessionEnded) {
+    const points = entry.session.genPoints
+    const firstTps = points.length > 0 ? points[0].genTps : null
+    const avgTps = points.length > 0 ? Math.round((points.reduce((sum, p) => sum + p.genTps, 0) / points.length) * 100) / 100 : null
+    try { onSessionEnded(templateId, { firstTps, avgTps, endedAt: entry.session.endedAt as number }) } catch {}
+  }
   broadcast('perf-session-ended', { templateId, sessionId: entry.session.id })
 }
 

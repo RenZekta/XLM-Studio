@@ -92,3 +92,33 @@ export function buildQuickEngineBaseline(opts: {
     '__memOverheadEnabled': false
   }
 }
+
+// The sampling-related CLI flags (temperature/top-p/top-k/min-p/repeat-
+// penalty/presence-penalty). These are a deliberately separate axis from
+// the engine baseline above — set once at Template creation from the
+// starred Sampling Preset, then only ever touched by the user directly or
+// by re-applying a Sampling Preset. Quick/FullAuto/Clean must never modify
+// them (Clean explicitly PRESERVES them — see handleClearPreset in
+// CmdParamsEditor.tsx and toolApplyParametersPreset in mcpControl.ts, which
+// mirrors it).
+export const SAMPLING_KEYS = ['--temperature', '--top-p', '--top-k', '--min-p', '--repeat-penalty', '--presence-penalty']
+
+// Builds the sampling args a brand-new Template should start with, from
+// whichever Sampling Preset is currently starred (falling back to the first
+// one if none is starred) — the exact same mapping CreateModal.tsx's lazy
+// initializer uses. Returns {} if there are no sampling presets configured
+// at all. Shared so template-create (mcpControl.ts) can't drift from what
+// creating a Template through the UI actually seeds.
+export function seedSamplingArgsFromPreset(samplingPresets: any[] | undefined): Record<string, any> {
+  const seeded: Record<string, any> = {}
+  const starred = samplingPresets?.find((p: any) => p.isStarred) || samplingPresets?.[0]
+  const values = starred?.values
+  if (!values) return seeded
+  if (values.temperature !== undefined) seeded['--temperature'] = values.temperature
+  if (values.topK !== undefined) seeded['--top-k'] = values.topK
+  if (values.topP !== undefined) seeded['--top-p'] = values.topP
+  if (values.minP !== undefined) seeded['--min-p'] = values.minP
+  if (values.repeatPenalty !== undefined) seeded['--repeat-penalty'] = values.repeatPenalty
+  if (values.presencePenalty !== undefined) seeded['--presence-penalty'] = values.presencePenalty
+  return seeded
+}

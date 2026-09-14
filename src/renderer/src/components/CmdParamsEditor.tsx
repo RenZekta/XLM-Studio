@@ -13,7 +13,9 @@ import SegmentedToggle from './SegmentedToggle'
 import SamplingPresets from './SamplingPresets'
 import { useVramBudget, computeAutoFillContext, estimateMoeDefaultContext } from '../hooks/useVramBudget'
 import { formatWithSpaces, CONTEXT_POWER_OF_TWO_STEPS, snapToNearestPowerOfTwo } from '../utils/contextFormat'
-import { buildQuickEngineBaseline, computeRecommendedThreads, defaultKvQuantFor, defaultKvQuantVFor } from '../utils/presetBaselines'
+import { buildQuickEngineBaseline, computeRecommendedThreads, defaultKvQuantFor, defaultKvQuantVFor, SAMPLING_KEYS } from '../../../shared/presetBaselines'
+import { COMMON_PARAM_FLAGS as COMMON_VISIBLE } from '../../../shared/commonParams'
+import { applyNgramModifierToggle } from '../../../shared/specToggles'
 
 const iconMap: Record<string, React.ReactNode> = {
   Box: <Box size={14} />, Cpu: <Cpu size={14} />, Zap: <Zap size={14} />,
@@ -32,7 +34,6 @@ const CUSTOM_PARAMS = ['--model', '--port', '--host', '--api-key', '--mmproj', '
 // touched by the Quick/FullAuto/Clear engine presets. Shared list so every
 // place that needs to check "is this a sampling key" (the initial-args
 // detection, Clear's wipe, etc.) agrees on exactly the same set.
-const SAMPLING_KEYS = ['--temperature', '--top-p', '--top-k', '--min-p', '--repeat-penalty', '--presence-penalty']
 
 // --reasoning-preserve support detection. There's no GGUF
 // metadata field that directly says "this template supports preserving
@@ -69,10 +70,6 @@ interface Props {
   // provided (e.g. ModelCard's usage, which has no such split), the header
   // renders inline in its normal position as before.
   headerPortalTarget?: HTMLElement | null
-  // The actual launch command (see ModelCard.tsx's handleRunToggle)
-  // pushes --no-webui when launchMode is 'api', on top of the stored args —
-  // pass it through so the preview reflects that too.
-  launchMode?: 'chat' | 'api'
 }
 
 // Speculative-decoding tier table — mirrors the backend definitions in
@@ -91,12 +88,6 @@ const SPEC_TIER_DEFS: SpecTierDef[] = [
 ]
 
 // Params visible in "Common" view mode.
-const COMMON_VISIBLE = new Set([
-  '--ctx-size', '--threads', '--gpu-layers', '--batch-size', '--ubatch-size',
-  '--parallel', '--flash-attn', '--temperature', '--top-p', '--min-p', '--top-k',
-  '--load-mode', '--cache-type-k', '--cache-type-v', '--kv-offload',
-  '--kv-unified', '--keep', '--seed'
-])
 
 // Reusable on/off block for a stackable n-gram speculative-decoding
 // modifier (ngram-map-k4v, ngram-mod) — a toggle that, when on, reveals a
@@ -136,7 +127,7 @@ function NgramModifierBlock({ title, flagPrefix, enabled, onToggle, disabled, fi
   )
 }
 
-export default function CmdParamsEditor({ templateId, args, onChange, modelPathFallback, serverPortFallback, disabled: disabledProp, headerPortalTarget, launchMode }: Props) {
+export default function CmdParamsEditor({ templateId, args, onChange, modelPathFallback, serverPortFallback, disabled: disabledProp, headerPortalTarget }: Props) {
   const {
     commandsSchema, updateCard, cards, models, cpuInfo,
     detectedSpeculation, setDetectedSpeculation, markSpeculationApplied,
@@ -274,6 +265,10 @@ export default function CmdParamsEditor({ templateId, args, onChange, modelPathF
   // Per-preset context-fill toggles + memory overhead.
   // (Moved up from below so the YaRN auto-scale logic right after it can see it.)
   const ignoreCtxOverride = args['__ignoreCtxOverride'] === true
+  // Per-preset "Ignore Base URL Override" — same shape as ignoreCtxOverride:
+  // when ON, this preset launches on its own --port/--host/--api-key and is
+  // never redirected onto the global Base URL Override's port.
+  const ignoreBaseUrlOverride = args['__ignoreBaseUrlOverride'] === true
   // Per-template "Automatic YaRN scaling control" — when on, unlocks
   // the Context Size slider up to 2 097 152 and auto-computes YaRN RoPE
   // scaling to reach whatever context the user picks.
@@ -372,7 +367,7 @@ export default function CmdParamsEditor({ templateId, args, onChange, modelPathF
     if (!blockCount || blockCount <= 0) return
     const curArgs = argsRef.current
     if (curArgs['--gpu-layers'] === undefined || curArgs['--gpu-layers'] === '') {
-      commit({ ...curArgs, '--gpu-layers': gpuLayersMax })
+      commit({ ...curArgs, '--gpu-layers': gpuLayersMax }, { silent: true })
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [disabled, derivedPresetMode, isMoe, blockCount, gpuLayersMax])
@@ -404,7 +399,7 @@ export default function CmdParamsEditor({ templateId, args, onChange, modelPathF
     } else {
       target = Math.min(meta.contextLength, 32768)
     }
-    commit({ ...curArgs, '--ctx-size': target })
+    commit({ ...curArgs, '--ctx-size': target }, { silent: true })
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [disabled, derivedPresetMode, isMoe, meta?.contextLength, vramBudget?.freeVRAMMB, vramBudget?.freeRAMMB, modelSizeMB, kvQuantK, kvQuantV, mmprojEnabled, mmprojSizeMB])
 
@@ -442,7 +437,7 @@ export default function CmdParamsEditor({ templateId, args, onChange, modelPathF
         '--rope-scaling': 'yarn',
         '--rope-scale': roundedScale,
         '--yarn-orig-ctx': nativeCtx
-      })
+      }, { silent: true })
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [effectiveYarnAutoScale, globalYarnUpscale, currentCtx, contextLength, disabled, modelDefaults.autoFitContextLength])
@@ -487,7 +482,7 @@ export default function CmdParamsEditor({ templateId, args, onChange, modelPathF
       if (curArgs['--moe-cpu-layers'] !== cpuLayers) { newArgs['--moe-cpu-layers'] = cpuLayers; changed = true }
       if (curArgs['--gpu-layers'] !== autoFillResult.maxLayers) { newArgs['--gpu-layers'] = autoFillResult.maxLayers; changed = true }
     }
-    if (changed) commit(newArgs)
+    if (changed) commit(newArgs, { silent: true })
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [autoFillResult?.context, autoFillResult?.layers, autoFillResult?.maxLayers, disabled, isMoe, modelDefaults.moeOffloadStrategy])
 
@@ -542,18 +537,18 @@ export default function CmdParamsEditor({ templateId, args, onChange, modelPathF
     const curArgs = argsRef.current
     if (mmprojOn && detectedMmproj) {
       if (curArgs['--mmproj'] !== detectedMmproj.path) {
-        commit({ ...curArgs, '--mmproj': detectedMmproj.path })
+        commit({ ...curArgs, '--mmproj': detectedMmproj.path }, { silent: true })
       }
     } else if (!mmprojManuallyToggled && !detectedMmproj && curArgs['--mmproj'] !== undefined) {
       // No mmproj detected + not manually toggled → remove the --mmproj arg.
       const newArgs = { ...curArgs }
       delete newArgs['--mmproj']
-      commit(newArgs)
+      commit(newArgs, { silent: true })
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [detectedMmproj, disabled, mmprojOn, mmprojManuallyToggled])
 
-  function commit(newArgs: Record<string, any>) {
+  function commit(newArgs: Record<string, any>, opts?: { silent?: boolean }) {
     // Multiple mount-time auto-apply effects (mmproj detection,
     // MTP/speculation detection, Jinja auto-enable, etc.) can become ready
     // and fire within the same synchronous effect flush. Each one calls
@@ -578,9 +573,10 @@ export default function CmdParamsEditor({ templateId, args, onChange, modelPathF
       // (typing in a number field, dragging a slider) settle to one write.
       if (saveTimeoutRef.current) clearTimeout(saveTimeoutRef.current)
       const idToSave = templateId
+      const silent = !!opts?.silent
       saveTimeoutRef.current = setTimeout(() => {
         const latestCard = useStore.getState().cards.find(c => c.template.id === idToSave)
-        if (latestCard) window.api?.saveTemplate?.(latestCard.template).catch(() => {})
+        if (latestCard) window.api?.saveTemplate?.(latestCard.template, silent ? { silentSync: true } : undefined).catch(() => {})
       }, 400)
     }
   }
@@ -715,7 +711,7 @@ export default function CmdParamsEditor({ templateId, args, onChange, modelPathF
     newArgs['--spec-draft-n-max'] = tierDef.draftMax
     newArgs['--spec-draft-n-min'] = tierDef.draftMin
     newArgs['--spec-draft-p-min'] = tierDef.draftPMin
-    commit(newArgs)
+    commit(newArgs, { silent: true })
   }, [effectiveModelPath, disabled, detectedSpeculation, args])
 
   // Selecting a primary method (Off / Native MTP / Draft Model / EAGLE3 /
@@ -753,38 +749,8 @@ export default function CmdParamsEditor({ templateId, args, onChange, modelPathF
     commit(newArgs); if (templateId) markSpeculationApplied(templateId, true)
   }
   function setNgramModifier(which: 'map-k4v' | 'mod', on: boolean) {
-    const newArgs = { ...args }
+    const newArgs = applyNgramModifierToggle(args, which, on)
     newArgs['__spec_manual'] = true
-    const nextMapK4v = which === 'map-k4v' ? on : ngramMapK4vOn
-    const nextMod = which === 'mod' ? on : ngramModOn
-    const value = buildSpecTypeValue(currentSpecTierDef.flag, nextMapK4v, nextMod)
-    if (value) newArgs['--spec-type'] = value
-    else delete newArgs['--spec-type']
-    // Seed each modifier's own llama.cpp defaults the first time it's turned
-    // on; turning a modifier off deletes its flags too, since --spec-type no
-    // longer references them.
-    if (which === 'map-k4v') {
-      if (on) {
-        setIfAbsent(newArgs, '--spec-ngram-map-k4v-size-n', 12)
-        setIfAbsent(newArgs, '--spec-ngram-map-k4v-size-m', 48)
-        setIfAbsent(newArgs, '--spec-ngram-map-k4v-min-hits', 1)
-      } else {
-        delete newArgs['--spec-ngram-map-k4v-size-n']
-        delete newArgs['--spec-ngram-map-k4v-size-m']
-        delete newArgs['--spec-ngram-map-k4v-min-hits']
-      }
-    }
-    if (which === 'mod') {
-      if (on) {
-        setIfAbsent(newArgs, '--spec-ngram-mod-n-match', 24)
-        setIfAbsent(newArgs, '--spec-ngram-mod-n-min', 48)
-        setIfAbsent(newArgs, '--spec-ngram-mod-n-max', 64)
-      } else {
-        delete newArgs['--spec-ngram-mod-n-match']
-        delete newArgs['--spec-ngram-mod-n-min']
-        delete newArgs['--spec-ngram-mod-n-max']
-      }
-    }
     commit(newArgs)
   }
 
@@ -814,7 +780,7 @@ export default function CmdParamsEditor({ templateId, args, onChange, modelPathF
     if (disabled || !jinjaOn) return
     const curArgs = argsRef.current
     if (curArgs['--jinja'] !== true) {
-      commit({ ...curArgs, '--jinja': true })
+      commit({ ...curArgs, '--jinja': true }, { silent: true })
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [nativeChatTemplate, jinjaOn, disabled])
@@ -882,7 +848,7 @@ export default function CmdParamsEditor({ templateId, args, onChange, modelPathF
     if (disabled || !reasoningPreserveSupported) return
     const curArgs = argsRef.current
     if (curArgs['--reasoning-preserve'] === undefined) {
-      commit({ ...curArgs, '--reasoning-preserve': true })
+      commit({ ...curArgs, '--reasoning-preserve': true }, { silent: true })
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [disabled, reasoningPreserveSupported])
@@ -897,7 +863,7 @@ export default function CmdParamsEditor({ templateId, args, onChange, modelPathF
     if (curArgs['--reasoning-preserve'] !== undefined) {
       const newArgs = { ...curArgs }
       delete newArgs['--reasoning-preserve']
-      commit(newArgs)
+      commit(newArgs, { silent: true })
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [disabled, reasoningPreserveSupported])
@@ -915,7 +881,7 @@ export default function CmdParamsEditor({ templateId, args, onChange, modelPathF
     if (disabled) return
     const curArgs = argsRef.current
     if (curArgs['--load-mode'] === undefined || curArgs['--load-mode'] === '') {
-      commit({ ...curArgs, '--load-mode': 'mmap+mlock' })
+      commit({ ...curArgs, '--load-mode': 'mmap+mlock' }, { silent: true })
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [disabled])
@@ -973,7 +939,7 @@ export default function CmdParamsEditor({ templateId, args, onChange, modelPathF
       newArgs['--cache-type-v'] = defaultKvQuantV
       changed = true
     }
-    if (changed) commit(newArgs)
+    if (changed) commit(newArgs, { silent: true })
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [disabled, defaultKvQuantK, defaultKvQuantV, commandsSchema, activeBackend?.backendKey])
 
@@ -1306,7 +1272,7 @@ export default function CmdParamsEditor({ templateId, args, onChange, modelPathF
   // regardless of what's in the template's args — see run-model's "ALWAYS
   // update the --port argument" comment); host/api-key only apply when their
   // own sub-toggle is also on.
-  const baseUrlOverrideActive = !!baseUrlOverride?.enabled
+  const baseUrlOverrideActive = !!baseUrlOverride?.enabled && !ignoreBaseUrlOverride
   const previewEffectivePort = baseUrlOverrideActive
     ? (baseUrlOverride.port || 1234)
     : (card?.template.serverPort || serverPortFallback || 8080)
@@ -1342,7 +1308,6 @@ export default function CmdParamsEditor({ templateId, args, onChange, modelPathF
     runtimeArgs['--port'] = previewEffectivePort
     if (hostOverrideActive) runtimeArgs['--host'] = '0.0.0.0'
     if (apiKeyOverrideActive) runtimeArgs['--api-key'] = baseUrlOverride.apiKey
-    if (launchMode === 'api' && runtimeArgs['--no-webui'] === undefined) runtimeArgs['--no-webui'] = true
     return runtimeArgs
   }
 
@@ -1390,7 +1355,7 @@ export default function CmdParamsEditor({ templateId, args, onChange, modelPathF
     })
     return parts
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [args, ignoreCtxOverride, autoCtxFill, cards, templateId, modelPathFallback, serverPortFallback, previewEffectiveCtx, ctxOverriddenInPreview, previewEffectiveParallel, parallelOverriddenInPreview, previewEffectivePort, portOverriddenInPreview, hostOverrideActive, apiKeyOverrideActive, baseUrlOverride, isMoe, modelDefaults, launchMode])
+  }, [args, ignoreCtxOverride, ignoreBaseUrlOverride, autoCtxFill, cards, templateId, modelPathFallback, serverPortFallback, previewEffectiveCtx, ctxOverriddenInPreview, previewEffectiveParallel, parallelOverriddenInPreview, previewEffectivePort, portOverriddenInPreview, hostOverrideActive, apiKeyOverrideActive, baseUrlOverride, isMoe, modelDefaults])
 
   // Plain-text version of the preview for the copy button.
   const cmdPreviewText = useMemo(() => {
@@ -1404,7 +1369,7 @@ export default function CmdParamsEditor({ templateId, args, onChange, modelPathF
     })
     return parts.join(' ')
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [args, ignoreCtxOverride, autoCtxFill, cards, templateId, modelPathFallback, serverPortFallback, previewEffectiveCtx, previewEffectiveParallel, previewEffectivePort, hostOverrideActive, apiKeyOverrideActive, baseUrlOverride, isMoe, modelDefaults, launchMode])
+  }, [args, ignoreCtxOverride, ignoreBaseUrlOverride, autoCtxFill, cards, templateId, modelPathFallback, serverPortFallback, previewEffectiveCtx, previewEffectiveParallel, previewEffectivePort, hostOverrideActive, apiKeyOverrideActive, baseUrlOverride, isMoe, modelDefaults])
 
   // Vertical-stack preview — same underlying runtime-accurate args as
   // cmdPreviewText above, just formatted one flag per line with backslash
@@ -1425,7 +1390,7 @@ export default function CmdParamsEditor({ templateId, args, onChange, modelPathF
       return `${i === 0 ? '' : '  '}${l}${isLast ? '' : ' \\'}`
     }).join('\n')
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [args, ignoreCtxOverride, autoCtxFill, cards, templateId, modelPathFallback, serverPortFallback, previewEffectiveCtx, previewEffectiveParallel, previewEffectivePort, hostOverrideActive, apiKeyOverrideActive, baseUrlOverride, isMoe, modelDefaults, launchMode])
+  }, [args, ignoreCtxOverride, ignoreBaseUrlOverride, autoCtxFill, cards, templateId, modelPathFallback, serverPortFallback, previewEffectiveCtx, previewEffectiveParallel, previewEffectivePort, hostOverrideActive, apiKeyOverrideActive, baseUrlOverride, isMoe, modelDefaults])
 
   const filteredCategories = useMemo(() => {
     if (!commandsSchema) return []
@@ -1990,6 +1955,30 @@ export default function CmdParamsEditor({ templateId, args, onChange, modelPathF
     </div>
   )
 
+  // ----- Base URL Override block -----
+  const renderBaseUrlOverrideBlock = () => (
+    <div className="spec-widget">
+      <div className="mmproj-widget-title"><Gauge size={15} /> Base URL Override</div>
+      <div className="mmproj-widget-arg">Per-preset override control · --port · --host · --api-key</div>
+      <div className="mmproj-widget-row">
+        <span className="mmproj-widget-label">Ignore Base URL Override</span>
+        <div className="toggle-wrap">
+          <label className="toggle" style={disabled ? { opacity: 0.45, cursor: 'not-allowed' } : {}}>
+            <input type="checkbox" checked={ignoreBaseUrlOverride} onChange={(e) => {
+              commit({ ...args, '__ignoreBaseUrlOverride': e.target.checked })
+            }} disabled={disabled} />
+            <span className="toggle-track"></span><span className="toggle-thumb"></span>
+          </label>
+        </div>
+      </div>
+      {ignoreBaseUrlOverride && (
+        <div style={{ fontSize: 11, color: 'var(--text-muted)', paddingLeft: 4 }}>
+          When ON, this preset launches on its own --port (and its own --host / --api-key, if set) and ignores the global Base URL Override from Overrides.
+        </div>
+      )}
+    </div>
+  )
+
   // ----- Context block: Ignore-Override + AutoFill + Memory Overhead -----
   // (autoFillResult + its effect are computed in the component body above/below)
   const renderContextBlock = () => {
@@ -2301,6 +2290,7 @@ export default function CmdParamsEditor({ templateId, args, onChange, modelPathF
       {headerPortalTarget ? createPortal(headerContent, headerPortalTarget) : headerContent}
       {/* Task 2.1/2.2/2.3: Context block — Ignore-Override + AutoFill + Memory Overhead */}
       {renderContextBlock()}
+      {renderBaseUrlOverrideBlock()}
       {/* Feature 28: Sampling presets manager */}
       <SamplingPresets
         onApply={(values) => {

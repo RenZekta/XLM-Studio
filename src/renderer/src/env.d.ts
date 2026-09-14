@@ -68,7 +68,7 @@ interface LlamaCppApi {
 
   // Templates
   listTemplates: () => Promise<Template[]>
-  saveTemplate: (template: object) => Promise<{ success: boolean; id: string }>
+  saveTemplate: (template: object, opts?: { silentSync?: boolean }) => Promise<{ success: boolean; id: string }>
   deleteTemplate: (id: string) => Promise<{ success: boolean }>
   importTemplate: () => Promise<Template | null>
   exportTemplate: (template: object) => Promise<{ success: boolean }>
@@ -78,10 +78,12 @@ interface LlamaCppApi {
   pickAnyFile: () => Promise<string | null>
 
   // Run model
-  runModel: (opts: { id: string; name: string; backendPath: string; exe: string; args: string[]; openBrowser: boolean; port: number }) => Promise<{ success: boolean; pid?: number; error?: string; port?: number }>
+  runModel: (opts: { id: string; name: string; backendPath: string; exe: string; args: string[]; openBrowser: boolean; port: number; ignoreBaseUrlOverride?: boolean }) => Promise<{ success: boolean; pid?: number; error?: string; port?: number }>
   stopModel: (id: string) => Promise<{ success: boolean; error?: string; alreadyStopped?: boolean }>
   onModelError: (cb: (data: { id: string; error: string }) => void) => void
   onModelExited: (cb: (data: { id: string }) => void) => void
+  onModelStarted: (cb: (data: { id: string; pid?: number; port: number }) => void) => void
+  onTemplatesChanged: (cb: () => void) => void
 
   // HuggingFace
   hfSearch: (query: string, sort?: string, direction?: number) => Promise<HfModelResult[] | { error: string }>
@@ -148,6 +150,12 @@ interface LlamaCppApi {
   // Base URL override
   getBaseUrlOverride: () => Promise<any>
   setBaseUrlOverride: (opts: any) => Promise<{ success: boolean }>
+  getGlobalBackend: () => Promise<{ backendKey: string; backendVersion: string } | null>
+  setGlobalBackend: (backend: { backendKey: string; backendVersion: string } | null) => Promise<{ success: boolean }>
+  getMcpSettings: () => Promise<any>
+  setMcpSettings: (mcp: any) => Promise<{ success: boolean }>
+  addSkillFiles: () => Promise<{ success: boolean; error?: string }>
+  removeSkillFiles: () => Promise<{ success: boolean }>
 
   // Sampling presets
   listSamplingPresets: () => Promise<any[]>
