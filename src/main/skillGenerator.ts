@@ -48,6 +48,8 @@ IMPORTANT — switch-template is lifecycle-only: it starts/stops Templates and r
 
 There is no reliable way for a Template to detect which port/Template it is itself running on. If info-templates shows more than one Template currently active, and you might be one of the models running inside one of them, ask the user which Template you are before calling switch-template. With only one Template active, this ambiguity doesn't arise, so no need to ask.
 
+IMPORTANT — never run benchmark in the background / non-blocking / fire-and-forget (e.g. a "run_in_background" option your tool-calling layer might offer). It stops and restarts servers, possibly including the one serving you right now — running it without waiting for the result risks losing your own connection mid-call. Always wait for it to finish before doing anything else. Benchmarks are also more representative run one at a time, sequentially, rather than several in parallel — that better reflects a model's actual peak throughput unless you specifically intend to measure a multi-model-at-once setup.
+
 ## Available tools
 
 ${toolDocs}

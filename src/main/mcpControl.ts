@@ -176,7 +176,33 @@ async function buildLaunchArgs(template: Template): Promise<{ args: string[]; ct
     if (value !== true) flags.push(String(value))
   }
   if (template.modelPath) flags.push('--model', template.modelPath)
-  if (!flags.includes('--port')) flags.push('--port', String(template.serverPort || 8080))
+  // Base URL Override — port substitution, "Serve on local network"
+  // (--host 0.0.0.0), and API key, mirroring runModelImpl's own application
+  // of these in ipc.ts EXACTLY (including the ignoreBaseUrlOverride escape
+  // hatch). This used to be missing entirely here: the actual spawned
+  // process went through runModelImpl and got the real overridden port
+  // correctly, but display-preview's reconstructed command never applied
+  // this at all, so it kept showing the Template's own raw --port instead
+  // of what was actually listening.
+  const ignoreBaseUrlOverride = raw['__ignoreBaseUrlOverride'] === true
+  const ovr = ignoreBaseUrlOverride ? null : settings.baseUrlOverride
+  const effectivePort = (ovr?.enabled) ? ovr.port : (template.serverPort || 8080)
+  if (!flags.includes('--port')) flags.push('--port', String(effectivePort))
+  else flags[flags.indexOf('--port') + 1] = String(effectivePort)
+  if (ovr?.enabled && ovr.serveOnLocalNetwork) {
+    const hostIdx = flags.indexOf('--host')
+    if (hostIdx !== -1 && hostIdx + 1 < flags.length) flags[hostIdx + 1] = '0.0.0.0'
+    else {
+      const shortHostIdx = flags.indexOf('-h')
+      if (shortHostIdx !== -1 && shortHostIdx + 1 < flags.length) flags[shortHostIdx + 1] = '0.0.0.0'
+      else flags.push('--host', '0.0.0.0')
+    }
+  }
+  if (ovr?.enabled && ovr.apiKeyEnabled && ovr.apiKey) {
+    const keyIdx = flags.indexOf('--api-key')
+    if (keyIdx !== -1 && keyIdx + 1 < flags.length) flags[keyIdx + 1] = ovr.apiKey
+    else flags.push('--api-key', ovr.apiKey)
+  }
   return { args: flags, ctxAutoFitApplied, fitMode }
 }
 
@@ -218,11 +244,11 @@ async function waitForServerReady(port: number, timeoutMs = 10 * 60 * 1000, poll
 // renderer additionally VRAM-fits MoE's context via estimateMoeDefaultContext(),
 // which needs live vramBudget/mmproj UI state not reproduced here; see the
 // leftover-plan doc.
-async function buildQuickBaseline(meta: any, isMoe: boolean, gpuLayersMax: number, backendKey: string | undefined): Promise<Record<string, any>> {
+async function buildQuickBaseline(meta: any, isMoe: boolean, gpuLayersMax: number, backend: { backendKey?: string; name?: string; displayName?: string; exe?: string; path?: string } | undefined): Promise<Record<string, any>> {
   const settings = await D().loadSettings()
   const cpu = await D().getCpuInfo()
   const cpuThreadsOverridePercent = settings.modelDefaults?.cpuThreadsOverrideEnabled ? settings.modelDefaults.cpuThreadsOverridePercent : null
-  const baseline = buildQuickEngineBaseline({ cpuInfo: { physicalCores: cpu.physicalCores }, backendKey, cpuThreadsOverridePercent })
+  const baseline = buildQuickEngineBaseline({ cpuInfo: { physicalCores: cpu.physicalCores }, backendKey: backend?.backendKey, backendInfo: backend, cpuThreadsOverridePercent })
   if (meta?.contextLength && meta.contextLength > 0) {
     baseline['--ctx-size'] = Math.min(meta.contextLength, 32768)
   }
@@ -409,7 +435,7 @@ export async function toolTemplateCreate(args: { name: string; model: string; ba
   const isMoe = !!meta?.isMoe || (meta?.expertCount || 0) > 0
   const settings = await D().loadSettings()
   const baseline: Record<string, any> = { ...seedSamplingArgsFromPreset(settings.samplingPresets) }
-  Object.assign(baseline, await buildQuickBaseline(meta, isMoe, gpuLayersMax, backend.backendKey))
+  Object.assign(baseline, await buildQuickBaseline(meta, isMoe, gpuLayersMax, backend))
 
   baseline['__lastPreset'] = 'quick'
   const usedPorts = new Set(D().listTemplates().map(t => t.serverPort))
@@ -541,7 +567,8 @@ export async function toolApplyParametersPreset(args: { preset: string | number;
     }
     preserved['__ignoreCtxOverride'] = false
     preserved['__autoCtxFill'] = 'off'
-    preserved['__memOverheadEnabled'] = false
+    preserved['__vramOverheadEnabled'] = false
+    preserved['__ramOverheadEnabled'] = false
     preserved['__lastPreset'] = 'clear'
     const patch = { ...t, args: preserved, updatedAt: new Date().toISOString() }
     delete (patch as any)._file
@@ -559,7 +586,7 @@ export async function toolApplyParametersPreset(args: { preset: string | number;
   // silently produced generic q8_0 KV-quant defaults instead of the actual
   // backend's own recommendation (e.g. TurboQuant).
   const backend = await resolveBackend(t)
-  const baseline = await buildQuickBaseline(meta, isMoe, gpuLayersMax, backend.backendKey)
+  const baseline = await buildQuickBaseline(meta, isMoe, gpuLayersMax, backend)
   // MERGE the baseline onto the existing args — matching
   // handleQuickPreset()/handleFullAutoPreset() exactly, which spread the
   // engine baseline onto the CURRENT args rather than replacing them
@@ -1075,7 +1102,7 @@ export interface ToolDef {
 export const TOOL_DEFS: ToolDef[] = [
   {
     name: 'template-action', handler: toolTemplateAction,
-    description: 'Start or stop a Template by name. A "start" call does not return until the model has actually finished loading and is ready to serve a request (polls llama-server\'s health endpoint, up to 10 minutes for large models) — safe to send a prompt immediately after this call returns.',
+    description: 'Start or stop a Template by name. A "start" call does not return until the model has actually finished loading and is ready to serve a request (polls llama-server\'s health endpoint, up to 10 minutes for large models) — safe to send a prompt immediately after this call returns. Mainly useful for managing setups with MULTIPLE Templates (starting one while another stays up, or switching which one is active) — stopping the Template you are yourself running on with no plan to bring it back will disconnect you.',
     params: [
       { name: 'template', type: 'string', required: true, description: 'Template name' },
       { name: 'action', type: '"start" | "stop"', required: true, description: 'What to do' }
@@ -1166,7 +1193,7 @@ export const TOOL_DEFS: ToolDef[] = [
   },
   {
     name: 'benchmark', handler: toolBenchmark,
-    description: 'Benchmark a Template with 3 default prompts (or custom ones): frees the target\'s port (stopping whichever Template is actually occupying it — detected automatically, you do not need to know your own identity), starts the target fresh, sends each prompt to a fresh slot, reports time-to-first-token and tokens/sec per prompt, then restores whichever Template was actually running before the call. The run (results + the Template\'s launch parameters at the time) is saved into that Template\'s benchmark history — see display-benchmark.',
+    description: 'Benchmark a Template with 3 default prompts (or custom ones): frees the target\'s port (stopping whichever Template is actually occupying it — detected automatically, you do not need to know your own identity), starts the target fresh, sends each prompt to a fresh slot, reports time-to-first-token and tokens/sec per prompt, then restores whichever Template was actually running before the call. The run (results + the Template\'s launch parameters at the time) is saved into that Template\'s benchmark history — see display-benchmark. NEVER call this in the background / non-blocking / fire-and-forget (e.g. a client-level "run in background" option) — it stops and restarts servers, including possibly your own; running it without waiting for the result risks the connection being cut out from under you mid-call. Benchmarks are also more representative run one at a time, sequentially, rather than in parallel — that also better reflects a model\'s actual peak throughput unless you specifically intend to measure a multi-model-at-once setup.',
     params: [
       { name: 'template', type: 'string', required: true, description: 'Template to benchmark' },
       { name: 'prompts', type: 'string[]', required: false, description: 'Custom prompts. Omit to use the default 3-prompt test.' }

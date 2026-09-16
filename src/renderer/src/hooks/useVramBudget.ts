@@ -12,7 +12,25 @@ import { formatWithSpaces } from '../utils/contextFormat'
 //                              with MLA + sliding-window handling)
 //   B  = compute/batch buffer (10% of W+KV, min 512 MB — conservative placeholder
 //                              until the server log reports the exact figure)
-//   O  = runtime overhead      (1 GB flat + 0.5 GB per active GPU)
+//   O  = runtime overhead (VRAM-side): GPU driver/runtime context, mmap
+//        page-cache pressure, tokenizer. A separate RAM-side overhead term
+//        exists for the RAM-hosted path.
+//
+// O used to be a single hardcoded constant here ("1 GB flat + 0.5 GB/GPU"),
+// which real-world comparison against llama-server's own --fit showed was
+// both too large in general (a single Dense-model test: our "max context
+// that fits" estimate came in far below --fit's actual result, 79 852 vs.
+// 146 688; a second run with mmproj enabled showed the same pattern, ~750 MB
+// short) AND backend-runtime-dependent in a way a flat constant could never
+// capture — CUDA, ROCm and Vulkan measurably differ in driver/context
+// footprint (Vulkan in particular runs far leaner; see backendOverhead.ts).
+// Both VRAM and RAM overhead are now plain, independent, per-Template
+// user-adjustable values (opts.vramOverheadMB / opts.ramOverheadMB below),
+// defaulted per detected backend runtime rather than hardcoded — see
+// buildQuickEngineBaseline() in shared/presetBaselines.ts for the defaults
+// applied to a freshly-created Template, and the "VRAM/RAM Overhead"
+// controls in CmdParamsEditor.tsx's Advanced Parameters for where the user
+// can retune or disable either independently.
 //
 // Previously the KV estimate used the heuristic
 //   VRAM_KV = model_size_MB * (0.12 * (target_context / 32768))
@@ -36,12 +54,13 @@ export interface VramBudget {
   // Breakdown for the UI (so the user can SEE why a number is what it is):
   weightMB: number           // W
   computeBufferMB: number    // B
-  overheadMB: number          // O
+  overheadMB: number          // O (VRAM-side runtime overhead)
+  ramOverheadMB: number        // RAM-side overhead (mmap/tokenizer), independent of O
   bytesPerKvElement: number  // BPE of the active cache type (for display)
   kvArchitecture: 'gqa' | 'mha' | 'mla' | 'unknown'
   // Exposed for the AutoFill + Memory Overhead UI:
-  freeVRAMMB: number          // free VRAM after overhead reduction
-  freeRAMMB: number           // free RAM after overhead reduction
+  freeVRAMMB: number          // free VRAM (raw — overhead is applied inside the W/KV/B/O breakdown, not pre-subtracted here)
+  freeRAMMB: number           // free RAM (raw — same as above)
   totalVRAMMB: number         // total VRAM (for the Memory Overhead slider max)
   totalRAMMB: number          // total RAM (for the Memory Overhead slider max)
   warning?: string           // guardrail warning if applicable
@@ -103,7 +122,17 @@ export function useVramBudget(opts: {
   mmprojSizeMB: number
   kvQuantType: string        // '--cache-type-k' value (q8_0, f16, turbo3, …)
   kvQuantTypeV?: string      // '--cache-type-v' value (defaults to kvQuantType)
-  memOverheadMB?: number     // user-set memory overhead (reduces free VRAM then RAM)
+  // Split from a single combined "Memory Overhead" into two independent
+  // pools, since VRAM-side overhead (GPU driver/runtime context) and
+  // RAM-side overhead (mmap page-cache pressure, tokenizer/vocab tables) are
+  // genuinely different costs with very different magnitudes — in
+  // particular, VRAM overhead varies a lot by GPU runtime (CUDA vs ROCm vs
+  // Vulkan; see backendOverhead.ts), which a single shared number could
+  // never represent well. Each reduces its own pool only — no more
+  // "VRAM first, spill into RAM" behavior, since they're no longer the same
+  // conceptual quantity.
+  vramOverheadMB?: number
+  ramOverheadMB?: number
   autoFillAuto?: boolean     // dense AutoFill "Auto" — ignore ctx, fit model by speed priority
   // Whether this preset's "Ignore Context Length Override" toggle is ON.
   // Needed so the VRAM/KV preview computes `targetContext` with exactly the
@@ -126,17 +155,9 @@ export function useVramBudget(opts: {
     // maximum VRAM/RAM totals (conservative, stable). When ON, use the currently-
     // available free values (polled every 10s).
     const useCurrent = !!modelDefaults.useCurrentMemState
-    // Memory Overhead reduces the chosen memory pool (VRAM first, then RAM).
-    const overheadMB = Math.max(0, Number(opts.memOverheadMB) || 0)
     const totalVRAM = vramInfo?.totalVRAMMB || 0
     let freeVRAM = useCurrent ? (vramInfo?.freeVRAMMB || 0) : totalVRAM
     let freeRAM = useCurrent ? (systemRam?.freeRAMMB || 0) : (systemRam?.totalRAMMB || 0)
-    if (overheadMB > 0) {
-      const vramReduction = Math.min(overheadMB, freeVRAM)
-      freeVRAM = Math.max(0, freeVRAM - vramReduction)
-      const ramReduction = overheadMB - vramReduction
-      if (ramReduction > 0) freeRAM = Math.max(0, freeRAM - ramReduction)
-    }
     // If there's no VRAM at all (unified memory / CPU-only), we can't compute a
     // GPU-offload budget — but the caller may still want KV math. Return null
     // only when BOTH VRAM and RAM are unavailable.
@@ -231,11 +252,16 @@ export function useVramBudget(opts: {
     // ("llama_context: compute buffer total = X MiB").
     const computeBufferMB = Math.max(512, Math.round(0.10 * (weightMB + vramKV)))
 
-    // ----- O: runtime overhead -----
-    // mmap page-cache pressure, CUDA context (~300–600 MB per GPU), tokenizer,
-    // runtime. 1 GB flat (CPU-only) + 0.5 GB per active GPU.
-    const gpuCount = (vramInfo?.hasNvidia || vramInfo?.vendor === 'NVIDIA' || vramInfo?.vendor === 'AMD') ? 1 : 0
-    const runtimeOverheadMB = 1024 + (gpuCount > 0 ? 512 : 0)
+    // ----- O: runtime overhead (VRAM-side) -----
+    // GPU driver/runtime context (CUDA/ROCm/Vulkan), mmap page-cache
+    // pressure, tokenizer — now a direct, user-adjustable value (per-Template,
+    // defaulted per detected backend runtime — see backendOverhead.ts) rather
+    // than a single hardcoded constant. Real-world comparison against
+    // llama-server's own --fit showed a flat constant couldn't represent this
+    // well: CUDA/ROCm/Vulkan have measurably different footprints (Vulkan in
+    // particular runs far leaner), so a value calibrated for one runtime
+    // meaningfully over- or under-estimates for another.
+    const runtimeOverheadMB = Math.max(0, Number(opts.vramOverheadMB) || 0)
 
     // ----- mmproj overhead -----
     const vramMM = opts.mmprojEnabled ? opts.mmprojSizeMB : 0
@@ -273,8 +299,11 @@ export function useVramBudget(opts: {
       computeBufferEffective = Math.max(512, Math.round(0.10 * (weightMB + vramKVEffective)))
     }
     const vramForWeights = vramBudget - vramKVEffective - vramMM - computeBufferEffective - runtimeOverheadMB
-    // RAM budget for CPU inference (no CUDA context → smaller overhead).
-    const ramOverheadMB = 1024
+    // RAM budget for CPU inference — now the user-adjustable RAM overhead
+    // value (mmap page-cache pressure, tokenizer/vocab tables; far less
+    // backend-dependent than the VRAM side, since it doesn't involve any GPU
+    // driver/runtime context) instead of a hardcoded 1024.
+    const ramOverheadMB = Math.max(0, Number(opts.ramOverheadMB) || 0)
     const ramForWeights = freeRAM - vramKVEffective - vramMM - computeBufferEffective - ramOverheadMB
 
     let recommendedLayers: number
@@ -402,6 +431,7 @@ export function useVramBudget(opts: {
       weightMB,
       computeBufferMB,
       overheadMB: runtimeOverheadMB,
+      ramOverheadMB,
       bytesPerKvElement: bpeK,
       kvArchitecture,
       freeVRAMMB: freeVRAM,
@@ -411,7 +441,7 @@ export function useVramBudget(opts: {
       warning
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [opts.modelPath, opts.modelSizeMB, opts.maxLayers, opts.contextSize, opts.mmprojEnabled, opts.mmprojSizeMB, opts.kvQuantType, opts.kvQuantTypeV, opts.memOverheadMB, opts.autoFillAuto, opts.ignoreCtxOverride, opts.ropeScaledMaxContext, vramInfo, modelDefaults, activeBackend, systemRam])
+  }, [opts.modelPath, opts.modelSizeMB, opts.maxLayers, opts.contextSize, opts.mmprojEnabled, opts.mmprojSizeMB, opts.kvQuantType, opts.kvQuantTypeV, opts.vramOverheadMB, opts.ramOverheadMB, opts.autoFillAuto, opts.ignoreCtxOverride, opts.ropeScaledMaxContext, vramInfo, modelDefaults, activeBackend, systemRam])
 }
 
 // ===========================================================================
@@ -477,6 +507,8 @@ export function estimateMoeDefaultContext(params: {
   freeVRAMMB: number
   freeRAMMB: number
   mmprojSizeMB?: number
+  vramOverheadMB?: number
+  ramOverheadMB?: number
   fallback?: number   // used if computation isn't possible at all
   cap?: number        // native context length ceiling, if known
 }): number {
@@ -489,7 +521,10 @@ export function estimateMoeDefaultContext(params: {
   const perTok = perTokenKvBytes(params.meta, bpeK, bpeV)
   if (kvLayers <= 0 || perTok === null) return fallback
   const totalPoolMB = params.freeVRAMMB + params.freeRAMMB
-  const overheadMB = 1024 + 512  // rough runtime overhead estimate (O)
+  // This function treats VRAM+RAM as one combined pool (it's a fast, rough
+  // default for a brand-new Template, not the detailed per-pool breakdown
+  // the main hook does), so the two overhead values are simply combined too.
+  const overheadMB = Math.max(0, Number(params.vramOverheadMB) || 0) + Math.max(0, Number(params.ramOverheadMB) || 0)
   const leftoverMB = totalPoolMB - params.modelSizeMB - (params.mmprojSizeMB || 0) - overheadMB
   if (leftoverMB <= 0) return Math.min(fallback, 2048)  // model barely/doesn't fit at all — small floor
   // Reserve ~10% of the leftover for the compute/batch buffer (which itself
@@ -517,9 +552,12 @@ export function computeAutoFillContext(params: {
   activeExperts?: number   // for MoE compute-buffer scaling
   totalExperts?: number
   minContext?: number      // floor (e.g. 2048)
+  vramOverheadMB?: number
+  ramOverheadMB?: number
 }): AutoFillResult | null {
   const { meta, modelSizeMB, maxLayers, maxContext, kvQuantType, kvQuantTypeV,
-    freeVRAMMB, freeRAMMB, mmprojSizeMB = 0, isMoe = false, activeExperts, totalExperts, minContext = 2048 } = params
+    freeVRAMMB, freeRAMMB, mmprojSizeMB = 0, isMoe = false, activeExperts, totalExperts, minContext = 2048,
+    vramOverheadMB = 0, ramOverheadMB = 0 } = params
   if (!meta) return null
   const bpeK = kvBpe(kvQuantType)
   const bpeV = kvBpe(kvQuantTypeV || kvQuantType)
@@ -534,7 +572,6 @@ export function computeAutoFillContext(params: {
   // MoE: scale the compute buffer by active/total ratio (per user request).
   const moeScale = (isMoe && totalExperts && activeExperts && totalExperts > 0)
     ? Math.max(0.25, activeExperts / totalExperts) : 1.0
-  const afOverheadMB = 1024 + (freeVRAMMB > 0 ? 512 : 0) // O
   // The previous version computed a PARTIAL layer count
   // that fits in VRAM at minContext (layersAtVramFit), decided "VRAM usable"
   // if that was >=50% of the model — but then ran its context binary search
@@ -559,7 +596,7 @@ export function computeAutoFillContext(params: {
     // weight-vs-budget constraint that caused the original bug, so a rough
     // estimate here doesn't reintroduce the same class of error).
     const computeMB = Math.max(512, 0.10 * (modelSizeMB + kvMB)) * moeScale
-    const remainingForWeights = poolMB - kvMB - computeMB - afOverheadMB - mmprojMB
+    const remainingForWeights = poolMB - kvMB - computeMB - vramOverheadMB - mmprojMB
     if (remainingForWeights <= 0) return 0
     return Math.max(0, Math.min(maxLayers, Math.floor((remainingForWeights / Math.max(1, modelSizeMB)) * maxLayers)))
   }
@@ -575,7 +612,7 @@ export function computeAutoFillContext(params: {
     function totalAtFullModel(ctx: number): number {
       const kvMB = (layers * ctx * perTokSafe) / (1024 * 1024)
       const computeMB = Math.max(512, 0.10 * (modelSizeMB + kvMB)) * moeScale
-      return modelSizeMB + kvMB + computeMB + mmprojMB + afOverheadMB
+      return modelSizeMB + kvMB + computeMB + mmprojMB + ramOverheadMB
     }
     if (totalAtFullModel(minContext) > freeRAMMB) {
       return { context: minContext, fitsFully: false, usedVRAM: false, overflowedToRAM: true, layers: 0, maxLayers, warning: 'Model does not fit in available memory even at minimum context.' }

@@ -14,6 +14,8 @@
 // VRAM budget, unavailable synchronously before a model is even picked —
 // CmdParamsEditor's own effects fill these in once that data exists).
 
+import { detectBackendRuntimeType, defaultVramOverheadForBackend, DEFAULT_RAM_OVERHEAD_MB } from './backendOverhead'
+
 export interface CpuInfoLike {
   physicalCores?: number
 }
@@ -56,10 +58,18 @@ export function buildQuickEngineBaseline(opts: {
   cpuInfo?: CpuInfoLike | null
   backendKey?: string | null
   cpuThreadsOverridePercent?: number | null
+  // Full backend descriptor (name/displayName/exe/path), used ONLY to guess
+  // a sensible default VRAM overhead for the detected GPU runtime (CUDA/
+  // ROCm/Vulkan) — see backendOverhead.ts. backendKey alone (just the fork
+  // name, e.g. "llama.cpp") doesn't carry that; it's usually in the
+  // version/display name instead.
+  backendInfo?: { name?: string; displayName?: string; backendKey?: string; exe?: string; path?: string } | null
 }): Record<string, any> {
   const recommendedThreads = computeRecommendedThreads(opts.cpuInfo, opts.cpuThreadsOverridePercent)
   const kvQuantK = defaultKvQuantFor(opts.backendKey)
   const kvQuantV = defaultKvQuantVFor(opts.backendKey)
+  const runtimeType = detectBackendRuntimeType(opts.backendInfo || (opts.backendKey ? { backendKey: opts.backendKey } : null))
+  const defaultVramOverhead = defaultVramOverheadForBackend(runtimeType)
   return {
     '--threads': recommendedThreads,
     '--batch-size': 2048,
@@ -89,7 +99,16 @@ export function buildQuickEngineBaseline(opts: {
     '--spec-draft-p-min': 0.75,
     '__ignoreCtxOverride': false,
     '__autoCtxFill': 'off',
-    '__memOverheadEnabled': false
+    // VRAM overhead defaults to a backend-runtime-aware estimate (CUDA/ROCm/
+    // Vulkan have measurably different driver/context footprints — see
+    // backendOverhead.ts); RAM overhead defaults to a flat, backend-
+    // independent estimate. Both on by default; the user can retune or
+    // disable either independently once they've compared against their own
+    // real launches (e.g. via --fit).
+    '__vramOverheadEnabled': true,
+    '__vramOverheadMB': defaultVramOverhead,
+    '__ramOverheadEnabled': true,
+    '__ramOverheadMB': DEFAULT_RAM_OVERHEAD_MB
   }
 }
 

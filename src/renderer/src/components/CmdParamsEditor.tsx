@@ -16,6 +16,7 @@ import { formatWithSpaces, CONTEXT_POWER_OF_TWO_STEPS, snapToNearestPowerOfTwo }
 import { buildQuickEngineBaseline, computeRecommendedThreads, defaultKvQuantFor, defaultKvQuantVFor, SAMPLING_KEYS } from '../../../shared/presetBaselines'
 import { COMMON_PARAM_FLAGS as COMMON_VISIBLE } from '../../../shared/commonParams'
 import { applyNgramModifierToggle } from '../../../shared/specToggles'
+import { detectBackendRuntimeType, defaultVramOverheadForBackend, DEFAULT_RAM_OVERHEAD_MB } from '../../../shared/backendOverhead'
 
 const iconMap: Record<string, React.ReactNode> = {
   Box: <Box size={14} />, Cpu: <Cpu size={14} />, Zap: <Zap size={14} />,
@@ -311,10 +312,18 @@ export default function CmdParamsEditor({ templateId, args, onChange, modelPathF
   // Per-preset context-fill toggle + memory overhead.
   // (ignoreCtxOverride itself now declared above, near the YaRN logic that needs it.)
   const autoCtxFill = (args['__autoCtxFill'] as 'off' | 'auto' | 'maximum') || 'off'
-  // Memory Overhead — off by default everywhere. When enabled, the
-  // default value is 2.5 GB (2560 MB). The overhead reduces Free VRAM then RAM.
-  const memOverheadEnabled = args['__memOverheadEnabled'] === true
-  const memOverheadMB = memOverheadEnabled ? (Number(args['__memOverheadMB']) || 2560) : 0
+  // VRAM/RAM Overhead — on by default (see buildQuickEngineBaseline), each
+  // independently adjustable or disable-able. VRAM defaults to a backend-
+  // runtime-aware estimate (CUDA/ROCm/Vulkan; see backendOverhead.ts) when
+  // no explicit value is stored yet (e.g. a Template predating this split,
+  // or not created via Quick) — RAM defaults to a flat, backend-independent
+  // estimate in the same situation.
+  const vramOverheadEnabled = args['__vramOverheadEnabled'] === true
+  const vramOverheadMB = vramOverheadEnabled
+    ? (Number(args['__vramOverheadMB']) || defaultVramOverheadForBackend(detectBackendRuntimeType(activeBackend)))
+    : 0
+  const ramOverheadEnabled = args['__ramOverheadEnabled'] === true
+  const ramOverheadMB = ramOverheadEnabled ? (Number(args['__ramOverheadMB']) || DEFAULT_RAM_OVERHEAD_MB) : 0
   // Pass whether AutoFill "Auto" is active so useVramBudget can ignore
   // the selected ctx and check full-fit by speed priority for dense models.
   const autoFillAuto = ignoreCtxOverride && autoCtxFill === 'auto'
@@ -335,7 +344,8 @@ export default function CmdParamsEditor({ templateId, args, onChange, modelPathF
     mmprojSizeMB,
     kvQuantType: kvQuantK,
     kvQuantTypeV: kvQuantV,
-    memOverheadMB,
+    vramOverheadMB,
+    ramOverheadMB,
     autoFillAuto,
     ignoreCtxOverride,
     ropeScaledMaxContext
@@ -393,6 +403,7 @@ export default function CmdParamsEditor({ templateId, args, onChange, modelPathF
       target = estimateMoeDefaultContext({
         meta, modelSizeMB, kvQuantType: kvQuantK, kvQuantTypeV: kvQuantV,
         freeVRAMMB: vramBudget.freeVRAMMB, freeRAMMB: vramBudget.freeRAMMB,
+        vramOverheadMB: vramBudget.overheadMB, ramOverheadMB: vramBudget.ramOverheadMB,
         mmprojSizeMB: mmprojEnabled ? mmprojSizeMB : 0,
         fallback: Math.min(meta.contextLength, 32768), cap: meta.contextLength
       })
@@ -1121,6 +1132,7 @@ export default function CmdParamsEditor({ templateId, args, onChange, modelPathF
         setIfAbsent(newArgs, '--ctx-size', estimateMoeDefaultContext({
           meta, modelSizeMB, kvQuantType: kvQuantK, kvQuantTypeV: kvQuantV,
           freeVRAMMB: vramBudget.freeVRAMMB, freeRAMMB: vramBudget.freeRAMMB,
+          vramOverheadMB: vramBudget.overheadMB, ramOverheadMB: vramBudget.ramOverheadMB,
           mmprojSizeMB: mmprojEnabled ? mmprojSizeMB : 0,
           fallback: Math.min(meta.contextLength, 32768), cap: meta.contextLength
         }))
@@ -1168,8 +1180,10 @@ export default function CmdParamsEditor({ templateId, args, onChange, modelPathF
     // Turn OFF the context-fill toggles in Clear mode.
     newArgs['__ignoreCtxOverride'] = false
     newArgs['__autoCtxFill'] = 'off'
-    // Memory Overhead off by default in Clear.
-    newArgs['__memOverheadEnabled'] = false
+    // VRAM/RAM Overhead off by default in Clear (same "wipe everything except
+    // sampling" philosophy as the rest of this preset).
+    newArgs['__vramOverheadEnabled'] = false
+    newArgs['__ramOverheadEnabled'] = false
     newArgs['__lastPreset'] = 'clear'
     commit(newArgs)
     setPresetMode('clear')
@@ -1188,6 +1202,7 @@ export default function CmdParamsEditor({ templateId, args, onChange, modelPathF
         newArgs['--ctx-size'] = estimateMoeDefaultContext({
           meta, modelSizeMB, kvQuantType: kvQuantK, kvQuantTypeV: kvQuantV,
           freeVRAMMB: vramBudget.freeVRAMMB, freeRAMMB: vramBudget.freeRAMMB,
+          vramOverheadMB: vramBudget.overheadMB, ramOverheadMB: vramBudget.ramOverheadMB,
           mmprojSizeMB: mmprojEnabled ? mmprojSizeMB : 0,
           fallback: Math.min(meta.contextLength, 32768), cap: meta.contextLength
         })
@@ -1533,7 +1548,22 @@ export default function CmdParamsEditor({ templateId, args, onChange, modelPathF
             </div>
           )}
           {!isHybrid && cmd.type === 'number' && (
-            <input type="number" className="cmd-input" value={val} placeholder={cmd.default?.toString()} min={cmd.min} max={cmd.max} step="any" onChange={(e) => handleUpdate(cmd.arg, e.target.value === '' ? '' : Number(e.target.value))} disabled={disabled} />
+            <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
+              <input type="number" className="cmd-input" value={val} placeholder={cmd.default?.toString()} min={cmd.min} max={cmd.max} step="any" onChange={(e) => handleUpdate(cmd.arg, e.target.value === '' ? '' : Number(e.target.value))} disabled={disabled} />
+              {/* The global Parallel Inference override (Overrides tab) is a
+                  hard override applied fresh at every launch — it never
+                  writes back into the Template's own stored value above, so
+                  without this note the field looks unaffected even though
+                  what actually launches uses a different number entirely. */}
+              {(cmd.arg === '--parallel' || cmd.arg === '-np') && parallelOverrideActive && (
+                <span
+                  style={{ fontSize: 10, color: 'var(--warning)', whiteSpace: 'nowrap' }}
+                  title={`The global Parallel Inference override (Overrides tab) replaces this with ${previewEffectiveParallel} at launch, regardless of the value set here.`}
+                >
+                  overridden to {previewEffectiveParallel} at launch
+                </span>
+              )}
+            </div>
           )}
           {!isHybrid && cmd.type === 'string' && (
             <div style={{ display: 'flex', gap: 4, alignItems: 'center', width: '100%' }}>
@@ -1982,7 +2012,6 @@ export default function CmdParamsEditor({ templateId, args, onChange, modelPathF
   // ----- Context block: Ignore-Override + AutoFill + Memory Overhead -----
   // (autoFillResult + its effect are computed in the component body above/below)
   const renderContextBlock = () => {
-    const totalMemMB = (vramBudget?.totalVRAMMB || 0) + (vramBudget?.totalRAMMB || 0)
     return (
       <div className="spec-widget">
         <div className="mmproj-widget-title"><Gauge size={15} /> Context</div>
@@ -2053,40 +2082,85 @@ export default function CmdParamsEditor({ templateId, args, onChange, modelPathF
             Maximum available: fills the context window up to the model's max, giving VRAM to the model and offloading the rest to RAM. Stops early if no memory remains.
           </div>
         )}
-        {/* Task 5: Memory Overhead — on/off switch + slider. Off by default;
-            default value 2.5 GB (2560 MB) when enabled. */}
+        {/* VRAM/RAM Overhead — on by default now (see buildQuickEngineBaseline),
+            split into two independent pools since they're genuinely different
+            costs: VRAM overhead (GPU driver/runtime context) varies a lot by
+            backend runtime (CUDA/ROCm/Vulkan — see backendOverhead.ts),
+            while RAM overhead (mmap page-cache, tokenizer) doesn't. The VRAM
+            control is hidden entirely on a system with no VRAM at all
+            (no discrete/integrated GPU memory detected) since it has nothing
+            to apply to. */}
+        {(vramBudget?.totalVRAMMB || 0) > 0 && (
+          <>
+            <div className="mmproj-widget-row" style={{ marginTop: 8 }}>
+              <span className="mmproj-widget-label">VRAM Overhead</span>
+              <div className="toggle-wrap">
+                <label className="toggle" style={disabled ? { opacity: 0.45, cursor: 'not-allowed' } : {}}>
+                  <input type="checkbox" checked={vramOverheadEnabled} onChange={(e) => {
+                    const newArgs: Record<string, any> = { ...args, '__vramOverheadEnabled': e.target.checked }
+                    // When turning ON for the first time, seed a backend-runtime-aware default.
+                    if (e.target.checked && !args['__vramOverheadMB']) newArgs['__vramOverheadMB'] = defaultVramOverheadForBackend(detectBackendRuntimeType(activeBackend))
+                    commit(newArgs)
+                  }} disabled={disabled} />
+                  <span className="toggle-track"></span><span className="toggle-thumb"></span>
+                </label>
+              </div>
+            </div>
+            {vramOverheadEnabled && (
+              <div className={`cmd-row cmd-row-hybrid`} style={{ padding: '8px 12px', border: '1px solid var(--border)', background: 'var(--surface)', position: 'relative', overflow: 'visible' }}>
+                <div className="cmd-label-group" style={{ paddingLeft: 4 }}>
+                  <div className="cmd-label">VRAM Overhead amount</div>
+                  <div className="cmd-arg">GPU driver/runtime context — reduces Free VRAM only. Defaults vary by backend runtime (CUDA/ROCm/Vulkan); adjust to match your own --fit results.</div>
+                </div>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 8, flex: 1, minWidth: 0 }}>
+                  <HybridSlider
+                    value={vramOverheadMB}
+                    min={0}
+                    max={vramBudget?.totalVRAMMB || 32768}
+                    step={64}
+                    onChange={v => commit({ ...args, '__vramOverheadMB': v })}
+                    defaultVal={defaultVramOverheadForBackend(detectBackendRuntimeType(activeBackend))}
+                    disabled={disabled}
+                  />
+                  <span style={{ fontSize: 11, color: 'var(--text-muted)', minWidth: 70, textAlign: 'right' }}>
+                    {vramOverheadMB.toLocaleString()} MB
+                  </span>
+                </div>
+              </div>
+            )}
+          </>
+        )}
         <div className="mmproj-widget-row" style={{ marginTop: 8 }}>
-          <span className="mmproj-widget-label">Memory Overhead</span>
+          <span className="mmproj-widget-label">RAM Overhead</span>
           <div className="toggle-wrap">
             <label className="toggle" style={disabled ? { opacity: 0.45, cursor: 'not-allowed' } : {}}>
-              <input type="checkbox" checked={memOverheadEnabled} onChange={(e) => {
-                const newArgs: Record<string, any> = { ...args, '__memOverheadEnabled': e.target.checked }
-                // When turning ON for the first time, seed the default 2.5 GB.
-                if (e.target.checked && !args['__memOverheadMB']) newArgs['__memOverheadMB'] = 2560
+              <input type="checkbox" checked={ramOverheadEnabled} onChange={(e) => {
+                const newArgs: Record<string, any> = { ...args, '__ramOverheadEnabled': e.target.checked }
+                if (e.target.checked && !args['__ramOverheadMB']) newArgs['__ramOverheadMB'] = DEFAULT_RAM_OVERHEAD_MB
                 commit(newArgs)
               }} disabled={disabled} />
               <span className="toggle-track"></span><span className="toggle-thumb"></span>
             </label>
           </div>
         </div>
-        {memOverheadEnabled && (
+        {ramOverheadEnabled && (
           <div className={`cmd-row cmd-row-hybrid`} style={{ padding: '8px 12px', border: '1px solid var(--border)', background: 'var(--surface)', position: 'relative', overflow: 'visible' }}>
             <div className="cmd-label-group" style={{ paddingLeft: 4 }}>
-              <div className="cmd-label">Memory Overhead amount</div>
-              <div className="cmd-arg">Reserves memory for other apps (reduces Free VRAM, then Free RAM)</div>
+              <div className="cmd-label">RAM Overhead amount</div>
+              <div className="cmd-arg">mmap page-cache pressure + tokenizer/vocab tables — reduces Free RAM only.</div>
             </div>
             <div style={{ display: 'flex', alignItems: 'center', gap: 8, flex: 1, minWidth: 0 }}>
               <HybridSlider
-                value={memOverheadMB}
+                value={ramOverheadMB}
                 min={0}
-                max={totalMemMB > 0 ? totalMemMB : 32768}
-                step={256}
-                onChange={v => commit({ ...args, '__memOverheadMB': v })}
-                defaultVal={2560}
+                max={vramBudget?.totalRAMMB || 32768}
+                step={64}
+                onChange={v => commit({ ...args, '__ramOverheadMB': v })}
+                defaultVal={DEFAULT_RAM_OVERHEAD_MB}
                 disabled={disabled}
               />
               <span style={{ fontSize: 11, color: 'var(--text-muted)', minWidth: 70, textAlign: 'right' }}>
-                {memOverheadMB.toLocaleString()} MB
+                {ramOverheadMB.toLocaleString()} MB
               </span>
             </div>
           </div>
@@ -2127,12 +2201,28 @@ export default function CmdParamsEditor({ templateId, args, onChange, modelPathF
     const kv = vramBudget as any
     const isMaxStrategy = isMoe && modelDefaults.moeOffloadStrategy === 'max'
     const c1 = formatWithSpaces(vramBudget.autoFitContext)
+    // Bug fix: when Automatic Context Fill is "Auto" (--fit decides context
+    // and layers at launch — --ctx-size is never even passed, see
+    // buildLaunchArgs), the ctx-size field itself is blank, and the global
+    // AutoFit Minimum floor is also skipped (ignoreCtxOverride opts out of
+    // it) — so vramBudget.autoFitContext silently fell back to a hardcoded
+    // 32768 placeholder that has NOTHING to do with what --fit will actually
+    // choose at runtime. The recommendation then looked internally
+    // consistent (e.g. "65/65 layers fit with 32 768 context") while being
+    // computed against a number nobody asked for and --fit will never use —
+    // which is exactly why toggling Auto Context Fill on/off, with nothing
+    // else changed, flipped this line between two different answers. Rather
+    // than keep presenting a number against a target that isn't real, be
+    // honest that a fixed recommendation doesn't apply in this mode.
+    const isAutoFitAuto = ignoreCtxOverride && autoCtxFill === 'auto'
     // Label depends on Dense vs MoE (vs MoE+"max" strategy).
-    const line1Label = !isMoe
-      ? `${vramBudget.recommendedLayers}/${vramBudget.maxLayers} layers fit on your GPU with ${c1} context window`
-      : isMaxStrategy
-        ? `${vramBudget.recommendedLayers}/${vramBudget.maxLayers} Layers need to be Forced onto CPU Layers to fit ${c1} context window`
-        : `${vramBudget.recommendedLayers}/${vramBudget.maxLayers} Layers need to be offloaded to GPU to fit ${c1} context window`
+    const line1Label = isAutoFitAuto
+      ? 'Automatic Context Fill (--fit) is on — llama-server decides GPU layers and context together at launch, so a fixed recommendation doesn\'t apply here.'
+      : !isMoe
+        ? `${vramBudget.recommendedLayers}/${vramBudget.maxLayers} layers fit on your GPU with ${c1} context window`
+        : isMaxStrategy
+          ? `${vramBudget.recommendedLayers}/${vramBudget.maxLayers} Layers need to be Forced onto CPU Layers to fit ${c1} context window`
+          : `${vramBudget.recommendedLayers}/${vramBudget.maxLayers} Layers need to be offloaded to GPU to fit ${c1} context window`
     return (
       <div className="vram-info-banner">
         <Gauge size={13} />
@@ -2156,15 +2246,17 @@ export default function CmdParamsEditor({ templateId, args, onChange, modelPathF
         {/* Item 6: redesigned recommendation lines, each with a small ✓ apply button. */}
         <div style={{ display: 'flex', alignItems: 'center', gap: 8, width: '100%' }}>
           <span style={{ flex: 1 }}>{line1Label}</span>
-          <button
-            type="button"
-            className="vram-apply-btn"
-            title="Apply this recommendation"
-            onClick={applyLine1Recommendation}
-            disabled={disabled}
-          >
-            <Check size={11} />
-          </button>
+          {!isAutoFitAuto && (
+            <button
+              type="button"
+              className="vram-apply-btn"
+              title="Apply this recommendation"
+              onClick={applyLine1Recommendation}
+              disabled={disabled}
+            >
+              <Check size={11} />
+            </button>
+          )}
         </div>
         {/* Item 5: line 2 only makes sense for Dense models — for MoE, the
             model is often much larger than total VRAM by design (that's the

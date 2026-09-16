@@ -67,6 +67,7 @@ export default function CreateModal() {
     Object.assign(seeded, buildQuickEngineBaseline({
       cpuInfo: useStore.getState().cpuInfo,
       backendKey: activeBackend?.backendKey,
+      backendInfo: activeBackend,
       cpuThreadsOverridePercent: useStore.getState().modelDefaults.cpuThreadsOverrideEnabled
         ? useStore.getState().modelDefaults.cpuThreadsOverridePercent
         : null
@@ -129,6 +130,7 @@ export default function CreateModal() {
         Object.assign(seeded, buildQuickEngineBaseline({
           cpuInfo: useStore.getState().cpuInfo,
           backendKey: activeBackend?.backendKey,
+          backendInfo: activeBackend,
           cpuThreadsOverridePercent: useStore.getState().modelDefaults.cpuThreadsOverrideEnabled
             ? useStore.getState().modelDefaults.cpuThreadsOverridePercent
             : null
