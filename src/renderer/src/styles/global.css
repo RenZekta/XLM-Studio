@@ -277,11 +277,7 @@ input[type="number"] {
   transition: border-color var(--transition);
 }
 .cmd-row:hover { border-color: var(--border-strong); }
-/* Item 1.7: .cmd-row.active-param removed — legacy hexllama-era contour that
-   highlighted any set value regardless of preset ("differs from nothing"),
-   now redundant with .changed-param which is preset-relative. */
 .cmd-label-group { min-width: 0; }
-/* Fix 5: Increased font sizes for readability */
 .cmd-label { font-size: 14px; font-weight: 600; color: var(--text); }
 .cmd-arg { font-size: 12px; color: var(--text-muted); font-family: var(--font-mono); margin-top: 2px; }
 .cmd-desc { font-size: 13px; color: var(--text-secondary); margin-top: 3px; line-height: 1.4; }

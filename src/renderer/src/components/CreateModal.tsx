@@ -380,10 +380,8 @@ export default function CreateModal() {
               </div>
               <div className="form-hint">Models are grouped by folder. mmproj files are auto-detected and shared within each folder.</div>
             </div>
-            {}
-            {/* Feature 15: Preset toggle is now inside CmdParamsEditor (no duplication). */}
-            {/* Bug fix: Settings/Parameters toggles + CPU/model/Free-VRAM info now
-                render here (via CmdParamsEditor's header portal) so they're always
+            {/* Settings/Parameters toggle + CPU/model/Free-VRAM info render
+                here (via CmdParamsEditor's header portal) so they're always
                 visible without expanding "Advanced Parameters" below. */}
             <div ref={setHeaderAnchor} className="cmd-header-anchor" />
             <div className="collapsible-section" style={{ marginTop: 20 }}>

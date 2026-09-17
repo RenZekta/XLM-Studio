@@ -288,9 +288,9 @@ function ModelGroupCard({ group, onDeleted }: { group: ModelGroup; onDeleted: ()
               </div>
             </div>
           )}
-          {/* Item 2: speculative-decoding sidecar files (draft/EAGLE3/DSpark2/
-              DFlash2 heads) — same non-interactive treatment as mmproj above:
-              shown here for visibility, but never selectable as a Model File
+          {/* Speculative-decoding sidecar files (draft/EAGLE3/DSpark2/DFlash2
+              heads) — same non-interactive treatment as mmproj above: shown
+              here for visibility, but never selectable as a Model File
               (they're excluded from `group.models` entirely on the backend). */}
           {group.specDecodeSidecars?.map(s => (
             <div key={s.path} className="models-file-row" style={{ opacity: 0.7 }} title={`${s.label} (Tier ${s.tier}) speculative-decoding sidecar — detected alongside this folder's model(s), not listed as a separate model.`}>
@@ -391,7 +391,7 @@ export default function ModelsView() {
           <button className="btn btn-ghost btn-icon" onClick={refresh} title="Refresh" disabled={loading}>
             <RefreshCw size={15} className={loading ? 'spin' : ''} />
           </button>
-          {/* Item 3: manual full re-extraction — clears stored metadata for every
+          {/* Manual full re-extraction — clears stored metadata for every
               detected model and re-runs extraction from scratch. */}
           <button
             className="btn btn-ghost btn-icon"

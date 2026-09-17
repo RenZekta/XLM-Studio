@@ -120,20 +120,13 @@ async function resolveBackend(template: Template): Promise<any> {
 // Fill mode's --fit flag (strip --ctx-size, pass "--fit on" so llama-server
 // decides offload+context itself) — both ported faithfully, neither needs
 // live VRAM state.
-//
-// KNOWN LIMITATION (documented in the leftover-plan doc): the "Maximum
-// available" Context Fill mode (__autoCtxFill === 'maximum', a separate,
-// less-commonly-used mode from FULL AUTO's 'auto') is NOT replicated — that
-// one genuinely needs a live VRAM-fitted max-context computation
-// (useVramBudget.ts). A template left in "maximum" mode launches here with
-// its last saved --ctx-size instead.
-async function buildLaunchArgs(template: Template): Promise<{ args: string[]; ctxAutoFitApplied: boolean; fitMode: 'off' | 'auto' | 'maximum' }> {
+async function buildLaunchArgs(template: Template): Promise<{ args: string[]; ctxAutoFitApplied: boolean; fitMode: 'off' | 'auto' }> {
   const settings = await D().loadSettings()
   const md = settings.modelDefaults || {}
   const raw = { ...(template.args || {}) }
   const ignoreCtxOverride = raw['__ignoreCtxOverride'] === true
-  const autoCtxFill = (raw['__autoCtxFill'] as 'off' | 'auto' | 'maximum') || 'off'
-  const fitMode: 'off' | 'auto' | 'maximum' = ignoreCtxOverride ? autoCtxFill : 'off'
+  const autoCtxFill = (raw['__autoCtxFill'] as 'off' | 'auto') || 'off'
+  const fitMode: 'off' | 'auto' = ignoreCtxOverride ? autoCtxFill : 'off'
   let ctxAutoFitApplied = false
   if (fitMode === 'auto') {
     // Defer to llama-server's own --fit — do not pass --ctx-size at all.
@@ -151,9 +144,8 @@ async function buildLaunchArgs(template: Template): Promise<{ args: string[]; ct
   // Parallel Inference override — a hard override (not a floor, unlike the
   // AutoFit ctx-size logic above), applied at EVERY launch regardless of
   // what the Template itself has stored, exactly matching ModelCard.tsx's
-  // handleRunToggle. This was previously missing entirely here, so an
-  // MCP/skill-triggered start silently ignored the override altogether —
-  // only a manual Start click in the UI ever actually applied it.
+  // handleRunToggle, so an MCP/skill-triggered start applies it exactly like
+  // a manual Start click does.
   if (md.parallelOverrideEnabled) {
     let isMoeModel = false
     if (md.parallelInferenceMode === 'separate' && template.modelPath) {
@@ -179,11 +171,9 @@ async function buildLaunchArgs(template: Template): Promise<{ args: string[]; ct
   // Base URL Override — port substitution, "Serve on local network"
   // (--host 0.0.0.0), and API key, mirroring runModelImpl's own application
   // of these in ipc.ts EXACTLY (including the ignoreBaseUrlOverride escape
-  // hatch). This used to be missing entirely here: the actual spawned
-  // process went through runModelImpl and got the real overridden port
-  // correctly, but display-preview's reconstructed command never applied
-  // this at all, so it kept showing the Template's own raw --port instead
-  // of what was actually listening.
+  // hatch), so display-preview's reconstructed command always matches what
+  // actually ends up listening rather than showing the Template's own raw
+  // --port.
   const ignoreBaseUrlOverride = raw['__ignoreBaseUrlOverride'] === true
   const ovr = ignoreBaseUrlOverride ? null : settings.baseUrlOverride
   const effectivePort = (ovr?.enabled) ? ovr.port : (template.serverPort || 8080)
@@ -415,11 +405,11 @@ export async function toolTemplateCreate(args: { name: string; model: string; ba
   // Global Backend, else newest-installed) and pin it directly onto the
   // template — matching how the renderer's own CreateModal bakes in
   // activeBackend at creation time, rather than leaving it to be resolved
-  // again at every future start. This also fixes a real bug: the Quick
+  // again at every future start. Resolving it here also means the Quick
   // baseline's backend-specific defaults (e.g. TurboQuant's KV cache quant
-  // types) were previously computed against an unresolved/undefined
-  // backendKey whenever no backend was named, silently falling back to
-  // generic q8_0 instead of the backend that will actually run the model.
+  // types) are computed against the backend that will actually run the
+  // model, not an unresolved/undefined backendKey falling back to generic
+  // q8_0.
   const backend = explicitBackend || await resolveBackend({} as Template)
   // "Creates the template the same way as user does - with Quick preset by
   // default and everything else" — build the Quick baseline from GGUF
@@ -427,8 +417,8 @@ export async function toolTemplateCreate(args: { name: string; model: string; ba
   // starred Sampling Preset's values the same way CreateModal's lazy
   // initializer does — these are a separate axis from the engine baseline
   // and Quick/FullAuto/Clean never touch them once set, so this is the
-  // ONLY place a fresh Template gets them at all. Missing this step is why
-  // MCP-created Templates previously had empty sampling parameters.
+  // ONLY place a fresh Template gets them at all; skipping this step is
+  // what would leave an MCP-created Template with empty sampling parameters.
   const meta = await D().getGgufMetadata(model.path)
   const blockCount = meta?.blockCount || 0
   const gpuLayersMax = blockCount > 0 ? blockCount : 120
@@ -557,8 +547,8 @@ export async function toolApplyParametersPreset(args: { preset: string | number;
     // Clean wipes the ENGINE args only — it explicitly PRESERVES --mmproj
     // and every sampling value (temperature/top-p/top-k/min-p/repeat-
     // penalty/presence-penalty), matching handleClearPreset() in
-    // CmdParamsEditor.tsx exactly. Replacing args wholesale with {} here
-    // previously wiped sampling values too, which the real Clean never does.
+    // CmdParamsEditor.tsx exactly. Replacing args wholesale with {} would
+    // wipe sampling values too, which the real Clean never does.
     const preserved: Record<string, any> = {}
     const curArgs = t.args || {}
     if (curArgs['--mmproj'] !== undefined) preserved['--mmproj'] = curArgs['--mmproj']
@@ -609,9 +599,7 @@ export async function toolApplyParametersPreset(args: { preset: string | number;
   // full-auto: same merged baseline, then the same two overrides
   // handleFullAutoPreset() applies — GPU layers to maximum for Dense (unset,
   // i.e. "auto", for MoE), and Context Fill set to "auto" so --fit at launch
-  // time (see buildLaunchArgs) handles both offload and context itself. No
-  // VRAM computation needed here — that's only required for the separate
-  // "Maximum available" fill mode, which FULL AUTO doesn't use.
+  // time (see buildLaunchArgs) handles both offload and context itself.
   if (isMoe) delete mergedArgs['--gpu-layers']
   else mergedArgs['--gpu-layers'] = gpuLayersMax
   mergedArgs['__ignoreCtxOverride'] = true
@@ -729,8 +717,7 @@ export async function toolDisplayPreview(args: { template: string }) {
     template: t.name,
     command: [backend.exe, ...launchArgs].join(' '),
     ctxAutoFitApplied,
-    fitMode,
-    note: fitMode === 'maximum' ? 'This template uses "Maximum available" Context Fill, which needs a live VRAM-fitted computation not replicated here — --ctx-size shown is the last saved value, not the true max-fit figure. Open the template in the UI for the exact live preview.' : undefined
+    fitMode
   }
 }
 
@@ -906,13 +893,12 @@ export async function toolBenchmark(args: { template: string; prompts?: string[]
   } finally {
     try { await D().stopModel(target.id) } catch {}
     // Restore exactly whichever thing was actually running before this
-    // call started — the target itself for a self-benchmark (this is the
-    // step that was previously missing entirely: a self-benchmark left the
-    // caller's own server stopped with nothing to bring it back, requiring
-    // a second, manual restart — which could also lose to a stale exit
-    // event from the just-stopped process, see the runModelImpl exit
-    // handler's staleness guard), or the blocker if a DIFFERENT Template
-    // had to be stopped to free the port.
+    // call started — the target itself for a self-benchmark (without this,
+    // a self-benchmark would leave the caller's own server stopped with
+    // nothing to bring it back, requiring a second, manual restart — which
+    // could also lose to a stale exit event from the just-stopped process,
+    // see the runModelImpl exit handler's staleness guard), or the blocker
+    // if a DIFFERENT Template had to be stopped to free the port.
     if (targetWasRunning) {
       try {
         const backend = await resolveBackend(target)

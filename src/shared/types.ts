@@ -55,6 +55,10 @@ export interface BackendVersion {
   version: string         // version subfolder name (alias of `name`)
   path: string            // absolute path to the directory containing the exe (cwd)
   exe: string             // exe filename, relative to `path`
+  // GPU runtime libraries (ggml-cuda.dll, ggml-vulkan.dll, ggml-hip.dll, or
+  // their lib*.so equivalents) found alongside the exe — see backendOverhead.ts,
+  // where this is the authoritative signal for detectBackendRuntimeType.
+  runtimeLibs?: string[]
   hasCommands: boolean    // whether a commands.json exists for backendKey
   rootDir: string         // backend root folder (default BACKEND_DIR or external)
   external: boolean       // true when discovered inside an external backend folder
@@ -352,8 +356,7 @@ export interface ModelDefaultsSettings {
   useCurrentMemState?: boolean
   // MoE offloading strategy. 'offload' = find a good GPU layer count
   // (default). 'max' = push as many layers to GPU as possible, forcing MoE
-  // expert weights onto CPU (--moe-cpu-layers). When 'max', the "Maximum
-  // available" AutoFill option is disabled (it would conflict).
+  // expert weights onto CPU (--n-cpu-moe).
   moeOffloadStrategy?: 'offload' | 'max'
   // "Open Chat UI automatically on Template startup" — off by default. The
   // per-Template Chat UI/API Only switch was removed: the bundled webui is

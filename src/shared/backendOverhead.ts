@@ -7,8 +7,18 @@
 // set, and the user can always override the detected default manually.
 export type BackendRuntimeType = 'cuda' | 'rocm' | 'vulkan' | 'cpu' | 'unknown'
 
-export function detectBackendRuntimeType(backend: { name?: string; displayName?: string; backendKey?: string; exe?: string; path?: string } | null | undefined): BackendRuntimeType {
+export function detectBackendRuntimeType(backend: { name?: string; displayName?: string; backendKey?: string; exe?: string; path?: string; runtimeLibs?: string[] } | null | undefined): BackendRuntimeType {
   if (!backend) return 'unknown'
+  // The loadable ggml backend library actually shipped next to the exe is
+  // authoritative — a fork/version display name is free-form and often
+  // carries no runtime hint at all. Only fall back to guessing from the
+  // name when no runtimeLibs were recorded for this backend (e.g. it was
+  // discovered before this field existed).
+  const libs = (backend.runtimeLibs || []).map(l => l.toLowerCase())
+  if (libs.some(l => l.includes('cuda'))) return 'cuda'
+  if (libs.some(l => l.includes('hip'))) return 'rocm'
+  if (libs.some(l => l.includes('vulkan'))) return 'vulkan'
+  if (libs.length > 0) return 'cpu'
   const haystack = [backend.name, backend.displayName, backend.backendKey, backend.exe, backend.path]
     .filter(Boolean).join(' ').toLowerCase()
   if (/\bcuda\b|\bcu\d/.test(haystack)) return 'cuda'

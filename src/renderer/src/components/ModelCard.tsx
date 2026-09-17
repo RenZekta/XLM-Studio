@@ -19,7 +19,7 @@ export default function ModelCard({ card }: Props) {
   //   4. Otherwise fall back to the model's native context_length from the
   //      GGUF metadata, then 32768.
   const ignoreCtxOverride = card.template.args?.['__ignoreCtxOverride'] === true
-  const autoCtxFill = (card.template.args?.['__autoCtxFill'] as 'off' | 'auto' | 'maximum') || 'off'
+  const autoCtxFill = (card.template.args?.['__autoCtxFill'] as 'off' | 'auto') || 'off'
   const effectiveCtx = useMemo(() => {
     const presetCtx = card.template.args?.['--ctx-size']
     const presetVal = presetCtx !== undefined && presetCtx !== '' && presetCtx !== null ? Number(presetCtx) : 0
@@ -160,13 +160,13 @@ export default function ModelCard({ card }: Props) {
     }
     // Determine how --ctx-size / --fit are passed.
     // AutoFill "Auto" (dense OR MoE): defer to llama-server's --fit — do NOT
-    //   pass --ctx-size at all, so llama-server decides context freely.
+    //   pass --ctx-size at all, so llama-server decides context freely and
+    //   fits as much of it as possible.
     //   Note: --fit is a SELECT arg (options on/off), so it must be passed as
     //   "--fit on" (a bare "--fit" flag crashes llama-server → server closes
     //   instantly).
-    // AutoFill "Maximum": force --ctx-size to the computed max-fitting context.
     // Otherwise: force --ctx-size to the effective context.
-    const autoFitMode = ignoreCtxOverride && autoCtxFill  // 'off' | 'auto' | 'maximum'
+    const autoFitMode = ignoreCtxOverride && autoCtxFill  // 'off' | 'auto'
     const isAutoFitAuto = autoFitMode === 'auto'
     const setCtxArg = (val: number) => {
       const idx = args.indexOf('--ctx-size')
@@ -275,15 +275,15 @@ export default function ModelCard({ card }: Props) {
               <Gauge size={11} />
               ctx {effectiveCtx.toLocaleString()}
             </span>
-            {/* Task 2.1/2.2: yellow hint when Ignore Context Length Override is ON.
-                When AutoFill is also ON, the hint shows the chosen mode
-                ("Auto Context Fill" or "Max Context Fill") with a two-row tooltip. */}
+            {/* Yellow hint when Ignore Context Length Override is ON. When
+                AutoFill is also ON, the hint shows "Auto Context Fill" with
+                a two-row tooltip. */}
             {bothAutoFillOn ? (
               <span
                 className="ctx-override-hint"
-                title={`Ignore Context Length Override in preset settings is turned on\nUse Automatic Context Fill is set to ${autoCtxFill === 'maximum' ? 'Maximum available' : 'Auto'}`}
+                title={`Ignore Context Length Override in preset settings is turned on\nUse Automatic Context Fill is set to Auto`}
               >
-                *{autoCtxFill === 'maximum' ? 'Max' : 'Auto'} Context Fill
+                *Auto Context Fill
               </span>
             ) : ignoreCtxOverride ? (
               <span

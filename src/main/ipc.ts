@@ -160,7 +160,7 @@ const DEFAULT_SETTINGS: AppSettings = {
   mainBackendFolder: null,
   theme: 'system',
   trackedBackends: DEFAULT_TRACKED,
-  modelDefaults: { autoFitEnabled: true, autoFitContextLength: 60000, guardrailMode: 'strict', customMaxSizeGB: 0, useCurrentMemState: false, moeOffloadStrategy: 'max' /* item 6: default to MAX+ForceMoEtoCPU */, autoFitUse2xIncrements: false, autoFitYarnAutoScale: false, autoEnableMmproj: true, cpuThreadsOverrideEnabled: false, cpuThreadsOverridePercent: 100, parallelOverrideEnabled: false, parallelInferenceMode: 'unified', parallelOverrideValue: 4, parallelOverrideValueDense: 4, parallelOverrideValueMoe: 4, perfMaxSessions: 20, autoOpenChatUI: false },
+  modelDefaults: { autoFitEnabled: true, autoFitContextLength: 60000, guardrailMode: 'strict', customMaxSizeGB: 0, useCurrentMemState: false, moeOffloadStrategy: 'max' /* default: MAX GPU layers + force MoE experts to CPU */, autoFitUse2xIncrements: false, autoFitYarnAutoScale: false, autoEnableMmproj: true, cpuThreadsOverrideEnabled: false, cpuThreadsOverridePercent: 100, parallelOverrideEnabled: false, parallelInferenceMode: 'unified', parallelOverrideValue: 4, parallelOverrideValueDense: 4, parallelOverrideValueMoe: 4, perfMaxSessions: 20, autoOpenChatUI: false },
   baseUrlOverride: { ...DEFAULT_BASE_URL_OVERRIDE },
   samplingPresets: [],
   starredPresetId: 'lm-studio',
@@ -222,11 +222,10 @@ async function loadSettings(): Promise<AppSettings> {
         guardrailMode: data.modelDefaults?.guardrailMode ?? DEFAULT_SETTINGS.modelDefaults!.guardrailMode,
         customMaxSizeGB: data.modelDefaults?.customMaxSizeGB ?? DEFAULT_SETTINGS.modelDefaults!.customMaxSizeGB,
         useCurrentMemState: data.modelDefaults?.useCurrentMemState ?? false,
-        // Fixed to match the same "respect saved value, else use the
-        // CURRENT default" pattern as every other field here. It previously
-        // hardcoded 'offload' as the fallback regardless of DEFAULT_SETTINGS,
-        // so bumping the default above would never actually reach anyone with
-        // an existing settings.json (i.e. everyone but a fresh install).
+        // Respect a saved value; otherwise fall back to the CURRENT default
+        // (DEFAULT_SETTINGS), not a hardcoded literal — so bumping the
+        // default above reaches everyone without a saved value, not just a
+        // fresh install.
         moeOffloadStrategy: (data.modelDefaults?.moeOffloadStrategy === 'offload' || data.modelDefaults?.moeOffloadStrategy === 'max')
           ? data.modelDefaults.moeOffloadStrategy
           : DEFAULT_SETTINGS.modelDefaults!.moeOffloadStrategy,
@@ -582,6 +581,37 @@ const SERVER_NAMES = process.platform === 'win32'
 // Sibling files that indicate a real backend directory (not a stray copy).
 const SIBLING_HINTS = ['ggml.dll', 'llama.dll', 'ggml-metal.dll', 'llama-server.exe', 'llama-server', 'main.exe', 'main']
 
+// GPU runtime backend libraries llama.cpp ships as a loadable ggml backend
+// next to the server exe. Their presence is authoritative for which GPU API
+// a build talks to (unlike the fork/version display name, which is
+// free-form and often carries no runtime hint at all, e.g. a TurboQuant
+// build named only after its own fork). Linux/macOS ship the same libs as
+// lib*.so instead of *.dll.
+const RUNTIME_LIB_NAMES: Record<'cuda' | 'rocm' | 'vulkan', string[]> = {
+  cuda: ['ggml-cuda.dll', 'libggml-cuda.so'],
+  rocm: ['ggml-hip.dll', 'libggml-hip.so'],
+  vulkan: ['ggml-vulkan.dll', 'libggml-vulkan.so']
+}
+
+// Scan a backend's exe directory for the GPU runtime libraries above,
+// returning the subset actually present (usually zero or one, but a build
+// can ship more than one backend for the user to pick between at runtime).
+function detectRuntimeLibs(dir: string): string[] {
+  let names: string[]
+  try {
+    names = readdirSync(dir).map(n => n.toLowerCase())
+  } catch {
+    return []
+  }
+  const found: string[] = []
+  for (const list of Object.values(RUNTIME_LIB_NAMES)) {
+    for (const lib of list) {
+      if (names.includes(lib)) found.push(lib)
+    }
+  }
+  return found
+}
+
 // llama-gguf binary names (for native metadata extraction).
 const GGUF_TOOL_NAMES = process.platform === 'win32'
   ? ['llama-gguf.exe', 'llama-gguf', 'gguf.exe', 'gguf']
@@ -639,7 +669,7 @@ function discoverBackendExe(dir: string, depth = 0, maxDepth = 6): DiscoveredExe
 
 // Generic recursive search for a named tool binary inside a backend version dir.
 // The gguf tool is often nested in build/bin/ (same as llama-server), so a
-// flat top-level scan (as used previously) misses it. This walks up to 6 levels.
+// flat top-level scan wouldn't find it. This walks up to 6 levels.
 function discoverToolByName(dir: string, names: string[], depth = 0, maxDepth = 6): string | null {
   if (depth > maxDepth) return null
   let entries: import('fs').Dirent[]
@@ -837,13 +867,12 @@ function parseGgufToolOutput(output: string): Record<string, string> {
 // A backend root contains <backendKey>/<version>/...exe (fork-aware layout),
 // but we also tolerate the legacy flat layout <version>/...exe.
 //
-// FIX (version display): Previously the legacy check used
-// `discoverBackendExe(forkDir, 0, 1)` (maxDepth=1) which would find an exe
-// INSIDE a version subfolder and falsely treat the fork folder as a version.
-// This produced displayName "llama.cpp (llama.cpp)" for the new layout.
-// Now we scan version subdirectories FIRST (new layout). Only when NO version
-// subdirectory contains an exe do we fall back to the legacy flat layout
-// (exe directly in the fork folder, possibly nested in build/bin/).
+// Version subdirectories are scanned FIRST (new layout). Only when NO
+// version subdirectory contains an exe do we fall back to the legacy flat
+// layout (exe directly in the fork folder, possibly nested in build/bin/) —
+// scanning flat-first with a shallow maxDepth would find an exe INSIDE a
+// version subfolder and falsely treat the fork folder itself as a version,
+// producing a displayName like "llama.cpp (llama.cpp)" for the new layout.
 async function scanBackendRoot(rootDir: string, rootExternal: boolean, rootIndex: number): Promise<BackendVersion[]> {
   const out: BackendVersion[] = []
   let topEntries: import('fs').Dirent[]
@@ -879,6 +908,7 @@ async function scanBackendRoot(rootDir: string, rootExternal: boolean, rootIndex
         version: v.name,
         path: found.dir,
         exe: found.exeName,
+        runtimeLibs: detectRuntimeLibs(found.dir),
         hasCommands: existsSync(join(BACKEND_DIR, e.name, 'commands.json')),
         rootDir,
         external: rootExternal
@@ -899,6 +929,7 @@ async function scanBackendRoot(rootDir: string, rootExternal: boolean, rootIndex
         version,
         path: direct.dir,
         exe: direct.exeName,
+        runtimeLibs: detectRuntimeLibs(direct.dir),
         hasCommands: existsSync(join(BACKEND_DIR, 'llama.cpp', 'commands.json')),
         rootDir,
         external: rootExternal
@@ -1221,12 +1252,11 @@ async function cleanupOldBackendVersions(backendKey: string, newVersion: string)
 }
 
 // ==========================================================================
-// App-quit cleanup (feature: stop/start race fix)
+// App-quit cleanup
 // ==========================================================================
 // On quit, kill every still-running llama-server process tree so no orphan
-// survives after XLM Studio closes (the user reported having to kill XLM
-// Studio from Task Manager because a child kept port 1234 alive). Called
-// from main/index.ts on `before-quit`.
+// survives after XLM Studio closes and keeps its port (e.g. 1234) alive.
+// Called from main/index.ts on `before-quit`.
 export async function cleanupAllProcesses(): Promise<void> {
   if (runningProcesses.size === 0) return
   const entries = Array.from(runningProcesses.entries())
@@ -1849,10 +1879,10 @@ export function registerIpcHandlers(): void {
     let available = await isPortAvailable(port)
     let finalPort = port
     let finalArgs = [...opts.args]
-    // ALWAYS update the --port argument in finalArgs to match the
-    // resolved port (which may be the override port). Previously this only
-    // happened inside the port-conflict block, so when the override port was
-    // available, the server still started on the ORIGINAL port from the args.
+    // ALWAYS update the --port argument in finalArgs to match the resolved
+    // port (which may be the override port), regardless of whether that
+    // port needed conflict resolution below — otherwise the server can
+    // start on the original port from args instead of the resolved one.
     {
       const portIdx = finalArgs.indexOf('--port')
       if (portIdx !== -1 && portIdx + 1 < finalArgs.length) {
@@ -2091,9 +2121,9 @@ export function registerIpcHandlers(): void {
       // Start button already updates its local card status directly from
       // this same IPC response, but an MCP/skill-triggered start bypasses
       // that entirely (it calls this function directly, in-process, no
-      // renderer round-trip), which previously left the card showing "idle"
-      // (Start button enabled) even though the process really was running —
-      // clicking Start then failed with "Already running".
+      // renderer round-trip). Without this broadcast the card would show
+      // "idle" (Start button enabled) even though the process is really
+      // running, and clicking Start would then fail with "Already running".
       BrowserWindow.getAllWindows().forEach(win => {
         if (!win.isDestroyed()) win.webContents.send('model-started', { id: opts.id, pid: proc.pid, port: finalPort })
       })
@@ -2755,12 +2785,11 @@ export function registerIpcHandlers(): void {
           // If we got the essential fields, return immediately — no need for JS fallback.
           if (result.blockCount && result.contextLength) {
             console.log('[GGUF] Native tool succeeded: blockCount=' + result.blockCount + ' contextLength=' + result.contextLength + ' chatTemplate=' + (result.chatTemplate ? 'yes' : 'no'))
-            // The native-tool path previously returned WITHOUT ever
-            // writing to metadataCache/disk — every single call for a model
-            // whose metadata only the native tool could resolve was forced to
-            // re-run the tool from scratch (this branch), defeating the whole
-            // point of the persisted cache. Stamp + persist it like the JS
-            // fallback path does below.
+            // Stamp + persist to metadataCache/disk here, same as the JS
+            // fallback path does below — without this, every call for a
+            // model whose metadata only the native tool can resolve would
+            // have to re-run the tool from scratch, defeating the point of
+            // the persisted cache.
             result.schemaVersion = METADATA_SCHEMA_VERSION
             if (modelPath) {
               metadataCache[modelPath] = result
@@ -3195,9 +3224,8 @@ export function registerIpcHandlers(): void {
   //   1. nvidia-smi            → NVIDIA GPUs (free + total + name, accurate).
   //   2. systeminformation     → AMD / Intel GPUs (name + total VRAM via WMI/PCI).
   //   3. Linux amdgpu sysfs    → accurate free VRAM for AMD on Linux.
-  // Previously this only ever tried nvidia-smi, so a machine with an AMD GPU
-  // (e.g. RX 9070 XT) was reported as "NVIDIA GPU (0 MB VRAM)". The fallbacks
-  // below detect the real vendor + name and report a best-effort free VRAM.
+  // The fallbacks below detect the real vendor + name and report a
+  // best-effort free VRAM on non-NVIDIA hardware.
   async function getVramInfoImpl() {
     try {
       const isWin = process.platform === 'win32'
@@ -3282,8 +3310,36 @@ export function registerIpcHandlers(): void {
             } catch (e) { console.log('[VRAM] sysfs read error:', String(e)) }
           }
 
-          // Best-effort free estimate when the platform can't report free VRAM
-          // directly (e.g. Windows + AMD). Keeps VRAM budgeting functional.
+          // --- 4. Windows: live dedicated-VRAM usage via the built-in "GPU
+          // Adapter Memory" performance counter (Windows 10+, vendor-agnostic
+          // — works for AMD/Intel same as NVIDIA, unlike nvidia-smi/amdgpu
+          // sysfs above). This is what actually makes "Use current memory
+          // state" reflect real usage on Windows instead of a static number.
+          if (isWin && freeVRAMMB === 0 && totalVRAMMB > 0) {
+            try {
+              const psCmd = 'powershell -NoProfile -NonInteractive -Command '
+                + '"(Get-Counter \'\\GPU Adapter Memory(*)\\Dedicated Usage\' -ErrorAction Stop).CounterSamples '
+                + '| Measure-Object -Property CookedValue -Sum | Select-Object -ExpandProperty Sum"'
+              const usedBytesStr = await new Promise<string | null>((resolve) => {
+                exec(psCmd, { timeout: 5000 }, (err, stdout) => {
+                  if (err) return resolve(null)
+                  resolve(stdout.trim())
+                })
+              })
+              const usedBytes = usedBytesStr ? Number(usedBytesStr) : NaN
+              if (!isNaN(usedBytes) && usedBytes >= 0) {
+                const usedMB = Math.round(usedBytes / (1024 * 1024))
+                freeVRAMMB = Math.max(0, totalVRAMMB - usedMB)
+              }
+            } catch { /* fall through to the static estimate below */ }
+          }
+
+          // Last-resort static estimate, only reached when no live source
+          // above (nvidia-smi, Linux amdgpu sysfs, or the Windows GPU
+          // Adapter Memory counter) was available at all — e.g. a VM without
+          // the counter, or a permissions issue running PowerShell. Keeps
+          // VRAM budgeting functional but does NOT reflect real usage, so it
+          // will look identical across polls regardless of what's loaded.
           if (freeVRAMMB === 0 && totalVRAMMB > 0) {
             freeVRAMMB = Math.round(totalVRAMMB * 0.85)
           }
@@ -3535,9 +3591,8 @@ function readU64(buf: Buffer, offset: number): bigint {
 function getHardcodedPresets(): any[] {
   // NOTE: isStarred is always false here on purpose. The starred preset is
   // determined by the persisted `starredPresetId` in settings.json, applied
-  // at list time. Previously LM Studio was baked-in as isStarred:true, which
-  // overrode the saved star on every relaunch (bug: the dropdown always
-  // reset to "LM Studio ★" even after the user starred a different preset).
+  // at list time — a hardcoded isStarred:true here would override the saved
+  // star on every relaunch.
   return [
     {
       id: 'lm-studio',

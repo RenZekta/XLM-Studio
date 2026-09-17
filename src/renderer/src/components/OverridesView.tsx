@@ -129,7 +129,6 @@ export default function OverridesView() {
         </div>
       </div>
 
-      {/* Feature 24: Base URL Override */}
       <div className="settings-section">
         <div className="settings-section-title"><Link2 /> Base URL Override</div>
         <div className="settings-row" style={{ borderBottom: 'none', flexDirection: 'column', alignItems: 'flex-start', gap: 12 }}>
@@ -149,10 +148,10 @@ export default function OverridesView() {
             </div>
           </div>
 
-          {/* Task 1: Base URL — LM Studio style. Single unified box with the full
-              URL as one continuous string; the port is an inline transparent input.
-              A copy button sits on the LEFT, visible when the input isn't focused.
-              When focused, a purple/blue focus glow highlights the box. */}
+          {/* Base URL shown as one continuous string, LM Studio style, with the
+              port as an inline transparent input. A copy button sits on the
+              LEFT, visible when the input isn't focused; a focus glow
+              highlights the box when it is. */}
           <div style={{ width: '100%' }}>
             <BaseUrlField
               port={baseUrlOverride.port}
@@ -217,8 +216,6 @@ export default function OverridesView() {
         </div>
       </div>
 
-      {/* Item (this round): "Parallel Inference" block — Unified/Separate replaces
-          the old MoE-only scoping toggle. */}
       <div className="settings-section">
         <div className="settings-section-title"><Server /> Parallel Inference</div>
         <div className="settings-row" style={{ borderBottom: 'none', flexDirection: 'column', alignItems: 'flex-start', gap: 12 }}>
@@ -312,7 +309,6 @@ export default function OverridesView() {
         </div>
       </div>
 
-      {/* Feature 18: Model Defaults — AutoFit context override */}
       <div className="settings-section">
         <div className="settings-section-title"><Database /> Model Defaults</div>
         <div className="settings-row" style={{ borderBottom: 'none', flexDirection: 'column', alignItems: 'flex-start', gap: 12 }}>
@@ -348,7 +344,6 @@ export default function OverridesView() {
                     const d = { ...modelDefaults, autoFitContextLength: value }
                     setModelDefaults(d); try { await window.api?.setModelDefaults?.(d) } catch {}
                   }} />
-                {/* Item 5: bumped ceiling 200 000 → 2 097 152 (2M-context models). */}
                 <span style={{ fontSize: 11, color: 'var(--text-muted)' }}>tokens (0 – 2 097 152; 0 = no minimum, defers to the template's/model's own context)</span>
                 <label style={{ display: 'flex', alignItems: 'center', gap: 5, fontSize: 11, color: 'var(--text-muted)', marginLeft: 'auto', cursor: 'pointer' }}>
                   <input type="checkbox" checked={!!modelDefaults.autoFitUse2xIncrements} onChange={async (e) => {
@@ -385,11 +380,10 @@ export default function OverridesView() {
                     setModelDefaults(d); try { await window.api?.setModelDefaults?.(d) } catch {}
                   }} />
               )}
-              {/* Item 5: "Automatic YaRN scaling control override and upscale to
-                  AutoFit" — when on, every template's effective max context can be
-                  upscaled via YaRN to reach this AutoFit floor even if the model's
-                  native context is smaller. See item 8 for the per-template switch
-                  this mirrors/drives. */}
+              {/* When on, every template's effective max context can be upscaled
+                  via YaRN to reach this AutoFit floor even if the model's native
+                  context is smaller — mirrors/drives the per-template "Automatic
+                  YaRN scaling control" switch in CmdParamsEditor. */}
               <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', width: '100%', marginTop: 12 }}>
                 <div>
                   <div className="settings-row-label" style={{ fontSize: 12 }}>Automatic YaRN scaling control override and upscale to AutoFit</div>
@@ -409,10 +403,6 @@ export default function OverridesView() {
               </div>
             </div>
           )}
-          {/* Task 4: Current Memory State use in memory calculations */}
-          {/* Item 4 (rename): "Current Memory State use in memory calculations"
-              -> "Use current memory state in memory calculations" — same
-              setting, just reads better grammatically. */}
           <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', width: '100%', marginTop: 8 }}>
             <div>
               <div className="settings-row-label">Use current memory state in memory calculations</div>
@@ -570,7 +560,7 @@ export default function OverridesView() {
           <div style={{ width: '100%', marginTop: 12 }}>
             <div className="settings-row-label" style={{ marginBottom: 4 }}>Strategy for MoE offloading calculations</div>
             <div className="settings-row-sub" style={{ marginBottom: 8 }}>
-              "Offload GPU Layers" leaves layer placement to llama.cpp's own MoE-aware auto-split heuristic. "MAX GPU Layers and Force MoE Weights onto CPU" (default) keeps all non-expert layers resident on GPU and only forces as many MoE/expert weight blocks onto CPU RAM as needed to fit the desired context — the more precise, usually faster option. Works together with "Maximum available" AutoFill (it computes exactly how many layers to force onto CPU to reach that context, live).
+              "Offload GPU Layers" leaves layer placement to llama.cpp's own MoE-aware auto-split heuristic. "MAX GPU Layers and Force MoE Weights onto CPU" (default) keeps all non-expert layers resident on GPU and only forces as many MoE/expert weight blocks onto CPU RAM as needed to fit the desired context — the more precise, usually faster option. The live recommendation panel computes exactly how many layers to force onto CPU to reach the requested context.
             </div>
             <div className="mmproj-mode-toggle" style={{ display: 'inline-flex' }}>
               <button
@@ -594,7 +584,6 @@ export default function OverridesView() {
         </div>
       </div>
 
-      {/* Feature 19: Model Loading Guardrails */}
       <div className="settings-section">
         <div className="settings-section-title"><Shield /> Model Loading Guardrails</div>
         <div className="settings-row" style={{ borderBottom: 'none', flexDirection: 'column', alignItems: 'flex-start', gap: 8 }}>

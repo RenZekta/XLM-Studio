@@ -456,10 +456,10 @@ function PrefillChart({ sessions, onFullscreen, fullscreen, heightPx }: { sessio
           <button className="btn btn-ghost btn-icon" title="Fullscreen" onClick={onFullscreen}><Maximize2 size={14} /></button>
         )}
       </div>
+      {/* Cold/warm is distinguished by line style, not color, since the line
+          color is the same per session regardless of cache state. */}
       <div style={{ fontSize: 11, color: 'var(--text-muted)', marginBottom: 8 }}>
         "Cached (warm)" is a heuristic — llama-server doesn't report cache hits directly, so bursts far faster than this session's own typical cold-prefill speed are inferred as cache hits.
-        {/* Item 3: legend explaining the line-style distinction, since color
-            alone (same per session) no longer differs between cold/warm. */}
         {' '}Solid line = cold, dashed line = cached (warm) — hover any point for the exact value.
       </div>
       {(() => {
@@ -493,13 +493,10 @@ function PrefillChart({ sessions, onFullscreen, fullscreen, heightPx }: { sessio
                 <Legend wrapperStyle={{ fontSize: 11 }} />
                 {sessions.map((s, i) => {
                   const base = SERIES_COLORS[i % SERIES_COLORS.length]
-                  // Previously both cold/warm points used the
-                  // SAME color (just different opacity/shape), and the tooltip
-                  // never actually said which was which — indistinguishable at a
-                  // glance and on hover. Now cold is a SOLID line in the
-                  // session's color, warm is a DASHED line in the same color
-                  // (so you can still tell which SESSION it belongs to), and the
-                  // shared ChartTooltip explicitly labels "Cold" vs "Cached (warm)".
+                  // Cold is a SOLID line in the session's color, warm is a
+                  // DASHED line in the same color (so you can still tell
+                  // which SESSION it belongs to), and the shared
+                  // ChartTooltip explicitly labels "Cold" vs "Cached (warm)".
                   const cold = s.data.prefillPoints.filter(p => !p.cached)
                     .sort((a, b) => a.promptSize - b.promptSize)
                     .map(p => ({ ...p, __seriesLabel: `${s.data.templateNameSnapshot} — cold` }))

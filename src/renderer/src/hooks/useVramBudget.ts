@@ -16,29 +16,23 @@ import { formatWithSpaces } from '../utils/contextFormat'
 //        page-cache pressure, tokenizer. A separate RAM-side overhead term
 //        exists for the RAM-hosted path.
 //
-// O used to be a single hardcoded constant here ("1 GB flat + 0.5 GB/GPU"),
-// which real-world comparison against llama-server's own --fit showed was
-// both too large in general (a single Dense-model test: our "max context
-// that fits" estimate came in far below --fit's actual result, 79 852 vs.
-// 146 688; a second run with mmproj enabled showed the same pattern, ~750 MB
-// short) AND backend-runtime-dependent in a way a flat constant could never
-// capture — CUDA, ROCm and Vulkan measurably differ in driver/context
-// footprint (Vulkan in particular runs far leaner; see backendOverhead.ts).
-// Both VRAM and RAM overhead are now plain, independent, per-Template
-// user-adjustable values (opts.vramOverheadMB / opts.ramOverheadMB below),
-// defaulted per detected backend runtime rather than hardcoded — see
-// buildQuickEngineBaseline() in shared/presetBaselines.ts for the defaults
-// applied to a freshly-created Template, and the "VRAM/RAM Overhead"
-// controls in CmdParamsEditor.tsx's Advanced Parameters for where the user
-// can retune or disable either independently.
+// O (runtime overhead) is backend-runtime-dependent in a way a flat
+// constant can't capture — CUDA, ROCm and Vulkan measurably differ in
+// driver/context footprint (Vulkan in particular runs far leaner; see
+// backendOverhead.ts). So VRAM and RAM overhead are plain, independent,
+// per-Template user-adjustable values (opts.vramOverheadMB /
+// opts.ramOverheadMB below), defaulted per detected backend runtime rather
+// than hardcoded — see buildQuickEngineBaseline() in
+// shared/presetBaselines.ts for the defaults applied to a freshly-created
+// Template, and the "Memory calculation engine control" block in
+// CmdParamsEditor.tsx for where the user can retune or disable either
+// independently.
 //
-// Previously the KV estimate used the heuristic
-//   VRAM_KV = model_size_MB * (0.12 * (target_context / 32768))
-// which is wildly inaccurate (off by 2–4× on common models). The new formula
-// uses the model's real attention geometry extracted from the GGUF header
-// (head_count_kv, key_length, value_length) and the bytes-per-element of the
-// SELECTED --cache-type-k/v (f16, q8_0, q4_0, turbo3, …), which is the whole
-// point of "use the bits-per-weight value for a specific model".
+// The KV estimate uses the model's real attention geometry extracted from
+// the GGUF header (head_count_kv, key_length, value_length) and the
+// bytes-per-element of the SELECTED --cache-type-k/v (f16, q8_0, q4_0,
+// turbo3, …) — a flat heuristic like `model_size_MB * (0.12 * (ctx / 32768))`
+// is off by 2–4× on common models, so it's not used here.
 // ===========================================================================
 
 export interface VramBudget {
@@ -262,6 +256,15 @@ export function useVramBudget(opts: {
     // particular runs far leaner), so a value calibrated for one runtime
     // meaningfully over- or under-estimates for another.
     const runtimeOverheadMB = Math.max(0, Number(opts.vramOverheadMB) || 0)
+    // On a system with no VRAM hardware at all (totalVRAM <= 0 — unified
+    // memory or a CPU-only backend), the VRAM-side overhead has no VRAM
+    // pool to reserve against, but the GPU driver/runtime context it
+    // represents still has to live somewhere: system RAM. Fold it into the
+    // RAM overhead pool rather than silently discarding it. This must key
+    // off totalVRAM (hardware presence), not freeVRAM — a system that DOES
+    // have VRAM but is currently fully utilized (freeVRAM == 0 under
+    // "current memory state") should not have its overhead redirected to RAM.
+    const vramAbsent = totalVRAM <= 0
 
     // ----- mmproj overhead -----
     const vramMM = opts.mmprojEnabled ? opts.mmprojSizeMB : 0
@@ -303,7 +306,7 @@ export function useVramBudget(opts: {
     // value (mmap page-cache pressure, tokenizer/vocab tables; far less
     // backend-dependent than the VRAM side, since it doesn't involve any GPU
     // driver/runtime context) instead of a hardcoded 1024.
-    const ramOverheadMB = Math.max(0, Number(opts.ramOverheadMB) || 0)
+    const ramOverheadMB = Math.max(0, Number(opts.ramOverheadMB) || 0) + (vramAbsent ? runtimeOverheadMB : 0)
     const ramForWeights = freeRAM - vramKVEffective - vramMM - computeBufferEffective - ramOverheadMB
 
     let recommendedLayers: number
@@ -338,15 +341,13 @@ export function useVramBudget(opts: {
       // "MAX GPU Layers and Force MoE Weights onto CPU" keeps
       // ALL non-expert layers resident on GPU always (that's the "MAX GPU
       // Layers" part) and only pushes SOME layers' MoE/expert weight tensors to
-      // CPU RAM via --moe-cpu-layers to make room for the desired context.
-      // Previously `recommendedLayers` here reused the "how many layers fit on
-      // GPU" formula from the plain offload strategy, which is the OPPOSITE
-      // number from what the UI needs — the "MAX GPU" strategy already assumes
-      // ~all layers stay resident, and this widget is asking "how many of THEM
-      // need their MoE weights evicted to CPU RAM to fit?" — reusing the fits-
-      // on-GPU count meant a model that fit fully in VRAM showed "all layers
-      // recommended for CPU" (maxLayers/maxLayers) instead of the correct
-      // answer of 0 layers needing eviction.
+      // CPU RAM via --n-cpu-moe to make room for the desired context.
+      // `recommendedLayers` here answers "how many layers need their MoE
+      // weights evicted to CPU RAM to fit?" — the OPPOSITE number from the
+      // plain offload strategy's "how many layers fit on GPU" formula, since
+      // this strategy already assumes ~all layers stay resident. A model
+      // that fits fully in VRAM should recommend 0 layers needing eviction,
+      // not maxLayers/maxLayers.
       //
       // Model: each layer's MoE (expert) weight is estimated as an equal share
       // of the "expert-dominated" fraction of the file (expertParamFrac, same
@@ -385,31 +386,23 @@ export function useVramBudget(opts: {
     // AutoFit guardrail warning.
     // Only warn when the MODEL LITERALLY CANNOT support the requested override
     // context — i.e. its native max context_length (from the GGUF header) is
-    // known and is below the override value. Previously this compared the
-    // *input* ctx to the override, which fired permanently for any model whose
-    // slider sat below 60000 (the default override) even when it fit fine.
-    // (a) `.toLocaleString` was missing its call parens, so
-    // the warning literally printed the function's source ("function
-    // toLocaleString() { [native code] }") instead of a formatted number.
-    // (b) the check now also considers `ropeScaledMaxContext` — a model using
-    // YaRN (or other RoPE) scaling to extend its usable context past the raw
-    // GGUF native value must not be flagged just because its UN-scaled native
-    // context looks small.
+    // known and is below the override value. `ropeScaledMaxContext` is
+    // factored in so a model using YaRN (or other RoPE) scaling to extend
+    // its usable context past the raw GGUF native value isn't flagged just
+    // because its UN-scaled native context looks small.
     let warning: string | undefined
     const effectiveMaxContext = (opts.ropeScaledMaxContext && opts.ropeScaledMaxContext > 0)
       ? Math.max(opts.ropeScaledMaxContext, meta?.contextLength || 0)
       : meta?.contextLength
     if (modelDefaults.autoFitEnabled && effectiveMaxContext && effectiveMaxContext > 0 &&
         effectiveMaxContext < modelDefaults.autoFitContextLength) {
-      // The message used to unconditionally claim the context "will be
-      // capped at the model's maximum" — but ModelCard's actual launch-time
-      // effectiveCtx computation NEVER caps; the override is a floor, so it
-      // would actually pass a --ctx-size ABOVE the model's native/trained
-      // context. Without RoPE/YaRN scaling configured, that's not a safe cap,
-      // it's a likely startup failure or garbage output. Reflect the two real
-      // outcomes accurately depending on whether YaRN auto-scaling (the
-      // global "upscale to AutoFit" switch, or this preset's own switch) is
-      // actually going to handle it.
+      // ModelCard's actual launch-time effectiveCtx computation never caps —
+      // the override is a floor, so without RoPE/YaRN scaling configured it
+      // would pass a --ctx-size ABOVE the model's native/trained context,
+      // which is a likely startup failure or garbage output rather than a
+      // safe cap. Reflect the two real outcomes accurately depending on
+      // whether YaRN auto-scaling (the global "upscale to AutoFit" switch,
+      // or this preset's own switch) is actually going to handle it.
       warning = (opts.ropeScaledMaxContext && opts.ropeScaledMaxContext >= modelDefaults.autoFitContextLength)
         ? `Model's native context (${formatWithSpaces(meta?.contextLength || 0)}) is below the Minimum AutoFit override (${formatWithSpaces(modelDefaults.autoFitContextLength)}) — YaRN scaling is active and will extend it to reach the override.`
         : `Model's native context (${formatWithSpaces(effectiveMaxContext)}) is below the Minimum AutoFit override (${formatWithSpaces(modelDefaults.autoFitContextLength)}). Enable "Automatic YaRN scaling control" (per-preset, or globally in Settings) to actually reach the override — otherwise the launch context will exceed the model's trained maximum and may fail to start.`
@@ -449,10 +442,10 @@ export function useVramBudget(opts: {
 // Computes the MAX context window that fits into the available memory
 // (VRAM first, then RAM) given the model weights + KV cache + buffers.
 // Used by:
-//   - Dense models with "Use Automatic Context Fill" ON → fit model fully,
-//     then fill remaining memory with context up to the model's max context.
-//   - MoE models with "Maximum available" → same fill logic.
-//   - MoE "Auto" → NOT used (llama-server --fit handles it).
+//   - Dense and MoE models with "Use Automatic Context Fill" ON → the actual
+//     launch defers to llama-server's own --fit, but this same search
+//     powers the read-only "will fit" recommendation line shown regardless
+//     of which fill mode is active.
 //
 // For MoE, the compute buffer B is scaled by the active-expert ratio, since
 // only active experts participate in the forward pass. All experts are
@@ -497,7 +490,7 @@ export interface AutoFillResult {
 // assuming VRAM-only residency. This is intentionally a simple, direct
 // estimate (NOT the layer-aware binary search computeAutoFillContext does)
 // — it's a baseline default for a brand-new template, not a "maximize everything"
-// optimizer; the user can always switch to "Maximum available" AutoFill for
+// optimizer; the live recommendation panel (computeAutoFillContext) runs
 // the more precise search.
 export function estimateMoeDefaultContext(params: {
   meta: any
@@ -569,32 +562,24 @@ export function computeAutoFillContext(params: {
   if (perTok === null) return null
   const perTokSafe = perTok  // non-null alias for use inside closures
   const mmprojMB = mmprojSizeMB
-  // MoE: scale the compute buffer by active/total ratio (per user request).
+  // MoE: scale the compute buffer by active/total ratio, since only active
+  // experts participate in the forward pass.
   const moeScale = (isMoe && totalExperts && activeExperts && totalExperts > 0)
     ? Math.max(0.25, activeExperts / totalExperts) : 1.0
-  // The previous version computed a PARTIAL layer count
-  // that fits in VRAM at minContext (layersAtVramFit), decided "VRAM usable"
-  // if that was >=50% of the model — but then ran its context binary search
-  // using totalAt(), which required the ENTIRE model's weight (modelSizeMB,
-  // ALL layers) to fit alongside KV+compute+overhead, regardless of how many
-  // layers the partial-fit branch had just determined were actually going to
-  // be GPU-resident. That mismatch (claiming e.g. 63/65 layers fit, but then
-  // testing as if all 65 needed to fit) meant the search almost always
-  // bottomed out at the minimum context — which is exactly the "63/65 layers
-  // → only 2048 tokens" report, when the model could actually support ~4096+
-  // once the weight requirement correctly reflected only 63 layers.
-  //
-  // Fixed with a single, internally-consistent model: layersAt(ctx) is the
-  // number of layers whose weight fits in the pool alongside THAT context's
-  // KV/compute/overhead — nothing else in this function ever assumes a
-  // layer count that disagrees with what layersAt() actually computed for
-  // the chosen context.
+  // layersAt(ctx) is the single source of truth for "how many layers fit":
+  // it returns the number of layers whose weight fits in the pool alongside
+  // THAT context's own KV/compute/overhead. Nothing else in this function
+  // may assume a layer count that disagrees with what layersAt() computed
+  // for the context actually being tested — mixing a layer count from one
+  // context with a fit-test for a different (larger) one is how a search
+  // like this silently bottoms out at the minimum context even when the
+  // model could support much more.
   function layersAt(ctx: number, poolMB: number): number {
     const kvMB = (layers * ctx * perTokSafe) / (1024 * 1024)
     // Compute-buffer estimate intentionally still uses modelSizeMB as a
-    // reference scale (it's a ~10% correction term, not the dominant
-    // weight-vs-budget constraint that caused the original bug, so a rough
-    // estimate here doesn't reintroduce the same class of error).
+    // reference scale — it's only a ~10% correction term, not the dominant
+    // weight-vs-budget constraint layersAt() exists to get right, so a rough
+    // estimate here is fine.
     const computeMB = Math.max(512, 0.10 * (modelSizeMB + kvMB)) * moeScale
     const remainingForWeights = poolMB - kvMB - computeMB - vramOverheadMB - mmprojMB
     if (remainingForWeights <= 0) return 0

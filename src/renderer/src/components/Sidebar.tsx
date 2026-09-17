@@ -159,7 +159,6 @@ export default function Sidebar() {
         <Activity size={16} />
         <span className="nav-item-text">Monitoring</span>
       </button>
-      {/* Item 6: Overrides tab — positioned after Monitoring, per the plan. */}
       <button
         className={`nav-item ${view === 'overrides' ? 'active' : ''}`}
         onClick={() => setView('overrides')}

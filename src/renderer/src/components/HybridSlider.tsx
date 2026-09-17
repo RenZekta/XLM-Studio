@@ -107,7 +107,13 @@ export default function HybridSlider({
           className="hybrid-text"
           min={min}
           max={max}
-          step={step}
+          // No `step` here (deliberately not `step={step}`): the HTML5
+          // number input rejects values that aren't `min + n*step` on
+          // submit (blocking any surrounding form), even though this field
+          // accepts arbitrary numeric input by design — e.g. a backend's
+          // native overhead default (Vulkan's 100) isn't a multiple of the
+          // slider's 64 MB drag increment. `step` on the range input above
+          // only affects drag granularity and has no such validation.
           value={isAuto ? '' : value}
           placeholder={placeholder || (allowAuto ? 'auto' : undefined)}
           onChange={e => handleText(e.target.value)}

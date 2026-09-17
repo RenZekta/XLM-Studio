@@ -32,7 +32,6 @@ export default function AboutView() {
             </div>
           </div>
         </section>
-        {/* Feature 34: About rebrand — RenZekta links + new description */}
         <section className="about-section">
           <h2 style={{ fontSize: 16, display: 'flex', alignItems: 'center', gap: 8, marginBottom: 12 }}>
             <Info size={16} /> About

@@ -67,8 +67,8 @@ interface AppStore {
   modelDefaults: { autoFitEnabled: boolean; autoFitContextLength: number; guardrailMode: string; customMaxSizeGB: number; useCurrentMemState?: boolean; moeOffloadStrategy?: 'offload' | 'max'; autoFitUse2xIncrements?: boolean; autoFitYarnAutoScale?: boolean; autoEnableMmproj?: boolean; cpuThreadsOverrideEnabled?: boolean; cpuThreadsOverridePercent?: number; parallelOverrideEnabled?: boolean; parallelInferenceMode?: 'unified' | 'separate'; parallelOverrideValue?: number; parallelOverrideValueDense?: number; parallelOverrideValueMoe?: number; perfMaxSessions?: number; autoOpenChatUI?: boolean }
   baseUrlOverride: { enabled: boolean; port: number; serveOnLocalNetwork: boolean; apiKeyEnabled: boolean; apiKey: string }
   samplingPresets: any[]
-  paramViewMode: 'common' | 'full'  // feature 30
-  quickBaselineActive: boolean      // feature 25 — tracks if Quick preset is the active baseline
+  paramViewMode: 'common' | 'full'
+  quickBaselineActive: boolean      // tracks if Quick preset is the active baseline
   // 3-way preset mode. 'clear' = empty, 'quick' = LM Studio baselines,
   // 'fullauto' = Quick baselines + Ignore-Context-Override + Auto-Context-Fill ON.
   presetMode: 'clear' | 'quick' | 'fullauto'

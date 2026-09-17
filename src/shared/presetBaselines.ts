@@ -63,7 +63,7 @@ export function buildQuickEngineBaseline(opts: {
   // ROCm/Vulkan) — see backendOverhead.ts. backendKey alone (just the fork
   // name, e.g. "llama.cpp") doesn't carry that; it's usually in the
   // version/display name instead.
-  backendInfo?: { name?: string; displayName?: string; backendKey?: string; exe?: string; path?: string } | null
+  backendInfo?: { name?: string; displayName?: string; backendKey?: string; exe?: string; path?: string; runtimeLibs?: string[] } | null
 }): Record<string, any> {
   const recommendedThreads = computeRecommendedThreads(opts.cpuInfo, opts.cpuThreadsOverridePercent)
   const kvQuantK = defaultKvQuantFor(opts.backendKey)

@@ -592,7 +592,6 @@ export default function ChatWindow({ url }: { url: string }) {
           <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', flex: 1 }}>
             {getCleanAddress(activeTab)}
           </span>
-          {/* Fix 10: Context size badge — shows the template's ctx-size */}
           {(() => {
             const activeTabObj = tabs.find(t => t.url === activeTab)
             return activeTabObj?.ctxSize ? (

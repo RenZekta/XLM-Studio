@@ -71,7 +71,7 @@ app.on('window-all-closed', () => {
 
 // Before quitting, kill every still-running
 // llama-server process tree so no orphan survives after XLM Studio closes
-// (previously a child could keep port 1234 alive, forcing a Task Manager kill).
+// and keeps a port (e.g. 1234) alive.
 // `before-quit` fires before the app actually exits; we block the quit briefly
 // to let killProcessTree do its job, then re-quit.
 let _cleaningUp = false
