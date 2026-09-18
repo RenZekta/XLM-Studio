@@ -15,6 +15,7 @@ export default function Sidebar() {
   // concern on the run-model path).
   async function switchBackend(b: BackendVersion) {
     setActiveBackend(b)
+    window.api.setGlobalBackend({ backendKey: b.backendKey, backendVersion: b.name }).catch(() => {})
     const cmds = await window.api.getCommands(b.backendKey)
     if (cmds) setCommandsSchema(cmds)
   }
@@ -158,7 +159,6 @@ export default function Sidebar() {
         <Activity size={16} />
         <span className="nav-item-text">Monitoring</span>
       </button>
-      {/* Item 6: Overrides tab — positioned after Monitoring, per the plan. */}
       <button
         className={`nav-item ${view === 'overrides' ? 'active' : ''}`}
         onClick={() => setView('overrides')}

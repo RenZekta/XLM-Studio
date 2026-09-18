@@ -13,9 +13,12 @@ import net from 'net'
 import type {
   ModelGroup, ModelEntry, MmprojFile, SpecDecodeSidecarFile, BackendVersion,
   CommandsSchema, TrackedBackend, TrackedBackendRelease,
-  ThemePref, ReleaseInfo, BaseUrlOverride
+  ThemePref, ReleaseInfo, BaseUrlOverride, McpSettings
 } from '../shared/types'
+import { MCP_TOOL_IDS } from '../shared/types'
 import { initPerfMonitor, registerPerfHandlers, startTracking, stopTracking, stopAllTracking } from './perfMonitor'
+import { initMcpLayer, registerMcpHandlers } from './mcpServer'
+import { randomBytes } from 'crypto'
 
 const APP_ROOT = app.isPackaged ? join(app.getPath('userData')) : join(process.cwd())
 const MODELS_DIR    = join(APP_ROOT, 'models')
@@ -96,10 +99,12 @@ interface AppSettings {
   mainBackendFolder: string | null
   theme: ThemePref
   trackedBackends: TrackedBackend[]
-  modelDefaults?: { autoFitEnabled: boolean; autoFitContextLength: number; guardrailMode: string; customMaxSizeGB: number; useCurrentMemState?: boolean; moeOffloadStrategy?: 'offload' | 'max'; autoFitUse2xIncrements?: boolean; autoFitYarnAutoScale?: boolean; autoEnableMmproj?: boolean; cpuThreadsOverrideEnabled?: boolean; cpuThreadsOverridePercent?: number; parallelOverrideEnabled?: boolean; parallelInferenceMode?: 'unified' | 'separate'; parallelOverrideValue?: number; parallelOverrideValueDense?: number; parallelOverrideValueMoe?: number; perfMaxSessions?: number }
+  modelDefaults?: { autoFitEnabled: boolean; autoFitContextLength: number; guardrailMode: string; customMaxSizeGB: number; useCurrentMemState?: boolean; moeOffloadStrategy?: 'offload' | 'max'; autoFitUse2xIncrements?: boolean; autoFitYarnAutoScale?: boolean; autoEnableMmproj?: boolean; cpuThreadsOverrideEnabled?: boolean; cpuThreadsOverridePercent?: number; parallelOverrideEnabled?: boolean; parallelInferenceMode?: 'unified' | 'separate'; parallelOverrideValue?: number; parallelOverrideValueDense?: number; parallelOverrideValueMoe?: number; perfMaxSessions?: number; autoOpenChatUI?: boolean }
   baseUrlOverride?: BaseUrlOverride
   samplingPresets?: any[]
   starredPresetId?: string
+  mcp?: McpSettings
+  globalBackend?: { backendKey: string; backendVersion: string } | null
 }
 
 // Default Base URL Override: enabled by default, port 1234, no LAN, no API key.
@@ -155,10 +160,41 @@ const DEFAULT_SETTINGS: AppSettings = {
   mainBackendFolder: null,
   theme: 'system',
   trackedBackends: DEFAULT_TRACKED,
-  modelDefaults: { autoFitEnabled: true, autoFitContextLength: 60000, guardrailMode: 'strict', customMaxSizeGB: 0, useCurrentMemState: false, moeOffloadStrategy: 'max' /* item 6: default to MAX+ForceMoEtoCPU */, autoFitUse2xIncrements: false, autoFitYarnAutoScale: false, autoEnableMmproj: true, cpuThreadsOverrideEnabled: false, cpuThreadsOverridePercent: 100, parallelOverrideEnabled: false, parallelInferenceMode: 'unified', parallelOverrideValue: 4, parallelOverrideValueDense: 4, parallelOverrideValueMoe: 4, perfMaxSessions: 20 },
+  modelDefaults: { autoFitEnabled: true, autoFitContextLength: 60000, guardrailMode: 'strict', customMaxSizeGB: 0, useCurrentMemState: false, moeOffloadStrategy: 'max' /* default: MAX GPU layers + force MoE experts to CPU */, autoFitUse2xIncrements: false, autoFitYarnAutoScale: false, autoEnableMmproj: true, cpuThreadsOverrideEnabled: false, cpuThreadsOverridePercent: 100, parallelOverrideEnabled: false, parallelInferenceMode: 'unified', parallelOverrideValue: 4, parallelOverrideValueDense: 4, parallelOverrideValueMoe: 4, perfMaxSessions: 20, autoOpenChatUI: false },
   baseUrlOverride: { ...DEFAULT_BASE_URL_OVERRIDE },
   samplingPresets: [],
-  starredPresetId: 'lm-studio'
+  starredPresetId: 'lm-studio',
+  globalBackend: null,
+  mcp: {
+    enabled: true,
+    skillMode: false,
+    port: 5757,
+    token: randomBytes(24).toString('hex'),
+    tools: Object.fromEntries(MCP_TOOL_IDS.map(id => [id, true])) as Record<typeof MCP_TOOL_IDS[number], boolean>,
+    restrictEditToMcpMade: true,
+    maxBenchmarkHistory: 5
+  }
+}
+
+// Merge a (possibly missing/partial/legacy) mcp settings blob with defaults.
+// A fresh random token is generated once and then kept stable across
+// restarts (persisted in settings.json) so any already-written skill
+// scripts keep working without regenerating them.
+function migrateMcpSettings(raw: any): McpSettings {
+  const fallbackToken = randomBytes(24).toString('hex')
+  const tools: Record<string, boolean> = {}
+  for (const id of MCP_TOOL_IDS) {
+    tools[id] = raw?.tools && typeof raw.tools[id] === 'boolean' ? raw.tools[id] : true
+  }
+  return {
+    enabled: raw?.enabled ?? true,
+    skillMode: !!raw?.skillMode,
+    port: (Number.isInteger(raw?.port) && raw.port > 0 && raw.port < 65536) ? raw.port : 5757,
+    token: typeof raw?.token === 'string' && raw.token.length >= 16 ? raw.token : fallbackToken,
+    tools: tools as Record<typeof MCP_TOOL_IDS[number], boolean>,
+    restrictEditToMcpMade: raw?.restrictEditToMcpMade ?? true,
+    maxBenchmarkHistory: (Number.isInteger(raw?.maxBenchmarkHistory) && raw.maxBenchmarkHistory >= 1 && raw.maxBenchmarkHistory <= 20) ? raw.maxBenchmarkHistory : 5
+  }
 }
 
 async function loadSettings(): Promise<AppSettings> {
@@ -186,11 +222,10 @@ async function loadSettings(): Promise<AppSettings> {
         guardrailMode: data.modelDefaults?.guardrailMode ?? DEFAULT_SETTINGS.modelDefaults!.guardrailMode,
         customMaxSizeGB: data.modelDefaults?.customMaxSizeGB ?? DEFAULT_SETTINGS.modelDefaults!.customMaxSizeGB,
         useCurrentMemState: data.modelDefaults?.useCurrentMemState ?? false,
-        // Fixed to match the same "respect saved value, else use the
-        // CURRENT default" pattern as every other field here. It previously
-        // hardcoded 'offload' as the fallback regardless of DEFAULT_SETTINGS,
-        // so bumping the default above would never actually reach anyone with
-        // an existing settings.json (i.e. everyone but a fresh install).
+        // Respect a saved value; otherwise fall back to the CURRENT default
+        // (DEFAULT_SETTINGS), not a hardcoded literal — so bumping the
+        // default above reaches everyone without a saved value, not just a
+        // fresh install.
         moeOffloadStrategy: (data.modelDefaults?.moeOffloadStrategy === 'offload' || data.modelDefaults?.moeOffloadStrategy === 'max')
           ? data.modelDefaults.moeOffloadStrategy
           : DEFAULT_SETTINGS.modelDefaults!.moeOffloadStrategy,
@@ -210,11 +245,19 @@ async function loadSettings(): Promise<AppSettings> {
         parallelOverrideValue: data.modelDefaults?.parallelOverrideValue ?? 4,
         parallelOverrideValueDense: data.modelDefaults?.parallelOverrideValueDense ?? 4,
         parallelOverrideValueMoe: data.modelDefaults?.parallelOverrideValueMoe ?? 4,
-        perfMaxSessions: data.modelDefaults?.perfMaxSessions ?? 20
+        perfMaxSessions: data.modelDefaults?.perfMaxSessions ?? 20,
+        // "Open Chat UI automatically on Template startup" — off by default.
+        // Chat UI mode/API Only mode as a per-Template choice was removed;
+        // the bundled webui is always available (never passes --no-webui),
+        // "Open Chat" is always offered once running, and this is the only
+        // remaining control over whether it pops open BY ITSELF on startup.
+        autoOpenChatUI: data.modelDefaults?.autoOpenChatUI ?? false
       },
       baseUrlOverride: migrateBaseUrlOverride(data.baseUrlOverride),
       samplingPresets: Array.isArray(data.samplingPresets) ? data.samplingPresets : [],
-      starredPresetId: typeof data.starredPresetId === 'string' ? data.starredPresetId : 'lm-studio'
+      starredPresetId: typeof data.starredPresetId === 'string' ? data.starredPresetId : 'lm-studio',
+      globalBackend: (data.globalBackend && typeof data.globalBackend.backendKey === 'string') ? { backendKey: data.globalBackend.backendKey, backendVersion: data.globalBackend.backendVersion } : null,
+      mcp: migrateMcpSettings(data.mcp)
     }
   } catch {
     return { ...DEFAULT_SETTINGS }
@@ -538,6 +581,37 @@ const SERVER_NAMES = process.platform === 'win32'
 // Sibling files that indicate a real backend directory (not a stray copy).
 const SIBLING_HINTS = ['ggml.dll', 'llama.dll', 'ggml-metal.dll', 'llama-server.exe', 'llama-server', 'main.exe', 'main']
 
+// GPU runtime backend libraries llama.cpp ships as a loadable ggml backend
+// next to the server exe. Their presence is authoritative for which GPU API
+// a build talks to (unlike the fork/version display name, which is
+// free-form and often carries no runtime hint at all, e.g. a TurboQuant
+// build named only after its own fork). Linux/macOS ship the same libs as
+// lib*.so instead of *.dll.
+const RUNTIME_LIB_NAMES: Record<'cuda' | 'rocm' | 'vulkan', string[]> = {
+  cuda: ['ggml-cuda.dll', 'libggml-cuda.so'],
+  rocm: ['ggml-hip.dll', 'libggml-hip.so'],
+  vulkan: ['ggml-vulkan.dll', 'libggml-vulkan.so']
+}
+
+// Scan a backend's exe directory for the GPU runtime libraries above,
+// returning the subset actually present (usually zero or one, but a build
+// can ship more than one backend for the user to pick between at runtime).
+function detectRuntimeLibs(dir: string): string[] {
+  let names: string[]
+  try {
+    names = readdirSync(dir).map(n => n.toLowerCase())
+  } catch {
+    return []
+  }
+  const found: string[] = []
+  for (const list of Object.values(RUNTIME_LIB_NAMES)) {
+    for (const lib of list) {
+      if (names.includes(lib)) found.push(lib)
+    }
+  }
+  return found
+}
+
 // llama-gguf binary names (for native metadata extraction).
 const GGUF_TOOL_NAMES = process.platform === 'win32'
   ? ['llama-gguf.exe', 'llama-gguf', 'gguf.exe', 'gguf']
@@ -595,7 +669,7 @@ function discoverBackendExe(dir: string, depth = 0, maxDepth = 6): DiscoveredExe
 
 // Generic recursive search for a named tool binary inside a backend version dir.
 // The gguf tool is often nested in build/bin/ (same as llama-server), so a
-// flat top-level scan (as used previously) misses it. This walks up to 6 levels.
+// flat top-level scan wouldn't find it. This walks up to 6 levels.
 function discoverToolByName(dir: string, names: string[], depth = 0, maxDepth = 6): string | null {
   if (depth > maxDepth) return null
   let entries: import('fs').Dirent[]
@@ -793,13 +867,12 @@ function parseGgufToolOutput(output: string): Record<string, string> {
 // A backend root contains <backendKey>/<version>/...exe (fork-aware layout),
 // but we also tolerate the legacy flat layout <version>/...exe.
 //
-// FIX (version display): Previously the legacy check used
-// `discoverBackendExe(forkDir, 0, 1)` (maxDepth=1) which would find an exe
-// INSIDE a version subfolder and falsely treat the fork folder as a version.
-// This produced displayName "llama.cpp (llama.cpp)" for the new layout.
-// Now we scan version subdirectories FIRST (new layout). Only when NO version
-// subdirectory contains an exe do we fall back to the legacy flat layout
-// (exe directly in the fork folder, possibly nested in build/bin/).
+// Version subdirectories are scanned FIRST (new layout). Only when NO
+// version subdirectory contains an exe do we fall back to the legacy flat
+// layout (exe directly in the fork folder, possibly nested in build/bin/) —
+// scanning flat-first with a shallow maxDepth would find an exe INSIDE a
+// version subfolder and falsely treat the fork folder itself as a version,
+// producing a displayName like "llama.cpp (llama.cpp)" for the new layout.
 async function scanBackendRoot(rootDir: string, rootExternal: boolean, rootIndex: number): Promise<BackendVersion[]> {
   const out: BackendVersion[] = []
   let topEntries: import('fs').Dirent[]
@@ -835,6 +908,7 @@ async function scanBackendRoot(rootDir: string, rootExternal: boolean, rootIndex
         version: v.name,
         path: found.dir,
         exe: found.exeName,
+        runtimeLibs: detectRuntimeLibs(found.dir),
         hasCommands: existsSync(join(BACKEND_DIR, e.name, 'commands.json')),
         rootDir,
         external: rootExternal
@@ -855,6 +929,7 @@ async function scanBackendRoot(rootDir: string, rootExternal: boolean, rootIndex
         version,
         path: direct.dir,
         exe: direct.exeName,
+        runtimeLibs: detectRuntimeLibs(direct.dir),
         hasCommands: existsSync(join(BACKEND_DIR, 'llama.cpp', 'commands.json')),
         rootDir,
         external: rootExternal
@@ -984,7 +1059,7 @@ function canBroadcast(id: string): boolean {
 }
 function fetchJson(url: string): Promise<unknown> {
   return new Promise((resolve, reject) => {
-    const opts = { headers: { 'User-Agent': 'xlm-studio/2.0.0', Accept: 'application/json' } }
+    const opts = { headers: { 'User-Agent': `xlm-studio/${app.getVersion()}`, Accept: 'application/json' } }
     const get = url.startsWith('https') ? https.get : http.get
     get(url, opts, (res) => {
       if ((res.statusCode === 301 || res.statusCode === 302) && res.headers.location) {
@@ -1177,12 +1252,11 @@ async function cleanupOldBackendVersions(backendKey: string, newVersion: string)
 }
 
 // ==========================================================================
-// App-quit cleanup (feature: stop/start race fix)
+// App-quit cleanup
 // ==========================================================================
 // On quit, kill every still-running llama-server process tree so no orphan
-// survives after XLM Studio closes (the user reported having to kill XLM
-// Studio from Task Manager because a child kept port 1234 alive). Called
-// from main/index.ts on `before-quit`.
+// survives after XLM Studio closes and keeps its port (e.g. 1234) alive.
+// Called from main/index.ts on `before-quit`.
 export async function cleanupAllProcesses(): Promise<void> {
   if (runningProcesses.size === 0) return
   const entries = Array.from(runningProcesses.entries())
@@ -1223,12 +1297,37 @@ export function registerIpcHandlers(): void {
         const n = Number(s?.modelDefaults?.perfMaxSessions)
         return isNaN(n) || n < 1 ? 20 : n
       } catch { return 20 }
+    },
+    // Persist first/average tok-s from the just-ended session onto the
+    // Template itself (not just the perf-session file), so info-templates /
+    // display-ts and the Templates list can read it instantly without
+    // loading session history.
+    onSessionEnded: (templateId, summary) => {
+      try {
+        const fp = join(TEMPLATES_DIR, `${templateId}.json`)
+        if (!existsSync(fp)) return
+        const t = JSON.parse(readFileSync(fp, 'utf-8'))
+        t.lastSessionFirstTps = summary.firstTps
+        t.lastSessionAvgTps = summary.avgTps
+        t.lastSessionAt = summary.endedAt
+        writeFileSync(fp, JSON.stringify(t, null, 2))
+        // Without this broadcast, the renderer's in-memory copy of this
+        // Template never learns about the stats we just wrote — and the
+        // very next save that goes through the renderer (any of
+        // CmdParamsEditor's several automatic background-sync effects fire
+        // easily, just from the card being open) would silently overwrite
+        // this file with that stale, stats-less copy, wiping out
+        // display-ts' data again immediately after every single session.
+        BrowserWindow.getAllWindows().forEach(win => {
+          if (!win.isDestroyed()) win.webContents.send('templates-changed')
+        })
+      } catch {}
     }
   })
   registerPerfHandlers()
 
   // ----- Models: smart grouped listing -----
-  ipcMain.handle('list-models', async () => {
+  async function listModelsImpl(): Promise<ModelGroup[]> {
     const settings = await loadSettings()
     // Build the ordered list of model roots: main (starred) folder first if it
     // is an external folder, then default MODELS_DIR, then remaining external
@@ -1272,7 +1371,8 @@ export function registerIpcHandlers(): void {
     }
     if (pruned) saveMetadataCache()
     return groups
-  })
+  }
+  ipcMain.handle('list-models', async () => listModelsImpl())
 
   // Return the full metadata cache so the renderer can bulk-load it
   // (instant access, no re-extraction on every view).
@@ -1498,7 +1598,7 @@ export function registerIpcHandlers(): void {
   })
 
   // ----- Backends: smart fork-aware listing -----
-  ipcMain.handle('list-backends', async () => {
+  async function listBackendsImpl(): Promise<BackendVersion[]> {
     const roots = await backendRoots()
     const all: BackendVersion[] = []
     for (let i = 0; i < roots.length; i++) {
@@ -1512,7 +1612,8 @@ export function registerIpcHandlers(): void {
       return n(b.version) - n(a.version)
     })
     return all
-  })
+  }
+  ipcMain.handle('list-backends', async () => listBackendsImpl())
   ipcMain.handle('delete-backend', async (_e, backendId: string) => {
     try {
       // backendId = `${rootIndex}::${backendKey}::${version}`
@@ -1569,10 +1670,11 @@ export function registerIpcHandlers(): void {
   })
 
   // ----- Backends: tracked repos (Backends Tracker) -----
-  ipcMain.handle('list-tracked-backends', async () => {
+  async function listTrackedBackendsImpl() {
     const s = await loadSettings()
     return s.trackedBackends
-  })
+  }
+  ipcMain.handle('list-tracked-backends', async () => listTrackedBackendsImpl())
   ipcMain.handle('add-tracked-backend', async (_e, link: string) => {
     const trimmed = (link || '').trim()
     if (!trimmed) return { success: false, error: 'Empty link' }
@@ -1615,7 +1717,7 @@ export function registerIpcHandlers(): void {
   // (i.e. an arg that isn't a built-in one at all) — those are merged in on
   // top and preserved; anything matching a built-in arg is always overridden
   // by the fresh computation, full stop.
-  ipcMain.handle('get-commands', async (_e, backendKey: string) => {
+  async function getCommandsImpl(backendKey: string): Promise<CommandsSchema | null> {
     if (!backendKey) return loadDefaultCommandsSchema()
     const s = await loadSettings()
     const tracked = s.trackedBackends.find(t => t.folderName === backendKey || t.id === backendKey)
@@ -1649,7 +1751,8 @@ export function registerIpcHandlers(): void {
       writeFileSync(commandsPath, JSON.stringify(fresh, null, 2))
     } catch {}
     return fresh
-  })
+  }
+  ipcMain.handle('get-commands', async (_e, backendKey: string) => getCommandsImpl(backendKey))
   ipcMain.handle('save-backend-commands', async (_e, backendKey: string, schema: unknown) => {
     try {
       const dir = join(BACKEND_DIR, backendKey)
@@ -1662,7 +1765,7 @@ export function registerIpcHandlers(): void {
   })
 
   // ----- Templates -----
-  ipcMain.handle('list-templates', () => {
+  function listTemplatesImpl(): Record<string, any>[] {
     if (!existsSync(TEMPLATES_DIR)) return []
     return readdirSync(TEMPLATES_DIR)
       .filter(f => f.endsWith('.json'))
@@ -1684,19 +1787,49 @@ export function registerIpcHandlers(): void {
         }
         catch { return null }
       })
-      .filter(Boolean)
-  })
-  ipcMain.handle('save-template', (_e, template: Record<string, unknown>) => {
+      .filter(Boolean) as Record<string, any>[]
+  }
+  ipcMain.handle('list-templates', () => listTemplatesImpl())
+  function saveTemplateImpl(template: Record<string, unknown>): { success: true; id: string } {
     const id = (template.id as string) || Date.now().toString()
     writeFileSync(join(TEMPLATES_DIR, `${id}.json`), JSON.stringify({ ...template, id }, null, 2))
+    // Broadcast so any window whose Template list didn't originate this
+    // write (in particular: MCP/skill-triggered template-create/-duplicate/
+    // -edit, which write straight to disk with no renderer round-trip)
+    // picks up the change without needing an app restart.
+    BrowserWindow.getAllWindows().forEach(win => {
+      if (!win.isDestroyed()) win.webContents.send('templates-changed')
+    })
     return { success: true, id }
+  }
+  // Reaching this specific IPC channel means the renderer itself initiated
+  // the save. Most of the time that's a manual edit through the UI (and per
+  // the "MCP-made" tag's own contract, "persists until user edits the
+  // Template manually", it should be stripped) — BUT several background
+  // effects in CmdParamsEditor.tsx (mmproj/speculation auto-detect, YaRN
+  // auto-scale, KV-quant/load-mode backfills, AutoFill "Maximum" sync) also
+  // resave through this exact channel purely as a side effect of the
+  // component re-rendering, with no actual user action — e.g. just opening
+  // an MCP-made template's card in the UI to look at it could silently
+  // strip the tag before the user ever touched anything. Those effects tag
+  // their own commit as `{ silentSync: true }`; only a save WITHOUT that
+  // flag counts as a genuine manual edit.
+  ipcMain.handle('save-template', (_e, template: Record<string, unknown>, opts?: { silentSync?: boolean }) => {
+    if (!opts?.silentSync && Array.isArray((template as any).tags)) {
+      (template as any).tags = (template as any).tags.filter((t: string) => t !== 'MCP-made')
+    }
+    return saveTemplateImpl(template)
   })
-  ipcMain.handle('delete-template', (_e, id: string) => {
+  function deleteTemplateImpl(id: string): { success: boolean; error?: string } {
     const fp = join(TEMPLATES_DIR, `${id}.json`)
     if (!isSafePath(TEMPLATES_DIR, fp)) return { success: false, error: 'Access denied' }
     if (existsSync(fp)) unlinkSync(fp)
+    BrowserWindow.getAllWindows().forEach(win => {
+      if (!win.isDestroyed()) win.webContents.send('templates-changed')
+    })
     return { success: true }
-  })
+  }
+  ipcMain.handle('delete-template', (_e, id: string) => deleteTemplateImpl(id))
   ipcMain.handle('import-template', async () => {
     const r = await dialog.showOpenDialog({ title: 'Import Template', filters: [{ name: 'JSON Template', extensions: ['json'] }], properties: ['openFile'] })
     if (r.canceled || !r.filePaths.length) return null
@@ -1731,22 +1864,25 @@ export function registerIpcHandlers(): void {
   })
 
   // ----- Run model -----
-  ipcMain.handle('run-model', async (_e, opts: { id: string; name: string; backendPath: string; exe: string; args: string[]; openBrowser: boolean; port: number }) => {
+  async function runModelImpl(opts: { id: string; name: string; backendPath: string; exe: string; args: string[]; openBrowser: boolean; port: number; ignoreBaseUrlOverride?: boolean }) {
     if (runningProcesses.has(opts.id)) return { success: false, error: 'Already running' }
     // If base URL override is enabled, use the override port, ignoring
-    // the template's original Server Port completely.
+    // the template's original Server Port completely. A template with its
+    // own "Ignore Base URL Override" flag set opts out of this entirely,
+    // the same way __ignoreCtxOverride opts a template out of the global
+    // AutoFit floor.
     let port = opts.port || 8080
-    const overridePort = await getOverridePort()
+    const overridePort = opts.ignoreBaseUrlOverride ? null : await getOverridePort()
     if (overridePort !== null) {
       port = overridePort
     }
     let available = await isPortAvailable(port)
     let finalPort = port
     let finalArgs = [...opts.args]
-    // ALWAYS update the --port argument in finalArgs to match the
-    // resolved port (which may be the override port). Previously this only
-    // happened inside the port-conflict block, so when the override port was
-    // available, the server still started on the ORIGINAL port from the args.
+    // ALWAYS update the --port argument in finalArgs to match the resolved
+    // port (which may be the override port), regardless of whether that
+    // port needed conflict resolution below — otherwise the server can
+    // start on the original port from args instead of the resolved one.
     {
       const portIdx = finalArgs.indexOf('--port')
       if (portIdx !== -1 && portIdx + 1 < finalArgs.length) {
@@ -1794,7 +1930,9 @@ export function registerIpcHandlers(): void {
     if (!finalArgs.includes('--metrics')) finalArgs.push('--metrics')
     // Apply "Serve on local network" (--host 0.0.0.0) and
     // "API Key" (--api-key <key>) from the Base URL Override settings.
-    {
+    // Skipped entirely when this template ignores the Base URL Override,
+    // same scope as the port substitution above.
+    if (!opts.ignoreBaseUrlOverride) {
       const s2 = await loadSettings()
       const ovr = s2.baseUrlOverride
       if (ovr?.enabled && ovr.serveOnLocalNetwork) {
@@ -1928,12 +2066,27 @@ export function registerIpcHandlers(): void {
         serverReadyFlags.delete(opts.id)
         modelLoadingFlags.delete(opts.id)
         emitAppLog(opts.id, opts.name, `✖ Spawn error: ${msg}`)
-        _e.sender.send('model-error', { id: opts.id, error: msg })
+        BrowserWindow.getAllWindows().forEach(win => {
+          if (!win.isDestroyed()) win.webContents.send('model-error', { id: opts.id, error: msg })
+        })
       })
       runningProcesses.set(opts.id, { proc, port: finalPort })
       // Begin polling this instance's /metrics endpoint.
       startTracking(opts.id, finalPort, opts.name)
       proc.on('exit', () => {
+        // Guard against a STALE exit event: rapid stop→start→stop→start
+        // cycles (exactly what benchmark/switch-template do, much faster
+        // than a human clicking buttons ever would) can mean this process's
+        // own OS-level exit is only reported well after a NEWER process for
+        // the same Template id has already been spawned and is running
+        // fine. Without this check, that late event would delete the
+        // CURRENT (correct, alive) runningProcesses entry out from under
+        // the new process and broadcast a bogus model-exited for it — the
+        // Template visibly (and incorrectly) shows "inactive" even though
+        // it's actually running, exactly what a self-benchmark's
+        // stop→start→stop→start→(manual restart) sequence can trigger.
+        const current = runningProcesses.get(opts.id)
+        if (current && current.proc !== proc) return
         runningProcesses.delete(opts.id)
         stopTracking(opts.id)
         const wasReady = serverReadyFlags.get(opts.id)
@@ -1963,6 +2116,17 @@ export function registerIpcHandlers(): void {
           }
         }, 2500)
       }
+      // Broadcast so any window's Templates list reflects "running" status
+      // regardless of who triggered the start — the renderer's own manual
+      // Start button already updates its local card status directly from
+      // this same IPC response, but an MCP/skill-triggered start bypasses
+      // that entirely (it calls this function directly, in-process, no
+      // renderer round-trip). Without this broadcast the card would show
+      // "idle" (Start button enabled) even though the process is really
+      // running, and clicking Start would then fail with "Already running".
+      BrowserWindow.getAllWindows().forEach(win => {
+        if (!win.isDestroyed()) win.webContents.send('model-started', { id: opts.id, pid: proc.pid, port: finalPort })
+      })
       return { success: true, pid: proc.pid, port: finalPort }
     } catch (err: any) {
       if (err.code === 'UNKNOWN' && opts.backendPath.toLowerCase().includes('arm64') && process.arch !== 'arm64') {
@@ -1970,7 +2134,8 @@ export function registerIpcHandlers(): void {
       }
       return { success: false, error: String(err) }
     }
-  })
+  }
+  ipcMain.handle('run-model', async (_e, opts: { id: string; name: string; backendPath: string; exe: string; args: string[]; openBrowser: boolean; port: number }) => runModelImpl(opts))
 
   // When base URL override is enabled, ALL port values are overridden.
   // The app ignores the template's original Server Port completely and uses
@@ -2102,7 +2267,7 @@ export function registerIpcHandlers(): void {
       if (!win.isDestroyed()) win.webContents.send('tab-moved-elsewhere', { url })
     })
   })
-  ipcMain.handle('stop-model', async (_e, id: string) => {
+  async function stopModelImpl(id: string) {
     const entry = runningProcesses.get(id)
     if (!entry) return { success: true, alreadyStopped: true }
     const { proc, port } = entry
@@ -2117,7 +2282,8 @@ export function registerIpcHandlers(): void {
     // critical step: without it, a rapid restart reports "port already in use".
     await waitForPortFree(port, 8000, 100)
     return { success: true }
-  })
+  }
+  ipcMain.handle('stop-model', async (_e, id: string) => stopModelImpl(id))
 
   // ----- Backends: tracker (global check for updates across all tracked repos) -----
   let cancelBackendDl: (() => void) | null = null
@@ -2392,7 +2558,7 @@ export function registerIpcHandlers(): void {
   })
 
   // ----- CPU info (for thread slider bounds + recommended defaults) -----
-  ipcMain.handle('get-cpu-info', async () => {
+  async function getCpuInfoImpl() {
     const os = await import('os')
     const cpus = os.cpus()
     let physicalCores = cpus.length
@@ -2411,7 +2577,8 @@ export function registerIpcHandlers(): void {
       logicalCores: cpus.length,
       modelName
     }
-  })
+  }
+  ipcMain.handle('get-cpu-info', async () => getCpuInfoImpl())
 
   // ----- GGUF speculation auto-detection -----
   // Returns the HIGHEST-tier speculative decoding method detected for a
@@ -2485,7 +2652,7 @@ export function registerIpcHandlers(): void {
   // key_length, value_length, sliding_window, MLA kv_lora_rank/qk_rope_head_dim,
   // file_type). Uses a typed reader that walks the metadata KV array and tensor
   // info array.
-  ipcMain.handle('get-gguf-metadata', async (_e, modelPath: string) => {
+  async function getGgufMetadataImpl(modelPath: string) {
     // Check the persistent cache first — metadata is stable for a given
     // file (it's read from the GGUF header), so caching avoids re-parsing on
     // every view. The cache is pruned in `list-models` when files disappear.
@@ -2519,7 +2686,23 @@ export function registerIpcHandlers(): void {
       hasNativeMtp: false
     }
     try {
-      if (!modelPath || !existsSync(modelPath)) return { ...result, error: 'File not found' }
+      if (!modelPath || !existsSync(modelPath)) {
+        // Every other exit path (success further below, and the catch
+        // block) sends a matching 'done'/'error' broadcast to clear the
+        // renderer's "extracting…" indicator for this path. This early
+        // return was the one exception — for a Template whose model file
+        // had been deleted, the indicator (and, worse, retry_the effects
+        // that key off "no cached metadata yet") never learned extraction
+        // had finished, so it looked like it was extracting forever, and
+        // never actually cached the "not found" result either (see below).
+        if (modelPath) {
+          const fn = basename(modelPath)
+          BrowserWindow.getAllWindows().forEach(win => {
+            if (!win.isDestroyed()) win.webContents.send('metadata-extracting', { modelPath, name: fn, status: 'error' })
+          })
+        }
+        return { ...result, error: 'File not found' }
+      }
       const st = await fsPromises.stat(modelPath)
       result.fileSizeMB = Math.round(st.size / (1024 * 1024))
 
@@ -2602,12 +2785,11 @@ export function registerIpcHandlers(): void {
           // If we got the essential fields, return immediately — no need for JS fallback.
           if (result.blockCount && result.contextLength) {
             console.log('[GGUF] Native tool succeeded: blockCount=' + result.blockCount + ' contextLength=' + result.contextLength + ' chatTemplate=' + (result.chatTemplate ? 'yes' : 'no'))
-            // The native-tool path previously returned WITHOUT ever
-            // writing to metadataCache/disk — every single call for a model
-            // whose metadata only the native tool could resolve was forced to
-            // re-run the tool from scratch (this branch), defeating the whole
-            // point of the persisted cache. Stamp + persist it like the JS
-            // fallback path does below.
+            // Stamp + persist to metadataCache/disk here, same as the JS
+            // fallback path does below — without this, every call for a
+            // model whose metadata only the native tool can resolve would
+            // have to re-run the tool from scratch, defeating the point of
+            // the persisted cache.
             result.schemaVersion = METADATA_SCHEMA_VERSION
             if (modelPath) {
               metadataCache[modelPath] = result
@@ -3034,17 +3216,17 @@ export function registerIpcHandlers(): void {
       }
       return { ...result, error: String(err) }
     }
-  })
+  }
+  ipcMain.handle('get-gguf-metadata', async (_e, modelPath: string) => getGgufMetadataImpl(modelPath))
 
   // ----- VRAM telemetry -----
   // GPU detection strategy (in priority order):
   //   1. nvidia-smi            → NVIDIA GPUs (free + total + name, accurate).
   //   2. systeminformation     → AMD / Intel GPUs (name + total VRAM via WMI/PCI).
   //   3. Linux amdgpu sysfs    → accurate free VRAM for AMD on Linux.
-  // Previously this only ever tried nvidia-smi, so a machine with an AMD GPU
-  // (e.g. RX 9070 XT) was reported as "NVIDIA GPU (0 MB VRAM)". The fallbacks
-  // below detect the real vendor + name and report a best-effort free VRAM.
-  ipcMain.handle('get-vram-info', async () => {
+  // The fallbacks below detect the real vendor + name and report a
+  // best-effort free VRAM on non-NVIDIA hardware.
+  async function getVramInfoImpl() {
     try {
       const isWin = process.platform === 'win32'
       const isLinux = process.platform === 'linux'
@@ -3128,8 +3310,36 @@ export function registerIpcHandlers(): void {
             } catch (e) { console.log('[VRAM] sysfs read error:', String(e)) }
           }
 
-          // Best-effort free estimate when the platform can't report free VRAM
-          // directly (e.g. Windows + AMD). Keeps VRAM budgeting functional.
+          // --- 4. Windows: live dedicated-VRAM usage via the built-in "GPU
+          // Adapter Memory" performance counter (Windows 10+, vendor-agnostic
+          // — works for AMD/Intel same as NVIDIA, unlike nvidia-smi/amdgpu
+          // sysfs above). This is what actually makes "Use current memory
+          // state" reflect real usage on Windows instead of a static number.
+          if (isWin && freeVRAMMB === 0 && totalVRAMMB > 0) {
+            try {
+              const psCmd = 'powershell -NoProfile -NonInteractive -Command '
+                + '"(Get-Counter \'\\GPU Adapter Memory(*)\\Dedicated Usage\' -ErrorAction Stop).CounterSamples '
+                + '| Measure-Object -Property CookedValue -Sum | Select-Object -ExpandProperty Sum"'
+              const usedBytesStr = await new Promise<string | null>((resolve) => {
+                exec(psCmd, { timeout: 5000 }, (err, stdout) => {
+                  if (err) return resolve(null)
+                  resolve(stdout.trim())
+                })
+              })
+              const usedBytes = usedBytesStr ? Number(usedBytesStr) : NaN
+              if (!isNaN(usedBytes) && usedBytes >= 0) {
+                const usedMB = Math.round(usedBytes / (1024 * 1024))
+                freeVRAMMB = Math.max(0, totalVRAMMB - usedMB)
+              }
+            } catch { /* fall through to the static estimate below */ }
+          }
+
+          // Last-resort static estimate, only reached when no live source
+          // above (nvidia-smi, Linux amdgpu sysfs, or the Windows GPU
+          // Adapter Memory counter) was available at all — e.g. a VM without
+          // the counter, or a permissions issue running PowerShell. Keeps
+          // VRAM budgeting functional but does NOT reflect real usage, so it
+          // will look identical across polls regardless of what's loaded.
           if (freeVRAMMB === 0 && totalVRAMMB > 0) {
             freeVRAMMB = Math.round(totalVRAMMB * 0.85)
           }
@@ -3142,15 +3352,17 @@ export function registerIpcHandlers(): void {
     } catch (err) {
       return { freeVRAMMB: 0, totalVRAMMB: 0, hasNvidia: false, gpuName: null, vendor: null, gpuType: null, error: String(err) }
     }
-  })
+  }
+  ipcMain.handle('get-vram-info', async () => getVramInfoImpl())
 
   // ----- System RAM info -----
-  ipcMain.handle('get-system-ram', async () => {
+  async function getSystemRamImpl() {
     const os = await import('os')
     const total = os.totalmem()
     const free = os.freemem()
     return { totalRAMMB: Math.round(total / (1024 * 1024)), freeRAMMB: Math.round(free / (1024 * 1024)) }
-  })
+  }
+  ipcMain.handle('get-system-ram', async () => getSystemRamImpl())
 
   // ----- Model Defaults settings (features 18/19) -----
   ipcMain.handle('get-model-defaults', async () => {
@@ -3191,7 +3403,8 @@ export function registerIpcHandlers(): void {
       parallelOverrideValue: Math.max(1, Math.min(256, Number(defaults.parallelOverrideValue) || 4)),
       parallelOverrideValueDense: Math.max(1, Math.min(256, Number(defaults.parallelOverrideValueDense) || 4)),
       parallelOverrideValueMoe: Math.max(1, Math.min(256, Number(defaults.parallelOverrideValueMoe) || 4)),
-      perfMaxSessions: Math.max(1, Math.min(500, Number(defaults.perfMaxSessions) || 20))
+      perfMaxSessions: Math.max(1, Math.min(500, Number(defaults.perfMaxSessions) || 20)),
+      autoOpenChatUI: !!defaults.autoOpenChatUI
     }
     await saveSettings(s)
     return { success: true }
@@ -3211,6 +3424,22 @@ export function registerIpcHandlers(): void {
       apiKeyEnabled: !!opts?.apiKeyEnabled,
       apiKey: typeof opts?.apiKey === 'string' ? opts.apiKey : ''
     })
+    await saveSettings(s)
+    return { success: true }
+  })
+
+  // ----- Global (default) Backend -----
+  // Persisted so "Global default" means the same thing across app restarts
+  // and to MCP-triggered actions (template-create with no backend named,
+  // template-action start on a template with no backend pinned) — not just
+  // whichever backend happened to be index 0 in the last fetched list.
+  ipcMain.handle('get-global-backend', async () => {
+    const s = await loadSettings()
+    return s.globalBackend || null
+  })
+  ipcMain.handle('set-global-backend', async (_e, backend: { backendKey: string; backendVersion: string } | null) => {
+    const s = await loadSettings()
+    s.globalBackend = backend && backend.backendKey ? { backendKey: backend.backendKey, backendVersion: backend.backendVersion } : null
     await saveSettings(s)
     return { success: true }
   })
@@ -3307,6 +3536,45 @@ export function registerIpcHandlers(): void {
       })
     } catch {}
   })
+
+  // ----- MCP server / control API / skill layer -----
+  registerMcpHandlers()
+  initMcpLayer(APP_ROOT, {
+    loadFullSettings: loadSettings,
+    saveFullSettings: saveSettings,
+    loadSettings,
+    saveSettings,
+    listTemplates: listTemplatesImpl,
+    saveTemplate: saveTemplateImpl,
+    deleteTemplate: deleteTemplateImpl,
+    listModels: listModelsImpl,
+    listBackends: listBackendsImpl,
+    listTrackedBackends: listTrackedBackendsImpl,
+    getCpuInfo: getCpuInfoImpl,
+    getVramInfo: getVramInfoImpl,
+    getSystemRam: getSystemRamImpl,
+    getGgufMetadata: getGgufMetadataImpl,
+    getCachedMetadata: (modelPath: string) => {
+      const cached = metadataCache[modelPath]
+      return cached && cached.schemaVersion === METADATA_SCHEMA_VERSION ? cached : null
+    },
+    getCommands: getCommandsImpl,
+    runModel: runModelImpl,
+    stopModel: stopModelImpl,
+    isRunning: (templateId: string) => {
+      const entry = runningProcesses.get(templateId)
+      return entry ? { running: true, port: entry.port } : { running: false }
+    },
+    getOverridePort,
+    getSessionSpeeds: (templateId: string) => {
+      try {
+        const fp = join(TEMPLATES_DIR, `${templateId}.json`)
+        if (!existsSync(fp)) return { firstTps: null, avgTps: null }
+        const t = JSON.parse(readFileSync(fp, 'utf-8'))
+        return { firstTps: t.lastSessionFirstTps ?? null, avgTps: t.lastSessionAvgTps ?? null }
+      } catch { return { firstTps: null, avgTps: null } }
+    }
+  }).catch(err => console.error('[mcp] Failed to initialize MCP layer:', err))
 }
 
 // --------------------------------------------------------------------------
@@ -3323,9 +3591,8 @@ function readU64(buf: Buffer, offset: number): bigint {
 function getHardcodedPresets(): any[] {
   // NOTE: isStarred is always false here on purpose. The starred preset is
   // determined by the persisted `starredPresetId` in settings.json, applied
-  // at list time. Previously LM Studio was baked-in as isStarred:true, which
-  // overrode the saved star on every relaunch (bug: the dropdown always
-  // reset to "LM Studio ★" even after the user starred a different preset).
+  // at list time — a hardcoded isStarred:true here would override the saved
+  // star on every relaunch.
   return [
     {
       id: 'lm-studio',

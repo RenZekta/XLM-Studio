@@ -1,9 +1,9 @@
 import React, { useState, useEffect, useRef } from 'react'
 import { useStore } from '../store/useStore'
-import { FolderOpen, ChevronDown, Terminal, Globe, Server } from 'lucide-react'
+import { FolderOpen, ChevronDown, Terminal } from 'lucide-react'
 import type { Template } from '../../../shared/types'
 import CmdParamsEditor from './CmdParamsEditor'
-import { buildQuickEngineBaseline } from '../utils/presetBaselines'
+import { buildQuickEngineBaseline, seedSamplingArgsFromPreset } from '../../../shared/presetBaselines'
 function parseCommand(cmd: string): {
   modelPath: string
   serverPort: number
@@ -63,19 +63,11 @@ export default function CreateModal() {
     // possibly not being mounted yet. buildQuickEngineBaseline is the same
     // pure function the Quick button uses, so this can never drift from
     // what clicking Quick manually would produce.
-    const starred = samplingPresets.find(p => p.isStarred) || samplingPresets[0]
-    const seeded: Record<string, any> = {}
-    if (starred?.values) {
-      if (starred.values.temperature !== undefined) seeded['--temperature'] = starred.values.temperature
-      if (starred.values.topK !== undefined) seeded['--top-k'] = starred.values.topK
-      if (starred.values.topP !== undefined) seeded['--top-p'] = starred.values.topP
-      if (starred.values.minP !== undefined) seeded['--min-p'] = starred.values.minP
-      if (starred.values.repeatPenalty !== undefined) seeded['--repeat-penalty'] = starred.values.repeatPenalty
-      if (starred.values.presencePenalty !== undefined) seeded['--presence-penalty'] = starred.values.presencePenalty
-    }
+    const seeded: Record<string, any> = seedSamplingArgsFromPreset(samplingPresets)
     Object.assign(seeded, buildQuickEngineBaseline({
       cpuInfo: useStore.getState().cpuInfo,
       backendKey: activeBackend?.backendKey,
+      backendInfo: activeBackend,
       cpuThreadsOverridePercent: useStore.getState().modelDefaults.cpuThreadsOverrideEnabled
         ? useStore.getState().modelDefaults.cpuThreadsOverridePercent
         : null
@@ -87,7 +79,6 @@ export default function CreateModal() {
     return seeded
   })
   const [tagsStr, setTagsStr] = useState('')
-  const [launchMode, setLaunchMode] = useState<'chat' | 'api'>('chat')
   const [showAdvanced, setShowAdvanced] = useState(false)
   const [showImport, setShowImport] = useState(false)
   const [importCmd, setImportCmd] = useState('')
@@ -123,7 +114,6 @@ export default function CreateModal() {
       setServerPort(editingTemplate.serverPort || 8080)
       setArgs(editingTemplate.args || {})
       setTagsStr(editingTemplate.tags?.join(', ') || '')
-      setLaunchMode(editingTemplate.launchMode || 'chat')
     } else {
       if (activeBackend) { setBackendVersion(activeBackend.name); setBackendKey(activeBackend.backendKey) }
       // Skip the redundant (and destructive) reseed on the very
@@ -134,21 +124,13 @@ export default function CreateModal() {
       // of this effect (a real transition back to "new template" while the
       // modal stays open, if that ever happens).
       if (!isFirstRun) {
-        const starred = samplingPresets.find(p => p.isStarred) || samplingPresets[0]
-        const seeded: Record<string, any> = {}
-        if (starred?.values) {
-          if (starred.values.temperature !== undefined) seeded['--temperature'] = starred.values.temperature
-          if (starred.values.topK !== undefined) seeded['--top-k'] = starred.values.topK
-          if (starred.values.topP !== undefined) seeded['--top-p'] = starred.values.topP
-          if (starred.values.minP !== undefined) seeded['--min-p'] = starred.values.minP
-          if (starred.values.repeatPenalty !== undefined) seeded['--repeat-penalty'] = starred.values.repeatPenalty
-          if (starred.values.presencePenalty !== undefined) seeded['--presence-penalty'] = starred.values.presencePenalty
-        }
+        const seeded: Record<string, any> = seedSamplingArgsFromPreset(samplingPresets)
         // Stay consistent with the lazy initializer above — a real reseed
         // should also reapply the Quick engine baseline, not just sampling.
         Object.assign(seeded, buildQuickEngineBaseline({
           cpuInfo: useStore.getState().cpuInfo,
           backendKey: activeBackend?.backendKey,
+          backendInfo: activeBackend,
           cpuThreadsOverridePercent: useStore.getState().modelDefaults.cpuThreadsOverrideEnabled
             ? useStore.getState().modelDefaults.cpuThreadsOverridePercent
             : null
@@ -156,7 +138,6 @@ export default function CreateModal() {
         seeded['__lastPreset'] = 'quick'
         setArgs(seeded)
         setTagsStr('')
-        setLaunchMode('chat')
       }
       if (prefillModelPath) {
         setModelPath(prefillModelPath)
@@ -208,8 +189,7 @@ export default function CreateModal() {
       modelPath,
       serverPort,
       args,
-      tags: tagsStr.split(',').map(t => t.trim()).filter(Boolean),
-      launchMode
+      tags: tagsStr.split(',').map(t => t.trim()).filter(Boolean)
     }
     if (editingTemplate) {
       const res = await window.api.saveTemplate({ ...editingTemplate, ...templateData })
@@ -227,7 +207,6 @@ export default function CreateModal() {
         serverPort,
         args,
         tags: tagsStr.split(',').map(t => t.trim()).filter(Boolean),
-        launchMode,
         createdAt: new Date().toISOString(),
         updatedAt: new Date().toISOString()
       }
@@ -374,19 +353,6 @@ export default function CreateModal() {
               </div>
             </div>
             {}
-            <div className="form-group">
-              <label className="form-label">Launch Mode</label>
-              <div className="launch-mode-row">
-                <button type="button" className={`launch-mode-btn ${launchMode === 'chat' ? 'active' : ''}`} onClick={() => setLaunchMode('chat')}>
-                  <Globe size={13} /> Chat UI
-                </button>
-                <button type="button" className={`launch-mode-btn ${launchMode === 'api' ? 'active' : ''}`} onClick={() => setLaunchMode('api')}>
-                  <Server size={13} /> API Only
-                </button>
-              </div>
-              <div className="form-hint">Chat UI opens the browser. API Only serves at the port without opening the web UI.</div>
-            </div>
-            {}
             <div className="form-group mb-0">
               <label className="form-label">Model File</label>
               <div className="file-picker">
@@ -414,10 +380,8 @@ export default function CreateModal() {
               </div>
               <div className="form-hint">Models are grouped by folder. mmproj files are auto-detected and shared within each folder.</div>
             </div>
-            {}
-            {/* Feature 15: Preset toggle is now inside CmdParamsEditor (no duplication). */}
-            {/* Bug fix: Settings/Parameters toggles + CPU/model/Free-VRAM info now
-                render here (via CmdParamsEditor's header portal) so they're always
+            {/* Settings/Parameters toggle + CPU/model/Free-VRAM info render
+                here (via CmdParamsEditor's header portal) so they're always
                 visible without expanding "Advanced Parameters" below. */}
             <div ref={setHeaderAnchor} className="cmd-header-anchor" />
             <div className="collapsible-section" style={{ marginTop: 20 }}>
@@ -447,7 +411,6 @@ export default function CreateModal() {
                   modelPathFallback={modelPath}
                   serverPortFallback={serverPort}
                   headerPortalTarget={headerAnchor}
-                  launchMode={launchMode}
                 />
               </div>
             </div>

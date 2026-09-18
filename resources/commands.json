@@ -48,7 +48,8 @@
         { "arg": "--kv-offload", "short": "-kvo", "label": "KV Cache Offload", "description": "Enable KV cache offloading to GPU", "type": "boolean", "default": true, "env": "LLAMA_ARG_KV_OFFLOAD" },
         { "arg": "--op-offload", "label": "Op Offload", "description": "Offload host tensor operations to device", "type": "boolean", "default": true },
         { "arg": "--fit", "short": "-fit", "label": "Auto Fit Memory", "description": "Adjust arguments to fit in device memory", "type": "select", "options": ["on", "off"], "default": "on", "env": "LLAMA_ARG_FIT" },
-        { "arg": "--cpu-moe", "short": "-cmoe", "label": "CPU MoE", "description": "Keep all MoE weights in CPU", "type": "boolean", "default": false, "env": "LLAMA_ARG_CPU_MOE" }
+        { "arg": "--cpu-moe", "short": "-cmoe", "label": "CPU MoE", "description": "Keep all MoE weights in CPU", "type": "boolean", "default": false, "env": "LLAMA_ARG_CPU_MOE" },
+        { "arg": "--n-cpu-moe", "short": "-ncmoe", "label": "Force MoE Weights onto CPU Layers", "description": "Keep the MoE weights of the first N layers in CPU", "type": "number", "default": null, "min": 0, "max": 256, "env": "LLAMA_ARG_N_CPU_MOE" }
       ]
     },
     {

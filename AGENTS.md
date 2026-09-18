@@ -67,3 +67,26 @@ full path — schema definition, default application, live editing, command
 preview, and actual process launch — before changing any one piece of it.
 Several bugs in this codebase came from those five places drifting out of
 sync with each other.
+
+## Typechecking
+
+Never run `tsc -b` (or `tsc --build`) in this repo to typecheck. This project
+uses TypeScript project references with `composite: true` and no `outDir`
+override, so build mode emits compiled `.js`/`.d.ts`/`.js.map` files directly
+next to every `.ts`/`.tsx` source file in `src/` — dozens of stray build
+artifacts scattered through the tree on every single run, which then get
+committed or zipped by accident if you're not watching for it.
+
+Typecheck each project without emitting instead:
+
+```
+npx tsc --noEmit -p tsconfig.node.json
+npx tsc --noEmit -p tsconfig.web.json
+```
+
+If `src/` ever does end up with stray `.js`/`.jsx`/`.d.ts` files (e.g. from
+someone running `tsc -b` before reading this), every one of them will have a
+matching `.ts`/`.tsx` source file next to it — that's how to tell an
+artifact from a real file before deleting anything. The one exception is
+`src/renderer/src/env.d.ts`, which is a real hand-authored source file (the
+`window.api` IPC type declarations) despite matching the `.d.ts` pattern.

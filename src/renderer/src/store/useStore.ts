@@ -64,11 +64,11 @@ interface AppStore {
   metadataExtractions: Record<string, { name: string; status: 'extracting' | 'done' | 'error' }>
   vramInfo: { freeVRAMMB: number; totalVRAMMB: number; hasNvidia: boolean; gpuName: string | null; vendor?: string | null; gpuType?: string | null } | null
   systemRam: { totalRAMMB: number; freeRAMMB: number } | null
-  modelDefaults: { autoFitEnabled: boolean; autoFitContextLength: number; guardrailMode: string; customMaxSizeGB: number; useCurrentMemState?: boolean; moeOffloadStrategy?: 'offload' | 'max'; autoFitUse2xIncrements?: boolean; autoFitYarnAutoScale?: boolean; autoEnableMmproj?: boolean; cpuThreadsOverrideEnabled?: boolean; cpuThreadsOverridePercent?: number; parallelOverrideEnabled?: boolean; parallelInferenceMode?: 'unified' | 'separate'; parallelOverrideValue?: number; parallelOverrideValueDense?: number; parallelOverrideValueMoe?: number; perfMaxSessions?: number }
+  modelDefaults: { autoFitEnabled: boolean; autoFitContextLength: number; guardrailMode: string; customMaxSizeGB: number; useCurrentMemState?: boolean; moeOffloadStrategy?: 'offload' | 'max'; autoFitUse2xIncrements?: boolean; autoFitYarnAutoScale?: boolean; autoEnableMmproj?: boolean; cpuThreadsOverrideEnabled?: boolean; cpuThreadsOverridePercent?: number; parallelOverrideEnabled?: boolean; parallelInferenceMode?: 'unified' | 'separate'; parallelOverrideValue?: number; parallelOverrideValueDense?: number; parallelOverrideValueMoe?: number; perfMaxSessions?: number; autoOpenChatUI?: boolean }
   baseUrlOverride: { enabled: boolean; port: number; serveOnLocalNetwork: boolean; apiKeyEnabled: boolean; apiKey: string }
   samplingPresets: any[]
-  paramViewMode: 'common' | 'full'  // feature 30
-  quickBaselineActive: boolean      // feature 25 — tracks if Quick preset is the active baseline
+  paramViewMode: 'common' | 'full'
+  quickBaselineActive: boolean      // tracks if Quick preset is the active baseline
   // 3-way preset mode. 'clear' = empty, 'quick' = LM Studio baselines,
   // 'fullauto' = Quick baselines + Ignore-Context-Override + Auto-Context-Fill ON.
   presetMode: 'clear' | 'quick' | 'fullauto'
@@ -172,7 +172,7 @@ export const useStore = create<AppStore>((set) => ({
   metadataExtractions: {},
   vramInfo: null,
   systemRam: null,
-  modelDefaults: { autoFitEnabled: true, autoFitContextLength: 60000, guardrailMode: 'strict', customMaxSizeGB: 0, useCurrentMemState: false, moeOffloadStrategy: 'max' /* default to MAX+ForceMoEtoCPU */, autoEnableMmproj: true, cpuThreadsOverrideEnabled: false, cpuThreadsOverridePercent: 100, parallelOverrideEnabled: false, parallelInferenceMode: 'unified', parallelOverrideValue: 4, parallelOverrideValueDense: 4, parallelOverrideValueMoe: 4, perfMaxSessions: 20 },
+  modelDefaults: { autoFitEnabled: true, autoFitContextLength: 60000, guardrailMode: 'strict', customMaxSizeGB: 0, useCurrentMemState: false, moeOffloadStrategy: 'max' /* default to MAX+ForceMoEtoCPU */, autoEnableMmproj: true, cpuThreadsOverrideEnabled: false, cpuThreadsOverridePercent: 100, parallelOverrideEnabled: false, parallelInferenceMode: 'unified', parallelOverrideValue: 4, parallelOverrideValueDense: 4, parallelOverrideValueMoe: 4, perfMaxSessions: 20, autoOpenChatUI: false },
   baseUrlOverride: { enabled: true, port: 1234, serveOnLocalNetwork: false, apiKeyEnabled: false, apiKey: '' },
   samplingPresets: [],
   paramViewMode: 'common',

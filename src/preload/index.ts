@@ -58,7 +58,7 @@ const api = {
 
   // ----- Templates -----
   listTemplates: () => ipcRenderer.invoke('list-templates'),
-  saveTemplate: (template: object) => ipcRenderer.invoke('save-template', template),
+  saveTemplate: (template: object, opts?: { silentSync?: boolean }) => ipcRenderer.invoke('save-template', template, opts),
   deleteTemplate: (id: string) => ipcRenderer.invoke('delete-template', id),
   importTemplate: () => ipcRenderer.invoke('import-template'),
   exportTemplate: (template: object) => ipcRenderer.invoke('export-template', template),
@@ -77,6 +77,14 @@ const api = {
   onModelExited: (cb: (data: { id: string }) => void) => {
     ipcRenderer.removeAllListeners('model-exited')
     ipcRenderer.on('model-exited', (_e, data) => cb(data))
+  },
+  onModelStarted: (cb: (data: { id: string; pid?: number; port: number }) => void) => {
+    ipcRenderer.removeAllListeners('model-started')
+    ipcRenderer.on('model-started', (_e, data) => cb(data))
+  },
+  onTemplatesChanged: (cb: () => void) => {
+    ipcRenderer.removeAllListeners('templates-changed')
+    ipcRenderer.on('templates-changed', () => cb())
   },
 
   // ----- HuggingFace -----
@@ -175,6 +183,12 @@ const api = {
   // ----- Base URL Override -----
   getBaseUrlOverride: () => ipcRenderer.invoke('get-base-url-override') as Promise<any>,
   setBaseUrlOverride: (opts: any) => ipcRenderer.invoke('set-base-url-override', opts) as Promise<{ success: boolean }>,
+  getGlobalBackend: () => ipcRenderer.invoke('get-global-backend') as Promise<{ backendKey: string; backendVersion: string } | null>,
+  setGlobalBackend: (backend: { backendKey: string; backendVersion: string } | null) => ipcRenderer.invoke('set-global-backend', backend) as Promise<{ success: boolean }>,
+  getMcpSettings: () => ipcRenderer.invoke('get-mcp-settings') as Promise<any>,
+  setMcpSettings: (mcp: any) => ipcRenderer.invoke('set-mcp-settings', mcp) as Promise<{ success: boolean }>,
+  addSkillFiles: () => ipcRenderer.invoke('add-skill-files') as Promise<{ success: boolean; error?: string }>,
+  removeSkillFiles: () => ipcRenderer.invoke('remove-skill-files') as Promise<{ success: boolean }>,
 
   // ----- Sampling presets -----
   listSamplingPresets: () => ipcRenderer.invoke('list-sampling-presets') as Promise<any[]>,

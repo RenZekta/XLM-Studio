@@ -140,14 +140,14 @@ Save your configurations as reusable templates. Run multiple models simultaneous
 
 **Version and Backend Management**
 
-Running cutting-edge models sometimes requires different builds of llama.cpp (or compatible forks, e.g. TurboQuant-enabled builds). XLM Studio lets you maintain and seamlessly switch between multiple backend binaries, and can check upstream repositories for new releases and download/extract them straight from the settings panel.
+Running cutting-edge models sometimes requires different builds of llama.cpp (or compatible with extra feature forks, e.g. TurboQuant-enabled builds). XLM Studio lets you maintain and seamlessly switch between multiple backend binaries, and can check upstream repositories for new releases and download/extract them straight from the settings panel.
 
 <img width="806" height="733" alt="image" src="https://github.com/user-attachments/assets/8fb6f00f-2099-4b64-94df-437006f39fbf" />
 
 
-**Persistent Logs**
+**Logs**
 
-Server logs are collected in the background for the life of the app — switching tabs no longer loses in-flight output — and stay available until you clear them manually or close the app.
+Server logs are collected in the background for the life of the app and stay available until you clear them manually or close the app.
 
 <img width="2129" height="777" alt="image" src="https://github.com/user-attachments/assets/113dfc32-4bc4-4e3f-883b-bbbcde0df009" />
 

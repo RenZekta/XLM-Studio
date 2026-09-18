@@ -7,6 +7,7 @@ import {
 } from 'lucide-react'
 import CommandsEditor from './CommandsEditor'
 import ExternalFolderList from './ExternalFolderList'
+import McpSettingsSection from './McpSettingsSection'
 import { changeTheme } from '../hooks/useTheme'
 import { formatBytes } from '../utils/format'
 import type { ThemePref, TrackedBackend, TrackedBackendRelease } from '../../../shared/types'
@@ -61,6 +62,7 @@ export default function SettingsView() {
     const b = backends.find(x => x.id === backendId || x.name === backendId)
     if (!b) return
     setActiveBackend(b)
+    window.api.setGlobalBackend({ backendKey: b.backendKey, backendVersion: b.name }).catch(() => {})
     const cmds = await window.api.getCommands(b.backendKey)
     if (cmds) setCommandsSchema(cmds)
   }
@@ -508,6 +510,8 @@ export default function SettingsView() {
           </button>
         </div>
       </div>
+
+      <McpSettingsSection />
     </div>
   )
 }

@@ -62,7 +62,7 @@ export default function SamplingPresets({ onApply, disabled }: Props) {
 
   return (
     <div className="sampling-presets-row">
-      <span className="sampling-presets-label">Temperature Presets:</span>
+      <span className="sampling-presets-label">Sampling Presets:</span>
       <select
         className="cmd-select sampling-presets-select"
         value={selectedPreset?.id || ''}

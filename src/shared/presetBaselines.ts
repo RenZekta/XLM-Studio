@@ -14,6 +14,8 @@
 // VRAM budget, unavailable synchronously before a model is even picked —
 // CmdParamsEditor's own effects fill these in once that data exists).
 
+import { detectBackendRuntimeType, defaultVramOverheadForBackend, DEFAULT_RAM_OVERHEAD_MB } from './backendOverhead'
+
 export interface CpuInfoLike {
   physicalCores?: number
 }
@@ -56,10 +58,18 @@ export function buildQuickEngineBaseline(opts: {
   cpuInfo?: CpuInfoLike | null
   backendKey?: string | null
   cpuThreadsOverridePercent?: number | null
+  // Full backend descriptor (name/displayName/exe/path), used ONLY to guess
+  // a sensible default VRAM overhead for the detected GPU runtime (CUDA/
+  // ROCm/Vulkan) — see backendOverhead.ts. backendKey alone (just the fork
+  // name, e.g. "llama.cpp") doesn't carry that; it's usually in the
+  // version/display name instead.
+  backendInfo?: { name?: string; displayName?: string; backendKey?: string; exe?: string; path?: string; runtimeLibs?: string[] } | null
 }): Record<string, any> {
   const recommendedThreads = computeRecommendedThreads(opts.cpuInfo, opts.cpuThreadsOverridePercent)
   const kvQuantK = defaultKvQuantFor(opts.backendKey)
   const kvQuantV = defaultKvQuantVFor(opts.backendKey)
+  const runtimeType = detectBackendRuntimeType(opts.backendInfo || (opts.backendKey ? { backendKey: opts.backendKey } : null))
+  const defaultVramOverhead = defaultVramOverheadForBackend(runtimeType)
   return {
     '--threads': recommendedThreads,
     '--batch-size': 2048,
@@ -89,6 +99,45 @@ export function buildQuickEngineBaseline(opts: {
     '--spec-draft-p-min': 0.75,
     '__ignoreCtxOverride': false,
     '__autoCtxFill': 'off',
-    '__memOverheadEnabled': false
+    // VRAM overhead defaults to a backend-runtime-aware estimate (CUDA/ROCm/
+    // Vulkan have measurably different driver/context footprints — see
+    // backendOverhead.ts); RAM overhead defaults to a flat, backend-
+    // independent estimate. Both on by default; the user can retune or
+    // disable either independently once they've compared against their own
+    // real launches (e.g. via --fit).
+    '__vramOverheadEnabled': true,
+    '__vramOverheadMB': defaultVramOverhead,
+    '__ramOverheadEnabled': true,
+    '__ramOverheadMB': DEFAULT_RAM_OVERHEAD_MB
   }
+}
+
+// The sampling-related CLI flags (temperature/top-p/top-k/min-p/repeat-
+// penalty/presence-penalty). These are a deliberately separate axis from
+// the engine baseline above — set once at Template creation from the
+// starred Sampling Preset, then only ever touched by the user directly or
+// by re-applying a Sampling Preset. Quick/FullAuto/Clean must never modify
+// them (Clean explicitly PRESERVES them — see handleClearPreset in
+// CmdParamsEditor.tsx and toolApplyParametersPreset in mcpControl.ts, which
+// mirrors it).
+export const SAMPLING_KEYS = ['--temperature', '--top-p', '--top-k', '--min-p', '--repeat-penalty', '--presence-penalty']
+
+// Builds the sampling args a brand-new Template should start with, from
+// whichever Sampling Preset is currently starred (falling back to the first
+// one if none is starred) — the exact same mapping CreateModal.tsx's lazy
+// initializer uses. Returns {} if there are no sampling presets configured
+// at all. Shared so template-create (mcpControl.ts) can't drift from what
+// creating a Template through the UI actually seeds.
+export function seedSamplingArgsFromPreset(samplingPresets: any[] | undefined): Record<string, any> {
+  const seeded: Record<string, any> = {}
+  const starred = samplingPresets?.find((p: any) => p.isStarred) || samplingPresets?.[0]
+  const values = starred?.values
+  if (!values) return seeded
+  if (values.temperature !== undefined) seeded['--temperature'] = values.temperature
+  if (values.topK !== undefined) seeded['--top-k'] = values.topK
+  if (values.topP !== undefined) seeded['--top-p'] = values.topP
+  if (values.minP !== undefined) seeded['--min-p'] = values.minP
+  if (values.repeatPenalty !== undefined) seeded['--repeat-penalty'] = values.repeatPenalty
+  if (values.presencePenalty !== undefined) seeded['--presence-penalty'] = values.presencePenalty
+  return seeded
 }

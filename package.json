@@ -1,6 +1,6 @@
 {
   "name": "xlm-studio",
-  "version": "2.0.0",
+  "version": "2.1.0",
   "description": "XLM Studio — a GUI for llama.cpp (fork of Hexllama)",
   "main": "out/main/index.js",
   "homepage": "./",
@@ -13,11 +13,13 @@
     "package": "electron-vite build && electron-builder"
   },
   "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.30.0",
     "electron-updater": "^6.3.9",
     "extract-zip": "^2.0.1",
     "pidusage": "^4.0.1",
     "recharts": "^3.10.1",
     "systeminformation": "^5.31.6",
+    "zod": "^3.25.0",
     "zustand": "^4.5.2"
   },
   "devDependencies": {
