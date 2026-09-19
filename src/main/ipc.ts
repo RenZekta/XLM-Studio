@@ -17,6 +17,7 @@ import type {
   ThemePref, ReleaseInfo, BaseUrlOverride, McpSettings
 } from '../shared/types'
 import { MCP_TOOL_IDS } from '../shared/types'
+import { extractBackendTypeFromAssetName } from '../shared/backendType'
 import { initPerfMonitor, registerPerfHandlers, startTracking, stopTracking, stopAllTracking } from './perfMonitor'
 import { initMcpLayer, registerMcpHandlers } from './mcpServer'
 import { toolTemplateAction } from './mcpControl'
@@ -26,6 +27,10 @@ const APP_ROOT = app.isPackaged ? join(app.getPath('userData')) : join(process.c
 const MODELS_DIR    = join(APP_ROOT, 'models')
 const TEMPLATES_DIR = join(APP_ROOT, 'templates')
 const BACKEND_DIR   = join(APP_ROOT, 'backend')
+// Sentinel file written into every backend "type" folder (vulkan, cuda,
+// rocm, ...) at extraction time -- see smartExtractBackend / scanBackendRoot
+// for why this disambiguation can't be done reliably by structure alone.
+const BACKEND_TYPE_MARKER = '.xlm-backend-type'
 const SETTINGS_PATH = join(APP_ROOT, 'settings.json')
 // Persisted GGUF metadata cache so metadata is available instantly
 // whenever the user accesses a model (no re-extraction on every view).
@@ -148,7 +153,7 @@ interface AppSettings {
   samplingPresets?: any[]
   starredPresetId?: string
   mcp?: McpSettings
-  globalBackend?: { backendKey: string; backendVersion: string } | null
+  globalBackend?: { backendKey: string; backendVersion: string; backendType?: string | null } | null
   launchOnStartup?: boolean
   autostartMainTemplates?: boolean
 }
@@ -305,7 +310,9 @@ async function loadSettings(): Promise<AppSettings> {
       baseUrlOverride: migrateBaseUrlOverride(data.baseUrlOverride),
       samplingPresets: Array.isArray(data.samplingPresets) ? data.samplingPresets : [],
       starredPresetId: typeof data.starredPresetId === 'string' ? data.starredPresetId : 'lm-studio',
-      globalBackend: (data.globalBackend && typeof data.globalBackend.backendKey === 'string') ? { backendKey: data.globalBackend.backendKey, backendVersion: data.globalBackend.backendVersion } : null,
+      globalBackend: (data.globalBackend && typeof data.globalBackend.backendKey === 'string')
+        ? { backendKey: data.globalBackend.backendKey, backendVersion: data.globalBackend.backendVersion, backendType: data.globalBackend.backendType ?? null }
+        : null,
       mcp: migrateMcpSettings(data.mcp),
       launchOnStartup: !!data.launchOnStartup,
       autostartMainTemplates: !!data.autostartMainTemplates
@@ -928,15 +935,24 @@ function parseGgufToolOutput(output: string): Record<string, string> {
 }
 
 // Scan a backend root for installed backend versions.
-// A backend root contains <backendKey>/<version>/...exe (fork-aware layout),
-// but we also tolerate the legacy flat layout <version>/...exe.
-//
-// Version subdirectories are scanned FIRST (new layout). Only when NO
-// version subdirectory contains an exe do we fall back to the legacy flat
-// layout (exe directly in the fork folder, possibly nested in build/bin/) —
-// scanning flat-first with a shallow maxDepth would find an exe INSIDE a
-// version subfolder and falsely treat the fork folder itself as a version,
-// producing a displayName like "llama.cpp (llama.cpp)" for the new layout.
+// A backend root can contain three layouts, checked in this order for each
+// fork folder:
+//   1. NEW MULTI-TYPE LAYOUT:  <backendKey>/<type>/<version>/...exe
+//      (type is a GPU-runtime variant folder -- vulkan, cuda-12.4, rocm,
+//      etc. -- see shared/backendType.ts; a release with several variants
+//      of the same version needs this so they don't collide.) Identified by
+//      a BACKEND_TYPE_MARKER sentinel file smartExtractBackend writes into
+//      every type folder -- a plain recursive exe search can't reliably
+//      tell "type/version/.../exe" apart from a legacy version folder whose
+//      exe happens to be nested a level or two deep (both are just "an exe
+//      somewhere a few directories down"), so the marker is authoritative
+//      whenever present.
+//   2. LEGACY PER-FORK LAYOUT: <backendKey>/<version>/...exe
+//      (installs made before multi-type support existed keep working
+//      exactly as before -- backendType is left undefined/null for these.
+//      Only tried when the marker from layout 1 is absent.)
+//   3. LEGACY FLAT LAYOUT:     <version>/...exe directly at the root
+//      (assumes the default "llama.cpp" fork.)
 async function scanBackendRoot(rootDir: string, rootExternal: boolean, rootIndex: number): Promise<BackendVersion[]> {
   const out: BackendVersion[] = []
   let topEntries: import('fs').Dirent[]
@@ -948,38 +964,79 @@ async function scanBackendRoot(rootDir: string, rootExternal: boolean, rootIndex
   for (const e of topEntries) {
     if (!e.isDirectory()) continue
     const forkDir = join(rootDir, e.name)
-    // 1. NEW LAYOUT: forkDir contains version subdirectories, each with an exe.
-    let versionEntries: import('fs').Dirent[]
+    let l2Entries: import('fs').Dirent[]
     try {
-      versionEntries = await fsPromises.readdir(forkDir, { withFileTypes: true })
+      l2Entries = await fsPromises.readdir(forkDir, { withFileTypes: true })
     } catch {
-      versionEntries = []
+      l2Entries = []
     }
-    const versionSubdirs = versionEntries.filter(v => v.isDirectory())
-    let foundNewLayout = false
-    for (const v of versionSubdirs) {
-      const versionDir = join(forkDir, v.name)
-      const found = discoverBackendExe(versionDir)
-      if (!found) continue
-      foundNewLayout = true
-      // Version folder name IS the release tag (e.g. "b10448" or
-      // "TurboQuant b10269-1.5.1"). Display as "forkName (versionTag)".
-      out.push({
-        id: `${rootIndex}::${e.name}::${v.name}`,
-        name: v.name,
-        displayName: `${e.name} (${v.name})`,
-        backendKey: e.name,
-        version: v.name,
-        path: found.dir,
-        exe: found.exeName,
-        runtimeLibs: detectRuntimeLibs(found.dir),
-        hasCommands: existsSync(join(BACKEND_DIR, e.name, 'commands.json')),
-        rootDir,
-        external: rootExternal
-      })
+    const l2Dirs = l2Entries.filter(d => d.isDirectory() && !d.name.startsWith('.staging-'))
+    let foundAnyNested = false
+    for (const l2 of l2Dirs) {
+      const l2Path = join(forkDir, l2.name)
+      // The marker file is the ONLY reliable way to tell "l2 is a TYPE
+      // folder containing version subfolders" apart from "l2 IS a version
+      // folder whose exe happens to be nested a level or two deep" --
+      // structurally, a recursive exe search can't distinguish
+      // type/version/build/exe from version/build/bin/exe, since both are
+      // just "an exe somewhere a few directories down". Trust the marker
+      // when present; only fall back to guessing by structure for
+      // installs made before the marker existed.
+      const isMarkedTypeFolder = existsSync(join(l2Path, BACKEND_TYPE_MARKER))
+      if (!isMarkedTypeFolder) {
+        // Try layout 2 (l2 IS the version): exe directly inside (or nested
+        // build/bin/).
+        const directFound = discoverBackendExe(l2Path)
+        if (directFound) {
+          foundAnyNested = true
+          out.push({
+            id: `${rootIndex}::${e.name}::${l2.name}`,
+            name: l2.name,
+            displayName: `${e.name} (${l2.name})`,
+            backendKey: e.name,
+            backendType: null,
+            version: l2.name,
+            path: directFound.dir,
+            exe: directFound.exeName,
+            runtimeLibs: detectRuntimeLibs(directFound.dir),
+            hasCommands: existsSync(join(BACKEND_DIR, e.name, 'commands.json')),
+            rootDir,
+            external: rootExternal
+          })
+          continue
+        }
+      }
+      // Layout 1: l2 is a TYPE folder -- look one level deeper for version
+      // subfolders that actually contain an exe.
+      let l3Entries: import('fs').Dirent[]
+      try {
+        l3Entries = await fsPromises.readdir(l2Path, { withFileTypes: true })
+      } catch {
+        l3Entries = []
+      }
+      for (const l3 of l3Entries.filter(d => d.isDirectory() && !d.name.startsWith('.staging-'))) {
+        const l3Path = join(l2Path, l3.name)
+        const found = discoverBackendExe(l3Path)
+        if (!found) continue
+        foundAnyNested = true
+        out.push({
+          id: `${rootIndex}::${e.name}::${l2.name}::${l3.name}`,
+          name: l3.name,
+          displayName: `${e.name} [${l2.name}] (${l3.name})`,
+          backendKey: e.name,
+          backendType: l2.name,
+          version: l3.name,
+          path: found.dir,
+          exe: found.exeName,
+          runtimeLibs: detectRuntimeLibs(found.dir),
+          hasCommands: existsSync(join(BACKEND_DIR, e.name, 'commands.json')),
+          rootDir,
+          external: rootExternal
+        })
+      }
     }
-    if (foundNewLayout) continue
-    // 2. LEGACY FLAT LAYOUT: forkDir itself contains the exe (no version subfolders).
+    if (foundAnyNested) continue
+    // 3. LEGACY FLAT LAYOUT: forkDir itself contains the exe (no version subfolders).
     // The exe may be directly in forkDir or nested in build/bin/.
     const direct = discoverBackendExe(forkDir)
     if (direct) {
@@ -990,6 +1047,7 @@ async function scanBackendRoot(rootDir: string, rootExternal: boolean, rootIndex
         name: version,
         displayName: `llama.cpp (${version})`,
         backendKey: 'llama.cpp',
+        backendType: null,
         version,
         path: direct.dir,
         exe: direct.exeName,
@@ -1206,15 +1264,24 @@ function startDownload(
 async function smartExtractBackend(opts: {
   archivePath: string
   backendKey: string
+  backendType: string
   versionHint: string
   isTarGz: boolean
 }): Promise<{ extractPath: string; versionDir: string }> {
   const mainBackend = await resolveMainBackendFolder()
-  const forkDir = join(mainBackend, opts.backendKey)
-  if (!existsSync(forkDir)) mkdirSync(forkDir, { recursive: true })
+  const typeDir = join(mainBackend, opts.backendKey, opts.backendType)
+  if (!existsSync(typeDir)) mkdirSync(typeDir, { recursive: true })
+  // Marks this directory as a TYPE folder (containing version subfolders)
+  // rather than a version folder itself. Without this, scanBackendRoot has
+  // no reliable way to tell "type/version/.../exe" apart from a legacy
+  // "version/.../exe" whose exe happens to be nested a level or two deep
+  // (e.g. inside a stray build/bin/ wrapper) -- both look identical to a
+  // recursive exe search. Written every time (idempotent) in case an older
+  // build of the app created this folder before the marker existed.
+  try { writeFileSync(join(typeDir, BACKEND_TYPE_MARKER), '') } catch {}
 
   // Extract into a temporary staging folder first so we can normalise structure.
-  const staging = join(forkDir, `.staging-${Date.now()}`)
+  const staging = join(typeDir, `.staging-${Date.now()}`)
   mkdirSync(staging, { recursive: true })
   try {
     if (opts.isTarGz) {
@@ -1241,7 +1308,7 @@ async function smartExtractBackend(opts: {
   // as the final folder name, regardless of what the archive's internal
   // structure named the root folder (e.g. "build", "bin", etc.).
   const finalVersionName = opts.versionHint || `version-${Date.now()}`
-  const dst = join(forkDir, finalVersionName)
+  const dst = join(typeDir, finalVersionName)
   if (existsSync(dst)) rmrf(dst)
   mkdirSync(dst, { recursive: true })
   if (topEntries.length === 1 && topEntries[0].isDirectory()) {
@@ -1264,7 +1331,7 @@ async function smartExtractBackend(opts: {
   }
   versionDir = dst
   try { rmrf(staging) } catch {}
-  return { extractPath: forkDir, versionDir }
+  return { extractPath: typeDir, versionDir }
 }
 
 function rmrf(dir: string): void {
@@ -1339,16 +1406,25 @@ function compareBackendVersions(a: string, b: string): number {
 // untouched (safety). This runs across ALL backend roots that contain the
 // same fork folder name, so an update also cleans up copies in external
 // backend folders.
-async function cleanupOldBackendVersions(backendKey: string, newVersion: string): Promise<{ deleted: string[] }> {
+// Auto-delete outdated backend versions in the same fork+type folder.
+// After a new version is downloaded & extracted, any OLDER version in the
+// same <backendKey>/<backendType>/ folder is removed to save disk space.
+// Scoped to the SAME type deliberately -- different GPU-runtime variants of
+// a fork have no meaningful version ordering relative to each other, only
+// within themselves. The newly downloaded version is always kept. Versions
+// without a parseable build number are left untouched (safety). This runs
+// across ALL backend roots that contain the same fork+type folder, so an
+// update also cleans up copies in external backend folders.
+async function cleanupOldBackendVersions(backendKey: string, backendType: string, newVersion: string): Promise<{ deleted: string[] }> {
   const deleted: string[] = []
   const newNum = parseBackendVersion(newVersion).build
   if (!newNum) return { deleted } // can't compare — skip
   const roots = await backendRoots()
   for (const root of roots) {
-    const forkDir = join(root.dir, backendKey)
-    if (!existsSync(forkDir)) continue
+    const typeDir = join(root.dir, backendKey, backendType)
+    if (!existsSync(typeDir)) continue
     let entries: import('fs').Dirent[]
-    try { entries = readdirSync(forkDir, { withFileTypes: true }) } catch { continue }
+    try { entries = readdirSync(typeDir, { withFileTypes: true }) } catch { continue }
     for (const e of entries) {
       if (!e.isDirectory()) continue
       if (e.name === newVersion) continue
@@ -1356,11 +1432,11 @@ async function cleanupOldBackendVersions(backendKey: string, newVersion: string)
       if (e.name.startsWith('.staging-')) continue
       const verNum = parseBackendVersion(e.name).build
       if (verNum && compareBackendVersions(e.name, newVersion) < 0) {
-        const oldDir = join(forkDir, e.name)
+        const oldDir = join(typeDir, e.name)
         try {
           rmrf(oldDir)
           deleted.push(e.name)
-          console.log(`[Backend cleanup] Deleted outdated version "${e.name}" (older than "${newVersion}") in ${forkDir}`)
+          console.log(`[Backend cleanup] Deleted outdated version "${e.name}" (older than "${newVersion}") in ${typeDir}`)
         } catch (err) {
           console.error(`[Backend cleanup] Failed to delete "${e.name}":`, String(err))
         }
@@ -1784,20 +1860,40 @@ export function registerIpcHandlers(): void {
   ipcMain.handle('list-backends', async () => listBackendsImpl())
   ipcMain.handle('delete-backend', async (_e, backendId: string) => {
     try {
-      // backendId = `${rootIndex}::${backendKey}::${version}`
+      // backendId = `${rootIndex}::${backendKey}::${version}` (legacy 2-level
+      // layout) or `${rootIndex}::${backendKey}::${backendType}::${version}`
+      // (multi-type layout -- see scanBackendRoot).
       const parts = backendId.split('::')
       if (parts.length < 3) return { success: false, error: 'Invalid backend id' }
       const rootIndex = parseInt(parts[0], 10)
       const backendKey = parts[1]
-      const version = parts.slice(2).join('::')
       const roots = await backendRoots()
       const root = roots[rootIndex]
       if (!root) return { success: false, error: 'Backend root not found' }
-      const versionDir = join(root.dir, backendKey, version)
+      const versionDir = parts.length >= 4
+        ? join(root.dir, backendKey, parts[2], parts.slice(3).join('::'))
+        : join(root.dir, backendKey, parts.slice(2).join('::'))
       // Safety: must stay within this root.
       if (!isSafePath(root.dir, versionDir)) return { success: false, error: 'Access denied' }
       if (existsSync(versionDir)) rmrf(versionDir)
       return { success: true }
+    } catch (err) {
+      return { success: false, error: String(err) }
+    }
+  })
+  // Deletes every installed version of one backend variant (e.g. all "cuda"
+  // installs of a fork) at once -- used by the tracker dropdown's per-type
+  // trash icon, which manages a whole variant rather than one version.
+  ipcMain.handle('delete-backend-type', async (_e, opts: { backendKey: string; backendType: string }) => {
+    try {
+      const roots = await backendRoots()
+      let deletedAny = false
+      for (const root of roots) {
+        const typeDir = join(root.dir, opts.backendKey, opts.backendType)
+        if (!isSafePath(root.dir, typeDir)) continue
+        if (existsSync(typeDir)) { rmrf(typeDir); deletedAny = true }
+      }
+      return { success: true, deleted: deletedAny }
     } catch (err) {
       return { success: false, error: String(err) }
     }
@@ -2528,8 +2624,13 @@ export function registerIpcHandlers(): void {
   let cancelBackendDl: (() => void) | null = null
   // Only one backend download actually runs at a time (cancelBackendDl is a
   // single handle) -- a second request while one is running is queued
-  // rather than rejected, and runs automatically once its turn comes.
+  // rather than rejected, and runs automatically once its turn comes. A
+  // single tracked backend can now have SEVERAL of its own variants queued
+  // at once (e.g. "Update" queuing every outdated type for one fork), so
+  // the active/queued slot is identified by (trackedId, assetName) together,
+  // not trackedId alone.
   let activeDownloadTrackedId: string | null = null
+  let activeDownloadAssetName: string | null = null
   interface QueuedDownload {
     opts: { url: string; version: string; assetName: string; backendKey: string; trackedId?: string }
     sender: Electron.WebContents
@@ -2537,7 +2638,7 @@ export function registerIpcHandlers(): void {
   }
   const downloadQueue: QueuedDownload[] = []
 
-  function sendDownloadProgress(sender: Electron.WebContents, data: { percent: number; phase: string; trackedId: string | null; queuePosition?: number }) {
+  function sendDownloadProgress(sender: Electron.WebContents, data: { percent: number; phase: string; trackedId: string | null; assetName: string; queuePosition?: number }) {
     if (!sender.isDestroyed()) sender.send('download-progress', data)
   }
   // Tells every still-queued item its current position (1-based, ahead of
@@ -2545,7 +2646,7 @@ export function registerIpcHandlers(): void {
   // of leaving it looking stuck.
   function broadcastQueuePositions(): void {
     downloadQueue.forEach((q, i) => {
-      sendDownloadProgress(q.sender, { percent: 0, phase: 'queued', trackedId: q.opts.trackedId || null, queuePosition: i + 1 })
+      sendDownloadProgress(q.sender, { percent: 0, phase: 'queued', trackedId: q.opts.trackedId || null, assetName: q.opts.assetName, queuePosition: i + 1 })
     })
   }
 
@@ -2554,26 +2655,29 @@ export function registerIpcHandlers(): void {
     const archivePath = join(app.getPath('temp'), opts.assetName)
     const isTarGz = opts.assetName.toLowerCase().endsWith('.tar.gz')
     activeDownloadTrackedId = opts.trackedId || null
+    activeDownloadAssetName = opts.assetName
+    const backendType = extractBackendTypeFromAssetName(opts.assetName)
     try {
-      sendDownloadProgress(sender, { percent: 0, phase: 'downloading', trackedId: activeDownloadTrackedId })
+      sendDownloadProgress(sender, { percent: 0, phase: 'downloading', trackedId: activeDownloadTrackedId, assetName: opts.assetName })
       await new Promise<void>((resolve, reject) => {
         cancelBackendDl = startDownload(opts.url, archivePath, 0,
-          (r, t) => sendDownloadProgress(sender, { percent: t > 0 ? Math.round(r / t * 100) : 0, phase: 'downloading', trackedId: activeDownloadTrackedId }),
+          (r, t) => sendDownloadProgress(sender, { percent: t > 0 ? Math.round(r / t * 100) : 0, phase: 'downloading', trackedId: activeDownloadTrackedId, assetName: opts.assetName }),
           resolve, reject)
       })
       cancelBackendDl = null
-      sendDownloadProgress(sender, { percent: 100, phase: 'extracting', trackedId: activeDownloadTrackedId })
+      sendDownloadProgress(sender, { percent: 100, phase: 'extracting', trackedId: activeDownloadTrackedId, assetName: opts.assetName })
       const versionHint = opts.version || opts.assetName.replace(/\.(zip|tar\.gz)$/i, '')
       const { versionDir } = await smartExtractBackend({
         archivePath,
         backendKey: opts.backendKey,
+        backendType,
         versionHint,
         isTarGz
       })
-      // Auto-delete outdated backend versions in the same fork folder.
+      // Auto-delete outdated backend versions in the same fork+type folder.
       // Runs immediately after extraction so old versions are cleaned up
       // before the frontend re-reads the installed backends list.
-      const cleanup = await cleanupOldBackendVersions(opts.backendKey, versionHint)
+      const cleanup = await cleanupOldBackendVersions(opts.backendKey, backendType, versionHint)
       if (cleanup.deleted.length > 0) {
         // Broadcast so any open windows refresh their backend list.
         BrowserWindow.getAllWindows().forEach(win => {
@@ -2588,6 +2692,7 @@ export function registerIpcHandlers(): void {
     } finally {
       cancelBackendDl = null
       activeDownloadTrackedId = null
+      activeDownloadAssetName = null
     }
   }
 
@@ -2670,23 +2775,42 @@ export function registerIpcHandlers(): void {
         release = releases[0]
         platformAssets = platformAssetsFor(release)
       }
-      let isNewer = true
-      // Determine if a version of this tracked backend is already
-      // installed. The version folder name matches the release tag exactly on
-      // a fresh download, so an exact match is the common case, but forks
-      // that keep the same upstream base build across their own version
-      // bumps (e.g. TurboQuant's "b10269-1.5.1" -> "b10269-1.6.0") need the
-      // full build+fork-semver comparison to tell those apart.
+      // Per-asset install status: each asset represents a distinct GPU-
+      // runtime variant (see extractBackendTypeFromAssetName), installed
+      // independently under <folderName>/<type>/<version>/. "Outdated" only
+      // applies to a variant that's ALREADY installed -- a variant the user
+      // never downloaded is "not-installed", not "outdated".
       const roots = await backendRoots()
-      for (const root of roots) {
-        const forkDir = join(root.dir, tracked.folderName)
-        if (!existsSync(forkDir)) continue
-        for (const v of readdirSync(forkDir, { withFileTypes: true }).filter(d => d.isDirectory())) {
-          if (v.name === release.tag_name) { isNewer = false; break }
-          if (release.tag_name && compareBackendVersions(v.name, release.tag_name) >= 0) { isNewer = false; break }
+      function installedVersionsForType(type: string): string[] {
+        const versions: string[] = []
+        for (const root of roots) {
+          const typeDir = join(root.dir, tracked.folderName, type)
+          if (!existsSync(typeDir)) continue
+          try {
+            for (const v of readdirSync(typeDir, { withFileTypes: true })) {
+              if (v.isDirectory() && !v.name.startsWith('.staging-')) versions.push(v.name)
+            }
+          } catch { /* ignore */ }
         }
-        if (!isNewer) break
+        return versions
       }
+      const assets = platformAssets.map((a: any) => {
+        const type = extractBackendTypeFromAssetName(a.name)
+        const installed = installedVersionsForType(type)
+        let status: 'not-installed' | 'installed' | 'outdated' = 'not-installed'
+        for (const v of installed) {
+          if (v === release.tag_name || compareBackendVersions(v, release.tag_name) >= 0) { status = 'installed'; break }
+          status = 'outdated'
+        }
+        return { name: a.name, downloadUrl: a.browser_download_url, size: a.size, type, status }
+      })
+      // Row-level summary: an update exists if at least one ALREADY-
+      // installed variant is outdated; up to date if at least one is
+      // installed and none are outdated; undefined (neither badge) if
+      // nothing for this backend is installed at all yet.
+      const isNewer = assets.some(a => a.status === 'outdated')
+        ? true
+        : assets.some(a => a.status === 'installed') ? false : undefined
       return {
         ...base,
         tagName: release.tag_name,
@@ -2694,7 +2818,7 @@ export function registerIpcHandlers(): void {
         url: release.html_url,
         publishedAt: release.published_at,
         isNewer,
-        assets: platformAssets.map((a: any) => ({ name: a.name, downloadUrl: a.browser_download_url, size: a.size }))
+        assets
       }
     } catch (err) {
       return { ...base, error: String(err) }
@@ -2734,21 +2858,29 @@ export function registerIpcHandlers(): void {
       processDownloadQueue()
     })
   })
-  // Cancels the currently-running download, or -- when trackedId matches a
-  // still-queued (not yet started) item -- just removes it from the queue
-  // without touching whatever is actively downloading.
-  ipcMain.handle('cancel-backend-download', (_e, trackedId?: string) => {
+  // Cancels the currently-running download, or -- when trackedId (and, when
+  // given, assetName) matches a still-queued item -- just removes that item
+  // from the queue without touching whatever else is active/queued. A
+  // single tracked backend can have several of its own variants queued at
+  // once, so assetName disambiguates which one to cancel; omitting it
+  // cancels whichever one for that trackedId is actively downloading.
+  ipcMain.handle('cancel-backend-download', (_e, trackedId?: string, assetName?: string) => {
     if (trackedId) {
-      const idx = downloadQueue.findIndex(q => q.opts.trackedId === trackedId)
+      const idx = downloadQueue.findIndex(q => q.opts.trackedId === trackedId && (!assetName || q.opts.assetName === assetName))
       if (idx !== -1) {
         const [removed] = downloadQueue.splice(idx, 1)
         removed.resolve({ success: false, error: 'Cancelled' })
         broadcastQueuePositions()
         return { success: true }
       }
+      // Not queued -- only actually cancel the active download if it's the
+      // one being asked about (same trackedId, and same assetName if given).
+      if (activeDownloadTrackedId !== trackedId) return { success: true }
+      if (assetName && activeDownloadAssetName !== assetName) return { success: true }
     }
     if (cancelBackendDl) { cancelBackendDl(); cancelBackendDl = null }
     activeDownloadTrackedId = null
+    activeDownloadAssetName = null
     return { success: true }
   })
 
@@ -3764,9 +3896,11 @@ export function registerIpcHandlers(): void {
     const s = await loadSettings()
     return s.globalBackend || null
   })
-  ipcMain.handle('set-global-backend', async (_e, backend: { backendKey: string; backendVersion: string } | null) => {
+  ipcMain.handle('set-global-backend', async (_e, backend: { backendKey: string; backendVersion: string; backendType?: string | null } | null) => {
     const s = await loadSettings()
-    s.globalBackend = backend && backend.backendKey ? { backendKey: backend.backendKey, backendVersion: backend.backendVersion } : null
+    s.globalBackend = backend && backend.backendKey
+      ? { backendKey: backend.backendKey, backendVersion: backend.backendVersion, backendType: backend.backendType ?? null }
+      : null
     await saveSettings(s)
     return { success: true }
   })

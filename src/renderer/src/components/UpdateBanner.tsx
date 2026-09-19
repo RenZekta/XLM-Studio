@@ -7,10 +7,11 @@ export default function UpdateBanner() {
   const [downloading, setDownloading] = useState(false)
   const [selectedAssetUrl, setSelectedAssetUrl] = useState('')
   // The download-progress map is shared with the Settings backend tracker
-  // (keyed by trackedId, since only one backend actually downloads at a
-  // time but others can be queued behind it) -- 'llama-cpp' is always this
-  // banner's own key.
-  const myDownloadProgress = downloadProgress['llama-cpp'] || null
+  // (keyed by `trackedId::assetName`, since a single backend can have
+  // several of its own variants queued at once) -- this banner only ever
+  // has the one download it itself just kicked off in flight.
+  const progressKey = `llama-cpp::${selectedAssetUrl ? (releaseInfo?.assets.find(a => a.downloadUrl === selectedAssetUrl)?.name || '') : ''}`
+  const myDownloadProgress = downloading ? (downloadProgress[progressKey] || null) : null
   const isQueued = myDownloadProgress?.phase === 'queued'
   useEffect(() => {
     if (releaseInfo?.assets.length && !selectedAssetUrl) {
@@ -33,7 +34,7 @@ export default function UpdateBanner() {
       trackedId: 'llama-cpp'
     })
     setDownloading(false)
-    setDownloadProgress('llama-cpp', null)
+    setDownloadProgress(`llama-cpp::${asset.name}`, null)
     if (res.success) {
       alert(`Successfully downloaded and extracted ${asset.name}`)
       setUpdateDismissed(true)
@@ -88,7 +89,12 @@ export default function UpdateBanner() {
       {myDownloadProgress || downloading ? (
         <button 
           className="dismiss text-danger" 
-          onClick={() => { window.api.cancelBackendDownload('llama-cpp'); setDownloading(false); setDownloadProgress('llama-cpp', null); }} 
+          onClick={() => {
+            const asset = releaseInfo.assets.find(a => a.downloadUrl === selectedAssetUrl)
+            window.api.cancelBackendDownload('llama-cpp', asset?.name)
+            setDownloading(false)
+            if (asset) setDownloadProgress(`llama-cpp::${asset.name}`, null)
+          }} 
           title="Cancel Download"
         >
           Cancel

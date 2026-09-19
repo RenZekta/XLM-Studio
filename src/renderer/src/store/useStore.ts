@@ -33,9 +33,11 @@ interface AppStore {
   prefillModelPath: string | null
   updateDismissed: boolean
   checkingUpdate: boolean
-  // Keyed by trackedId (every download is tagged with one -- see
+  // Keyed by `${trackedId}::${assetName}` (a single tracked backend can have
+  // several of its own variants queued/downloading at once -- see
   // ipc.ts's downloadQueue) so simultaneous downloads/queue positions for
-  // different backends don't clobber each other's progress display.
+  // different backends AND different variants of the same backend don't
+  // clobber each other's progress display.
   downloadProgress: Record<string, { percent: number; phase: string; queuePosition?: number }>
   templateSearch: string
   modelDownloads: Record<string, ModelDownloadInfo>

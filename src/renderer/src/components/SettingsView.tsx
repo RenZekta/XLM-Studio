@@ -39,6 +39,16 @@ export default function SettingsView() {
   const [notifPref, setNotifPref] = useState<'banner' | 'manual'>(getNotifPref())
   const [customBackendLink, setCustomBackendLink] = useState('')
   const [customBackendErr, setCustomBackendErr] = useState('')
+  // Which tracked backend's asset-type dropdown is open (at most one at a
+  // time). Closed on any click outside a ".asset-picker" element.
+  const [openDropdownId, setOpenDropdownId] = useState<string | null>(null)
+  useEffect(() => {
+    function handleClickOutside(e: MouseEvent) {
+      if (!(e.target as HTMLElement).closest('.asset-picker')) setOpenDropdownId(null)
+    }
+    document.addEventListener('mousedown', handleClickOutside)
+    return () => document.removeEventListener('mousedown', handleClickOutside)
+  }, [])
 
   useEffect(() => {
     if (releaseInfo?.assets.length) {
@@ -63,7 +73,7 @@ export default function SettingsView() {
     const b = backends.find(x => x.id === backendId || x.name === backendId)
     if (!b) return
     setActiveBackend(b)
-    window.api.setGlobalBackend({ backendKey: b.backendKey, backendVersion: b.name }).catch(() => {})
+    window.api.setGlobalBackend({ backendKey: b.backendKey, backendVersion: b.name, backendType: b.backendType ?? null }).catch(() => {})
     const cmds = await window.api.getCommands(b.backendKey)
     if (cmds) setCommandsSchema(cmds)
   }
@@ -118,15 +128,12 @@ export default function SettingsView() {
     if (res.success) setTrackedBackends(trackedBackends.filter(x => x.id !== t.id))
   }
 
-  async function handleDownloadTracked(t: TrackedBackend, release: TrackedBackendRelease) {
-    const assetUrl = selectedAssetByUrl[t.id] || pickDefaultAsset(t.id, release.assets)
-    const asset = release.assets.find(a => a.downloadUrl === assetUrl) || release.assets[0]
-    if (!asset) return
+  async function handleDownloadAsset(t: TrackedBackend, asset: { name: string; downloadUrl: string }, release: TrackedBackendRelease) {
     const versionHint = release.tagName || asset.name.replace(/\.(zip|tar\.gz)$/i, '')
-    // Resolves once this download has actually run -- if another backend's
-    // download is already in progress, the main process queues this one
-    // and runs it automatically afterwards, sending 'queued' progress
-    // events (position in line) in the meantime.
+    // Resolves once this download has actually run -- if another download
+    // (for this backend or any other) is already in progress, the main
+    // process queues this one and runs it automatically afterwards, sending
+    // 'queued' progress events (position in line) in the meantime.
     const res = await window.api.downloadRelease({
       url: asset.downloadUrl,
       version: versionHint,
@@ -134,21 +141,87 @@ export default function SettingsView() {
       backendKey: t.folderName,
       trackedId: t.id
     })
-    setDownloadProgress(t.id, null)
+    setDownloadProgress(`${t.id}::${asset.name}`, null)
     if (res.success) {
       const backendsData = await window.api.listBackends()
       setBackends(backendsData)
-      // Refresh just this backend's tracker result so it stops showing
-      // "New version available" for the version that was just installed
-      // without needing a full "Check for updates (all backends)" pass.
+      // Refresh just this backend's tracker result so its badges reflect
+      // the install that just happened, without a full "Check for updates
+      // (all backends)" pass.
       const updated = await window.api.checkTrackedBackend(t.id)
       if (!('error' in updated)) setTrackerResult(updated)
     } else if (res.error !== 'Cancelled') alert(`Download failed: ${res.error}`)
   }
 
+  // Queues every already-installed-but-outdated variant for one backend
+  // (e.g. both "vulkan" and "cuda" if you have both and a new release
+  // shipped for the fork). Fresh (never-installed) variants are left alone
+  // -- this is an update, not an install-everything button.
+  async function handleUpdateBackend(t: TrackedBackend, release: TrackedBackendRelease) {
+    const outdated = release.assets.filter(a => a.status === 'outdated')
+    if (!outdated.length) return
+    await Promise.all(outdated.map(async asset => {
+      const res = await window.api.downloadRelease({
+        url: asset.downloadUrl,
+        version: release.tagName || asset.name.replace(/\.(zip|tar\.gz)$/i, ''),
+        assetName: asset.name,
+        backendKey: t.folderName,
+        trackedId: t.id
+      })
+      setDownloadProgress(`${t.id}::${asset.name}`, null)
+      return res
+    }))
+    const backendsData = await window.api.listBackends()
+    setBackends(backendsData)
+    const updated = await window.api.checkTrackedBackend(t.id)
+    if (!('error' in updated)) setTrackerResult(updated)
+  }
+
+  // Global equivalent of handleUpdateBackend: every outdated variant across
+  // every tracked backend.
+  async function handleUpdateAll() {
+    const jobs: { t: TrackedBackend; release: TrackedBackendRelease; asset: TrackedBackendRelease['assets'][number] }[] = []
+    for (const t of trackedBackends) {
+      const release = trackerResults[t.id]
+      if (!release?.assets) continue
+      for (const asset of release.assets) if (asset.status === 'outdated') jobs.push({ t, release, asset })
+    }
+    if (!jobs.length) return
+    await Promise.all(jobs.map(async ({ t, release, asset }) => {
+      const res = await window.api.downloadRelease({
+        url: asset.downloadUrl,
+        version: release.tagName || asset.name.replace(/\.(zip|tar\.gz)$/i, ''),
+        assetName: asset.name,
+        backendKey: t.folderName,
+        trackedId: t.id
+      })
+      setDownloadProgress(`${t.id}::${asset.name}`, null)
+      return res
+    }))
+    const backendsData = await window.api.listBackends()
+    setBackends(backendsData)
+    const affectedIds = [...new Set(jobs.map(j => j.t.id))]
+    const results = await Promise.all(affectedIds.map(id => window.api.checkTrackedBackend(id)))
+    for (const r of results) if (!('error' in r)) setTrackerResult(r)
+  }
+
+  async function handleDeleteBackendType(t: TrackedBackend, asset: { name: string; type?: string }) {
+    if (!asset.type) return
+    if (!confirm(`Delete the installed "${asset.type}" build of "${t.name}"? This removes it from disk.`)) return
+    const res = await window.api.deleteBackendType(t.folderName, asset.type)
+    if (res.success) {
+      const backendsData = await window.api.listBackends()
+      setBackends(backendsData)
+      const updated = await window.api.checkTrackedBackend(t.id)
+      if (!('error' in updated)) setTrackerResult(updated)
+    } else alert(`Delete failed: ${res.error}`)
+  }
+
   async function handleSetTheme(t: ThemePref) {
     await changeTheme(t)
   }
+
+  const anyUpdatesDetected = trackedBackends.some(t => trackerResults[t.id]?.assets?.some(a => a.status === 'outdated'))
 
   return (
     <div className="max-w-3xl">
@@ -408,12 +481,21 @@ export default function SettingsView() {
             const release = trackerResults[t.id]
             const loadingThis = checkingAllBackends && !release
             const selectedUrl = selectedAssetByUrl[t.id] || pickDefaultAsset(t.id, release?.assets || [])
-            // Each row tracks its own queued/downloading state independently
-            // via the trackedId-keyed progress map -- other rows are free to
-            // queue their own download while one is active elsewhere.
-            const myProgress = downloadProgress[t.id]
-            const isQueued = myProgress?.phase === 'queued'
-            const isActive = !!myProgress && !isQueued
+            const selectedAsset = release?.assets.find(a => a.downloadUrl === selectedUrl)
+            // Progress is keyed per (backend, asset) -- several of this
+            // backend's own variants can be queued/downloading at once (via
+            // Update), so only the currently-SELECTED asset's progress is
+            // shown inline next to the Download button.
+            const outdatedAssets = release?.assets.filter(a => a.status === 'outdated') || []
+            // Every asset of this backend that's currently queued or
+            // downloading, regardless of which one is selected in the
+            // dropdown right now -- switching the dropdown selection must
+            // never hide the fact that something is still working in the
+            // background (this drives both the "N builds..." list below and
+            // the busy state on the primary button when it IS the selected
+            // one).
+            const busyAssets = release?.assets.filter(a => downloadProgress[`${t.id}::${a.name}`]) || []
+            const otherBusyAssets = busyAssets.filter(a => a.name !== selectedAsset?.name)
             return (
               <div key={t.id} className="tracker-card">
                 <div className="tracker-card-header">
@@ -468,55 +550,141 @@ export default function SettingsView() {
                         </span>
                       )}
                       {release.isNewer === false && <span className="up-to-date">✓ Up to date</span>}
-                      {release.isNewer === true && <span className="new-badge">New version available</span>}
+                      {release.isNewer === true && <span className="new-badge">Update available</span>}
                     </div>
-                    {release.assets.length > 0 && release.isNewer !== false && (
-                      <div className="tracker-assets-row">
-                        <select
-                          className="cmd-select"
-                          value={selectedUrl}
-                          onChange={e => {
-                            const url = e.target.value
-                            setSelectedAssetByUrl(prev => ({ ...prev, [t.id]: url }))
-                            const asset = release.assets.find(a => a.downloadUrl === url)
-                            if (asset) setLastAssetType(t.id, asset.name)
-                          }}
-                          disabled={isQueued || isActive}
-                        >
-                          {release.assets.map(a => (
-                            <option key={a.downloadUrl} value={a.downloadUrl}>
-                              {a.name} ({formatBytes(a.size)})
-                            </option>
-                          ))}
-                        </select>
-                        {isQueued ? (
-                          <div className="text-sm flex items-center gap-3" style={{ color: 'var(--text-muted)' }}>
-                            <Loader2 size={14} className="spin" />
-                            {`Queued (#${myProgress?.queuePosition || 1})`}
-                            <button
-                              className="btn btn-ghost btn-sm text-danger"
-                              onClick={() => { window.api.cancelBackendDownload(t.id); setDownloadProgress(t.id, null) }}
-                              style={{ padding: '0 8px' }}
-                            >
-                              Cancel
-                            </button>
-                          </div>
-                        ) : isActive ? (
-                          <div className="text-sm flex items-center gap-3" style={{ color: 'var(--text-muted)' }}>
-                            <Loader2 size={14} className="spin" />
-                            {myProgress?.phase === 'extracting' ? 'Extracting...' : `Downloading... ${myProgress?.percent || 0}%`}
-                            <button
-                              className="btn btn-ghost btn-sm text-danger"
-                              onClick={() => { window.api.cancelBackendDownload(t.id); setDownloadProgress(t.id, null) }}
-                              style={{ padding: '0 8px' }}
-                            >
-                              Cancel
-                            </button>
-                          </div>
-                        ) : (
-                          <button className="btn btn-primary btn-sm" onClick={() => handleDownloadTracked(t, release)}>
-                            <Download size={13} /> Download
+                    {release.assets.length > 0 && (
+                      <div className="tracker-assets-row" style={{ alignItems: 'flex-start', flexWrap: 'wrap' }}>
+                        <div className="asset-picker" style={{ position: 'relative' }}>
+                          <button
+                            type="button"
+                            className="cmd-select"
+                            style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8, cursor: 'pointer', width: '100%', minWidth: 260, backgroundImage: 'none' }}
+                            onClick={() => setOpenDropdownId(openDropdownId === t.id ? null : t.id)}
+                          >
+                            <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                              {selectedAsset ? `${selectedAsset.name} (${formatBytes(selectedAsset.size)})` : 'Select a build...'}
+                            </span>
+                            <ChevronDown size={13} style={{ flexShrink: 0 }} />
                           </button>
+                          {openDropdownId === t.id && (
+                            <div
+                              className="asset-dropdown-menu"
+                              style={{
+                                position: 'absolute', top: '100%', left: 0, right: 0, zIndex: 20,
+                                marginTop: 4, background: 'var(--surface-2, var(--surface))', border: '1px solid var(--border)',
+                                borderRadius: 8, boxShadow: '0 8px 24px rgba(0,0,0,.25)', maxHeight: 280, overflowY: 'auto'
+                              }}
+                            >
+                              {release.assets.map(a => (
+                                <div
+                                  key={a.downloadUrl}
+                                  onClick={() => {
+                                    setSelectedAssetByUrl(prev => ({ ...prev, [t.id]: a.downloadUrl }))
+                                    setLastAssetType(t.id, a.name)
+                                    setOpenDropdownId(null)
+                                  }}
+                                  style={{
+                                    display: 'flex', alignItems: 'center', gap: 8, padding: '8px 10px',
+                                    cursor: 'pointer', borderBottom: '1px solid var(--border)'
+                                  }}
+                                  onMouseEnter={e => (e.currentTarget.style.background = 'var(--hover, rgba(255,255,255,.05))')}
+                                  onMouseLeave={e => (e.currentTarget.style.background = 'transparent')}
+                                >
+                                  <span style={{ flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', fontSize: 13 }}>
+                                    {a.name} <span style={{ color: 'var(--text-muted)' }}>({formatBytes(a.size)})</span>
+                                  </span>
+                                  {downloadProgress[`${t.id}::${a.name}`] ? (
+                                    <Loader2 size={12} className="spin" style={{ flexShrink: 0, color: 'var(--text-muted)' }} />
+                                  ) : a.status !== 'not-installed' ? (
+                                    <button
+                                      className="btn btn-ghost btn-icon text-danger"
+                                      onClick={e => { e.stopPropagation(); handleDeleteBackendType(t, a) }}
+                                      title={`Delete installed "${a.type}" build`}
+                                      style={{ flexShrink: 0, padding: 2 }}
+                                    >
+                                      <Trash size={12} />
+                                    </button>
+                                  ) : null}
+                                </div>
+                              ))}
+                            </div>
+                          )}
+                        </div>
+                        {(() => {
+                          const myProgress = selectedAsset ? downloadProgress[`${t.id}::${selectedAsset.name}`] : undefined
+                          const isQueued = myProgress?.phase === 'queued'
+                          const isActive = !!myProgress && !isQueued
+                          return isQueued ? (
+                            <div className="text-sm flex items-center gap-3" style={{ color: 'var(--text-muted)' }}>
+                              <Loader2 size={14} className="spin" />
+                              {`Queued (#${myProgress?.queuePosition || 1})`}
+                              <button
+                                className="btn btn-ghost btn-sm text-danger"
+                                onClick={() => { window.api.cancelBackendDownload(t.id, selectedAsset?.name); setDownloadProgress(`${t.id}::${selectedAsset?.name}`, null) }}
+                                style={{ padding: '0 8px' }}
+                              >
+                                Cancel
+                              </button>
+                            </div>
+                          ) : isActive ? (
+                            <div className="text-sm flex items-center gap-3" style={{ color: 'var(--text-muted)' }}>
+                              <Loader2 size={14} className="spin" />
+                              {myProgress?.phase === 'extracting' ? 'Extracting...' : `Downloading... ${myProgress?.percent || 0}%`}
+                              <button
+                                className="btn btn-ghost btn-sm text-danger"
+                                onClick={() => { window.api.cancelBackendDownload(t.id, selectedAsset?.name); setDownloadProgress(`${t.id}::${selectedAsset?.name}`, null) }}
+                                style={{ padding: '0 8px' }}
+                              >
+                                Cancel
+                              </button>
+                            </div>
+                          ) : (
+                            <div style={{ display: 'flex', gap: 6 }}>
+                              <button
+                                className="btn btn-primary btn-sm"
+                                onClick={() => selectedAsset && handleDownloadAsset(t, selectedAsset, release)}
+                                disabled={!selectedAsset}
+                              >
+                                <Download size={13} /> {selectedAsset?.status === 'installed' ? 'Re-download' : 'Download'}
+                              </button>
+                              {outdatedAssets.length > 0 && (
+                                <button
+                                  className="btn btn-secondary btn-sm"
+                                  onClick={() => handleUpdateBackend(t, release)}
+                                  title={`Update ${outdatedAssets.length} installed build${outdatedAssets.length === 1 ? '' : 's'}`}
+                                >
+                                  <RefreshCw size={13} /> Update ({outdatedAssets.length})
+                                </button>
+                              )}
+                            </div>
+                          )
+                        })()}
+                        {/* Any OTHER build of this backend that's queued/downloading in the
+                            background -- shown regardless of which one is currently selected
+                            in the dropdown above, so switching selection never hides the fact
+                            that something is still working. */}
+                        {otherBusyAssets.length > 0 && (
+                          <div style={{ display: 'flex', flexDirection: 'column', gap: 4, width: '100%' }}>
+                            {otherBusyAssets.map(a => {
+                              const p = downloadProgress[`${t.id}::${a.name}`]
+                              const label = p?.phase === 'queued'
+                                ? `Queued (#${p.queuePosition || 1})`
+                                : p?.phase === 'extracting' ? 'Extracting...' : `Downloading... ${p?.percent || 0}%`
+                              return (
+                                <div key={a.name} className="text-sm flex items-center gap-3" style={{ color: 'var(--text-muted)' }}>
+                                  <Loader2 size={13} className="spin" />
+                                  <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{a.type}: {label}</span>
+                                  <button
+                                    className="btn btn-ghost btn-sm text-danger"
+                                    onClick={() => { window.api.cancelBackendDownload(t.id, a.name); setDownloadProgress(`${t.id}::${a.name}`, null) }}
+                                    style={{ padding: '0 8px' }}
+                                  >
+                                    Cancel
+                                  </button>
+                                </div>
+                              )
+                            })}
+                          </div>
                         )}
                       </div>
                     )}
@@ -532,15 +700,24 @@ export default function SettingsView() {
         </div>
 
         {/* Global check for updates button — single action for all tracked backends */}
-        <div className="mt-4 pt-4 border-t">
+        <div className="mt-4 pt-4 border-t flex flex-col gap-2">
           <button
             className="btn btn-secondary w-full justify-center"
             onClick={handleCheckAllBackends}
-            disabled={checkingAllBackends || Object.keys(downloadProgress).length > 0}
+            disabled={checkingAllBackends}
           >
             <RefreshCw size={14} className={checkingAllBackends ? 'spin' : ''} />
             {checkingAllBackends ? 'Checking all backends...' : 'Check for updates (all backends)'}
           </button>
+          {anyUpdatesDetected && (
+            <button
+              className="btn btn-primary w-full justify-center"
+              onClick={handleUpdateAll}
+            >
+              <Download size={14} />
+              Update all
+            </button>
+          )}
         </div>
       </div>
 

@@ -52,6 +52,12 @@ export interface BackendVersion {
   name: string            // stable version identifier (version subfolder name) — used for template matching
   displayName: string     // human readable, e.g. "llama.cpp: (b10448-...)"
   backendKey: string      // fork folder name, e.g. "llama.cpp" — used for commands lookup
+  // Backend variant folder name (e.g. "vulkan", "cuda-12.4", "rocm") for
+  // installs made under the multi-type layout <backendKey>/<type>/<version>/.
+  // Undefined/null for legacy installs made before multi-type support
+  // existed (<backendKey>/<version>/ directly) -- those still work exactly
+  // as before, just without a known type for VRAM-overhead detection.
+  backendType?: string | null
   version: string         // version subfolder name (alias of `name`)
   path: string            // absolute path to the directory containing the exe (cwd)
   exe: string             // exe filename, relative to `path`
@@ -203,6 +209,14 @@ export interface ReleaseAsset {
   name: string
   downloadUrl: string
   size: number
+  // Backend variant this asset represents, derived from its filename (e.g.
+  // "vulkan", "cuda-12.4", "rocm") -- see shared/backendType.ts. Only
+  // populated on TrackedBackendRelease results.
+  type?: string
+  // Whether this specific variant is already installed for this backend --
+  // and if so, whether it's the latest version or needs an update. Only
+  // populated on TrackedBackendRelease results.
+  status?: 'not-installed' | 'installed' | 'outdated'
 }
 export interface ReleaseInfo {
   tagName: string

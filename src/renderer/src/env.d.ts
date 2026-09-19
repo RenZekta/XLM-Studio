@@ -46,6 +46,7 @@ interface LlamaCppApi {
   // Backends
   listBackends: () => Promise<BackendVersion[]>
   deleteBackend: (backendId: string) => Promise<{ success: boolean; error?: string }>
+  deleteBackendType: (backendKey: string, backendType: string) => Promise<{ success: boolean; deleted?: boolean; error?: string }>
   getCommands: (backendKey: string) => Promise<CommandsSchema | null>
   saveBackendCommands: (backendKey: string, schema: object) => Promise<{ success: boolean; error?: string }>
 
@@ -64,8 +65,8 @@ interface LlamaCppApi {
   checkTrackedBackend: (trackedId: string) => Promise<TrackedBackendRelease | { error: string }>
   checkUpdates: () => Promise<ReleaseInfo>
   downloadRelease: (opts: { url: string; version: string; assetName: string; backendKey: string; trackedId?: string }) => Promise<{ success: boolean; path?: string; error?: string }>
-  cancelBackendDownload: (trackedId?: string) => Promise<{ success: boolean }>
-  onDownloadProgress: (callback: (data: { percent: number; phase: string; trackedId?: string | null; queuePosition?: number }) => void) => void
+  cancelBackendDownload: (trackedId?: string, assetName?: string) => Promise<{ success: boolean }>
+  onDownloadProgress: (callback: (data: { percent: number; phase: string; trackedId?: string | null; assetName?: string; queuePosition?: number }) => void) => void
   removeDownloadListener: () => void
 
   // Templates
@@ -155,8 +156,8 @@ interface LlamaCppApi {
   getLaunchSettings: () => Promise<{ launchOnStartup: boolean; autostartMainTemplates: boolean }>
   setLaunchOnStartup: (enabled: boolean) => Promise<{ success: boolean }>
   setAutostartMainTemplates: (enabled: boolean) => Promise<{ success: boolean }>
-  getGlobalBackend: () => Promise<{ backendKey: string; backendVersion: string } | null>
-  setGlobalBackend: (backend: { backendKey: string; backendVersion: string } | null) => Promise<{ success: boolean }>
+  getGlobalBackend: () => Promise<{ backendKey: string; backendVersion: string; backendType?: string | null } | null>
+  setGlobalBackend: (backend: { backendKey: string; backendVersion: string; backendType?: string | null } | null) => Promise<{ success: boolean }>
   getMcpSettings: () => Promise<any>
   setMcpSettings: (mcp: any) => Promise<{ success: boolean }>
   addSkillFiles: () => Promise<{ success: boolean; error?: string }>

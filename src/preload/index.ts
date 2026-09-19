@@ -32,6 +32,7 @@ const api = {
   // ----- Backends -----
   listBackends: () => ipcRenderer.invoke('list-backends') as Promise<BackendVersion[]>,
   deleteBackend: (backendId: string) => ipcRenderer.invoke('delete-backend', backendId),
+  deleteBackendType: (backendKey: string, backendType: string) => ipcRenderer.invoke('delete-backend-type', { backendKey, backendType }) as Promise<{ success: boolean; deleted?: boolean; error?: string }>,
   getCommands: (backendKey: string) => ipcRenderer.invoke('get-commands', backendKey),
   saveBackendCommands: (backendKey: string, schema: object) => ipcRenderer.invoke('save-backend-commands', backendKey, schema),
 
@@ -51,8 +52,8 @@ const api = {
   // Legacy single check (for UpdateBanner / Titlebar) — returns llama.cpp release.
   checkUpdates: () => ipcRenderer.invoke('check-updates') as Promise<ReleaseInfo>,
   downloadRelease: (opts: object) => ipcRenderer.invoke('download-release', opts),
-  cancelBackendDownload: (trackedId?: string) => ipcRenderer.invoke('cancel-backend-download', trackedId),
-  onDownloadProgress: (callback: (data: { percent: number; phase: string; trackedId?: string | null; queuePosition?: number }) => void) => {
+  cancelBackendDownload: (trackedId?: string, assetName?: string) => ipcRenderer.invoke('cancel-backend-download', trackedId, assetName),
+  onDownloadProgress: (callback: (data: { percent: number; phase: string; trackedId?: string | null; assetName?: string; queuePosition?: number }) => void) => {
     ipcRenderer.removeAllListeners('download-progress')
     ipcRenderer.on('download-progress', (_event, data) => callback(data))
   },
@@ -188,8 +189,8 @@ const api = {
   getLaunchSettings: () => ipcRenderer.invoke('get-launch-settings') as Promise<{ launchOnStartup: boolean; autostartMainTemplates: boolean }>,
   setLaunchOnStartup: (enabled: boolean) => ipcRenderer.invoke('set-launch-on-startup', enabled) as Promise<{ success: boolean }>,
   setAutostartMainTemplates: (enabled: boolean) => ipcRenderer.invoke('set-autostart-main-templates', enabled) as Promise<{ success: boolean }>,
-  getGlobalBackend: () => ipcRenderer.invoke('get-global-backend') as Promise<{ backendKey: string; backendVersion: string } | null>,
-  setGlobalBackend: (backend: { backendKey: string; backendVersion: string } | null) => ipcRenderer.invoke('set-global-backend', backend) as Promise<{ success: boolean }>,
+  getGlobalBackend: () => ipcRenderer.invoke('get-global-backend') as Promise<{ backendKey: string; backendVersion: string; backendType?: string | null } | null>,
+  setGlobalBackend: (backend: { backendKey: string; backendVersion: string; backendType?: string | null } | null) => ipcRenderer.invoke('set-global-backend', backend) as Promise<{ success: boolean }>,
   getMcpSettings: () => ipcRenderer.invoke('get-mcp-settings') as Promise<any>,
   setMcpSettings: (mcp: any) => ipcRenderer.invoke('set-mcp-settings', mcp) as Promise<{ success: boolean }>,
   addSkillFiles: () => ipcRenderer.invoke('add-skill-files') as Promise<{ success: boolean; error?: string }>,

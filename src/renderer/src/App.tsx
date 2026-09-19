@@ -108,7 +108,17 @@ export default function App() {
           try {
             const persisted = await window.api.getGlobalBackend()
             if (persisted) {
-              const match = backendsData.find(b => b.backendKey === persisted.backendKey && b.name === persisted.backendVersion)
+              // backendKey+version alone is no longer a unique identity: with
+              // multi-backend-type support, the SAME fork+version can exist
+              // under several type folders at once (e.g. vulkan AND rocm
+              // builds of "b10269-1.6.0"), so without also matching
+              // backendType this could silently restore the wrong variant
+              // whenever it happened to sort earlier in the list.
+              const match = backendsData.find(b =>
+                b.backendKey === persisted.backendKey &&
+                b.name === persisted.backendVersion &&
+                (b.backendType ?? null) === (persisted.backendType ?? null)
+              )
               if (match) initialBackend = match
             }
           } catch {}
@@ -121,7 +131,7 @@ export default function App() {
           // "newest llama.cpp" guess that can silently pick the wrong fork
           // (see Sidebar.tsx/SettingsView.tsx's switchBackend for the other
           // half of this sync).
-          window.api.setGlobalBackend({ backendKey: initialBackend.backendKey, backendVersion: initialBackend.name }).catch(() => {})
+          window.api.setGlobalBackend({ backendKey: initialBackend.backendKey, backendVersion: initialBackend.name, backendType: initialBackend.backendType ?? null }).catch(() => {})
           const cmds = await window.api.getCommands(initialBackend.backendKey)
           if (cmds) setCommandsSchema(cmds)
         } else {
@@ -342,7 +352,7 @@ export default function App() {
 
   useEffect(() => {
     window.api.onDownloadProgress((data) => {
-      const key = data.trackedId || 'llama-cpp'
+      const key = `${data.trackedId || 'llama-cpp'}::${data.assetName || ''}`
       useStore.getState().setDownloadProgress(key, { percent: data.percent, phase: data.phase, queuePosition: data.queuePosition })
     })
     return () => window.api.removeDownloadListener()

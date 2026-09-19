@@ -3,10 +3,51 @@ import { useStore } from '../store/useStore'
 import { LayoutGrid, Settings, FolderOpen, HardDrive, Search, Database, Terminal, SlidersHorizontal, Activity } from 'lucide-react'
 import { StarIcon as StarShape } from '../utils/format'
 import type { BackendVersion } from '../../../shared/types'
+import { backendTypeGroupLabel } from '../../../shared/backendType'
 
 export default function Sidebar() {
   const { view, setView, backends, activeBackend, setActiveBackend, setCommandsSchema, paths, compactSidebarEnabled,
           mainModelFolder, mainBackendFolder } = useStore()
+
+  // Distinct, detected-only backend-type groups (see backendTypeGroupLabel)
+  // -- e.g. if the user only has Vulkan and ROCm builds installed, this is
+  // exactly ["ROCm", "Vulkan"], never CUDA or Metal, so the switch below
+  // never offers a type the user doesn't actually have.
+  const backendGroups = React.useMemo(() => {
+    const set = new Set<string>()
+    for (const b of backends) set.add(backendTypeGroupLabel(b.backendType))
+    return Array.from(set).sort()
+  }, [backends])
+  const [backendTypeFilter, setBackendTypeFilter] = React.useState<string | null>(null)
+  // Tracks the last activeBackend.id this switch synced to, so it can tell
+  // "activeBackend just changed identity" (app launch restoring the last-used
+  // backend, or the user picking a different one elsewhere) apart from
+  // "activeBackend's object reference changed but it's still the same
+  // backend" (an unrelated store update). activeBackend starts out `null`
+  // for a brief moment while it's being restored from disk on launch, so a
+  // plain "only set a default once" effect would lock in a throwaway
+  // alphabetical-first guess before the real restored backend ever loads —
+  // this re-syncs every time the id itself actually changes, including that
+  // very first null -> real-id transition, instead of only when the current
+  // selection becomes invalid.
+  const lastSyncedBackendIdRef = React.useRef<string | null | undefined>(undefined)
+  React.useEffect(() => {
+    if (backendGroups.length === 0) return
+    const activeId = activeBackend?.id ?? null
+    if (lastSyncedBackendIdRef.current !== activeId) {
+      lastSyncedBackendIdRef.current = activeId
+      if (activeBackend) {
+        setBackendTypeFilter(backendTypeGroupLabel(activeBackend.backendType))
+        return
+      }
+      // No active backend (yet, or at all) -- fall through to the general
+      // validity check below for a best-effort placeholder.
+    }
+    setBackendTypeFilter(prev => (prev && backendGroups.includes(prev)) ? prev : backendGroups[0])
+  }, [backendGroups, activeBackend])
+  const visibleBackends = backendGroups.length > 1 && backendTypeFilter
+    ? backends.filter(b => backendTypeGroupLabel(b.backendType) === backendTypeFilter)
+    : backends
 
   // Takes the BackendVersion object directly rather than looking it up by
   // name/id -- the caller already has the exact entry from `backends`, and a
@@ -15,7 +56,7 @@ export default function Sidebar() {
   // concern on the run-model path).
   async function switchBackend(b: BackendVersion) {
     setActiveBackend(b)
-    window.api.setGlobalBackend({ backendKey: b.backendKey, backendVersion: b.name }).catch(() => {})
+    window.api.setGlobalBackend({ backendKey: b.backendKey, backendVersion: b.name, backendType: b.backendType ?? null }).catch(() => {})
     const cmds = await window.api.getCommands(b.backendKey)
     if (cmds) setCommandsSchema(cmds)
   }
@@ -63,6 +104,12 @@ export default function Sidebar() {
           visibility: visible;
           margin-top: 12px;
           padding: 8px 8px 4px;
+        }
+        .sidebar-compact .backend-type-switch {
+          display: none;
+        }
+        .sidebar-compact:hover .backend-type-switch {
+          display: flex;
         }
         .sidebar-compact .nav-item-text {
           position: absolute !important;
@@ -184,7 +231,22 @@ export default function Sidebar() {
       {backends.length > 0 && (
         <>
           <span className="nav-section-label" style={{ marginTop: 12 }}>Backend</span>
-          {backends.map((b) => (
+          {backendGroups.length > 1 && (
+            <div className="theme-segmented backend-type-switch" style={{ margin: '0 10px 6px', width: 'auto', display: 'flex' }}>
+              {backendGroups.map(g => (
+                <button
+                  key={g}
+                  className={`theme-segmented-btn ${backendTypeFilter === g ? 'active' : ''}`}
+                  onClick={() => setBackendTypeFilter(g)}
+                  style={{ padding: '4px 9px', fontSize: 11, flex: 1, justifyContent: 'center' }}
+                  title={`Show only ${g} backends`}
+                >
+                  {g}
+                </button>
+              ))}
+            </div>
+          )}
+          {visibleBackends.map((b) => (
             <button
               key={b.id}
               className={`nav-item ${activeBackend?.id === b.id ? 'active' : ''}`}

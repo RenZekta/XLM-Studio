@@ -16,7 +16,7 @@ import { formatWithSpaces, CONTEXT_POWER_OF_TWO_STEPS, snapToNearestPowerOfTwo }
 import { buildQuickEngineBaseline, computeRecommendedThreads, defaultKvQuantFor, defaultKvQuantVFor, SAMPLING_KEYS } from '../../../shared/presetBaselines'
 import { COMMON_PARAM_FLAGS as COMMON_VISIBLE } from '../../../shared/commonParams'
 import { applyNgramModifierToggle } from '../../../shared/specToggles'
-import { detectBackendRuntimeType, defaultVramOverheadForBackend, DEFAULT_RAM_OVERHEAD_MB } from '../../../shared/backendOverhead'
+import { detectBackendRuntimeType, defaultVramOverheadForBackend, DEFAULT_RAM_OVERHEAD_MB, type BackendRuntimeType } from '../../../shared/backendOverhead'
 
 const iconMap: Record<string, React.ReactNode> = {
   Box: <Box size={14} />, Cpu: <Cpu size={14} />, Zap: <Zap size={14} />,
@@ -364,7 +364,7 @@ export default function CmdParamsEditor({ templateId, args, onChange, modelPathF
   // or not created via Quick) — RAM defaults to a flat, backend-independent
   // estimate in the same situation.
   const vramOverheadEnabled = args['__vramOverheadEnabled'] === true
-  const vramOverheadDefault = defaultVramOverheadForBackend(detectBackendRuntimeType(activeBackend))
+  const vramOverheadDefault = defaultVramOverheadForBackend(detectBackendRuntimeType(effectiveBackend))
   const vramOverheadStored = args['__vramOverheadMB']
   const vramOverheadIsSet = vramOverheadStored !== undefined && vramOverheadStored !== null && vramOverheadStored !== '' && !isNaN(Number(vramOverheadStored))
   // An explicit 0 is a real, deliberate value here — it must NOT fall back
@@ -968,6 +968,37 @@ export default function CmdParamsEditor({ templateId, args, onChange, modelPathF
     if (changed) commit(newArgs, { silent: true })
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [disabled, defaultKvQuantK, defaultKvQuantV, commandsSchema, effectiveBackend?.backendKey])
+
+  // '__vramOverheadMB' backfill: same "was this riding the old default, or
+  // a deliberate override" reasoning as the KV-quant backfill above, but
+  // keyed on the backend's RUNTIME TYPE (cuda/rocm/vulkan/cpu) rather than
+  // backendKey -- the VRAM overhead default depends on which GPU runtime is
+  // in play, not which fork, so switching between two CUDA backends (e.g.
+  // stock llama.cpp and the TurboQuant fork, both CUDA) correctly leaves it
+  // alone, while switching from a CUDA backend to a Vulkan one updates it.
+  // Unlike KV-quant, there's no "invalid option" case here (it's a free
+  // number, not a fixed dropdown) and nothing to do while the override is
+  // switched off or was never explicitly set in the first place -- an unset
+  // value already tracks the live default every render (see vramOverheadMB
+  // above), it just doesn't need a backfill into args.
+  const prevVramRuntimeTypeRef = useRef<BackendRuntimeType>(detectBackendRuntimeType(effectiveBackend))
+  useEffect(() => {
+    const prevRuntimeType = prevVramRuntimeTypeRef.current
+    const curRuntimeType = detectBackendRuntimeType(effectiveBackend)
+    prevVramRuntimeTypeRef.current = curRuntimeType
+    if (disabled || prevRuntimeType === curRuntimeType) return
+    const curArgs = argsRef.current
+    if (curArgs['__vramOverheadEnabled'] !== true) return
+    const stored = curArgs['__vramOverheadMB']
+    const isSet = stored !== undefined && stored !== null && stored !== '' && !isNaN(Number(stored))
+    if (!isSet) return
+    const prevDefault = defaultVramOverheadForBackend(prevRuntimeType)
+    const newDefault = defaultVramOverheadForBackend(curRuntimeType)
+    if (Number(stored) === prevDefault && prevDefault !== newDefault) {
+      commit({ ...curArgs, '__vramOverheadMB': newDefault }, { silent: true })
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [disabled, effectiveBackend])
 
   const reasoningPreserveOn = args['--reasoning-preserve'] !== false
   function setReasoningPreserveOn(on: boolean) {
@@ -2242,7 +2273,14 @@ export default function CmdParamsEditor({ templateId, args, onChange, modelPathF
             system it's always 0 and only clutters the banner. Free RAM is
             always shown: it's what MoE and non-VRAM systems actually run
             against, and reflects the "use current memory state" switch the
-            same way Free VRAM does. */}
+            same way Free VRAM does. Total (VRAM+RAM combined) is only
+            meaningful alongside an actual VRAM figure -- on a VRAM-less
+            system it would just restate Free RAM. */}
+        {vramBudget.totalVRAMMB > 0 && (
+          <span title="Free VRAM + Free RAM combined">
+            Total: {(vramBudget.vramAvailable + vramBudget.freeRAMMB).toLocaleString()} MB
+          </span>
+        )}
         {vramBudget.totalVRAMMB > 0 && <span>Free VRAM: {vramBudget.vramAvailable.toLocaleString()} MB</span>}
         <span>Free RAM: {vramBudget.freeRAMMB.toLocaleString()} MB</span>
         <span title="Model weight memory (≈ file size, mmap upper bound)">

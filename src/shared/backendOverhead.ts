@@ -5,10 +5,21 @@
 // Used only to pick a sensible DEFAULT VRAM overhead per backend the first
 // time a Template is created — never overrides a value the user has already
 // set, and the user can always override the detected default manually.
+import { backendTypeToRuntimeCategory } from './backendType'
+
 export type BackendRuntimeType = 'cuda' | 'rocm' | 'vulkan' | 'cpu' | 'unknown'
 
-export function detectBackendRuntimeType(backend: { name?: string; displayName?: string; backendKey?: string; exe?: string; path?: string; runtimeLibs?: string[] } | null | undefined): BackendRuntimeType {
+export function detectBackendRuntimeType(backend: { name?: string; displayName?: string; backendKey?: string; backendType?: string | null; exe?: string; path?: string; runtimeLibs?: string[] } | null | undefined): BackendRuntimeType {
   if (!backend) return 'unknown'
+  // The type folder name (derived once, at download time, from the literal
+  // release asset filename -- see backendType.ts) is the most reliable
+  // signal available: unlike the runtime libs shipped alongside the exe or
+  // the fork's own free-form display name, it's tied to the exact variant
+  // that was downloaded, not inferred after the fact.
+  if (backend.backendType) {
+    const cat = backendTypeToRuntimeCategory(backend.backendType)
+    if (cat !== 'unknown') return cat
+  }
   // The loadable ggml backend library actually shipped next to the exe is
   // authoritative — a fork/version display name is free-form and often
   // carries no runtime hint at all. Only fall back to guessing from the
