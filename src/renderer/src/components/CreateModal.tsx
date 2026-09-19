@@ -180,9 +180,11 @@ export default function CreateModal() {
   }
   async function handleSubmit(e: React.FormEvent) {
     e.preventDefault()
-    if (!name.trim()) return alert('Name is required')
+    // No field on this form should block Save with a validation popup --
+    // an empty name silently becomes "Unnamed" instead of warning the user.
+    const effectiveName = name.trim() || 'Unnamed'
     const templateData: Partial<Template> = {
-      name,
+      name: effectiveName,
       description,
       backendVersion,
       backendKey,
@@ -199,7 +201,7 @@ export default function CreateModal() {
       }
     } else {
       const newTemplate: Omit<Template, 'id'> = {
-        name,
+        name: effectiveName,
         description,
         backendVersion,
         backendKey,
@@ -271,8 +273,7 @@ export default function CreateModal() {
                 className="form-input"
                 value={name}
                 onChange={e => setName(e.target.value)}
-                placeholder="e.g. Llama 3 8B Default"
-                required
+                placeholder="e.g. Llama 3 8B Default (leave empty for &quot;Unnamed&quot;)"
                 autoFocus
               />
             </div>
@@ -410,6 +411,8 @@ export default function CreateModal() {
                   onChange={setArgs}
                   modelPathFallback={modelPath}
                   serverPortFallback={serverPort}
+                  backendKey={backendKey}
+                  backendVersionName={backendVersion}
                   headerPortalTarget={headerAnchor}
                 />
               </div>

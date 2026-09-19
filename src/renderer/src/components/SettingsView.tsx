@@ -8,8 +8,10 @@ import {
 import CommandsEditor from './CommandsEditor'
 import ExternalFolderList from './ExternalFolderList'
 import McpSettingsSection from './McpSettingsSection'
+import LaunchSettingsSection from './LaunchSettingsSection'
 import { changeTheme } from '../hooks/useTheme'
 import { formatBytes } from '../utils/format'
+import { pickDefaultAsset, setLastAssetType } from '../utils/backendAssetPref'
 import type { ThemePref, TrackedBackend, TrackedBackendRelease } from '../../../shared/types'
 
 const NOTIF_KEY = 'hexllama_update_notify'
@@ -32,7 +34,6 @@ export default function SettingsView() {
     setTrackerResult, setCheckingAllBackends
   } = useStore()
 
-  const [downloading, setDownloading] = useState(false)
   const [selectedAssetByUrl, setSelectedAssetByUrl] = useState<Record<string, string>>({})
   const [expandedEditor, setExpandedEditor] = useState<string | null>(null)
   const [notifPref, setNotifPref] = useState<'banner' | 'manual'>(getNotifPref())
@@ -43,7 +44,7 @@ export default function SettingsView() {
     if (releaseInfo?.assets.length) {
       // legacy single release uses key 'llama-cpp'
       if (!selectedAssetByUrl['llama-cpp']) {
-        setSelectedAssetByUrl(prev => ({ ...prev, 'llama-cpp': releaseInfo.assets[0].downloadUrl }))
+        setSelectedAssetByUrl(prev => ({ ...prev, 'llama-cpp': pickDefaultAsset('llama-cpp', releaseInfo.assets) }))
       }
     }
   }, [releaseInfo, selectedAssetByUrl])
@@ -118,23 +119,31 @@ export default function SettingsView() {
   }
 
   async function handleDownloadTracked(t: TrackedBackend, release: TrackedBackendRelease) {
-    const assetUrl = selectedAssetByUrl[t.id] || (release.assets[0]?.downloadUrl || '')
+    const assetUrl = selectedAssetByUrl[t.id] || pickDefaultAsset(t.id, release.assets)
     const asset = release.assets.find(a => a.downloadUrl === assetUrl) || release.assets[0]
     if (!asset) return
-    setDownloading(true)
     const versionHint = release.tagName || asset.name.replace(/\.(zip|tar\.gz)$/i, '')
+    // Resolves once this download has actually run -- if another backend's
+    // download is already in progress, the main process queues this one
+    // and runs it automatically afterwards, sending 'queued' progress
+    // events (position in line) in the meantime.
     const res = await window.api.downloadRelease({
       url: asset.downloadUrl,
       version: versionHint,
       assetName: asset.name,
-      backendKey: t.folderName
+      backendKey: t.folderName,
+      trackedId: t.id
     })
-    setDownloading(false)
-    setDownloadProgress(null)
+    setDownloadProgress(t.id, null)
     if (res.success) {
       const backendsData = await window.api.listBackends()
       setBackends(backendsData)
-    } else alert(`Download failed: ${res.error}`)
+      // Refresh just this backend's tracker result so it stops showing
+      // "New version available" for the version that was just installed
+      // without needing a full "Check for updates (all backends)" pass.
+      const updated = await window.api.checkTrackedBackend(t.id)
+      if (!('error' in updated)) setTrackerResult(updated)
+    } else if (res.error !== 'Cancelled') alert(`Download failed: ${res.error}`)
   }
 
   async function handleSetTheme(t: ThemePref) {
@@ -255,6 +264,7 @@ export default function SettingsView() {
               setMainModelFolder(mm.isDefault ? null : mm.folder)
               return res
             }}
+            onMigrate={(folder) => window.api.migrateModelFolders(folder)}
             addLabel="Add Model Folder"
             emptyText="No external model folders configured. The default app folder is used."
             onAfterChange={refreshModels}
@@ -397,7 +407,13 @@ export default function SettingsView() {
           {trackedBackends.map(t => {
             const release = trackerResults[t.id]
             const loadingThis = checkingAllBackends && !release
-            const selectedUrl = selectedAssetByUrl[t.id] || (release?.assets[0]?.downloadUrl || '')
+            const selectedUrl = selectedAssetByUrl[t.id] || pickDefaultAsset(t.id, release?.assets || [])
+            // Each row tracks its own queued/downloading state independently
+            // via the trackedId-keyed progress map -- other rows are free to
+            // queue their own download while one is active elsewhere.
+            const myProgress = downloadProgress[t.id]
+            const isQueued = myProgress?.phase === 'queued'
+            const isActive = !!myProgress && !isQueued
             return (
               <div key={t.id} className="tracker-card">
                 <div className="tracker-card-header">
@@ -459,8 +475,13 @@ export default function SettingsView() {
                         <select
                           className="cmd-select"
                           value={selectedUrl}
-                          onChange={e => setSelectedAssetByUrl(prev => ({ ...prev, [t.id]: e.target.value }))}
-                          disabled={downloading || !!downloadProgress}
+                          onChange={e => {
+                            const url = e.target.value
+                            setSelectedAssetByUrl(prev => ({ ...prev, [t.id]: url }))
+                            const asset = release.assets.find(a => a.downloadUrl === url)
+                            if (asset) setLastAssetType(t.id, asset.name)
+                          }}
+                          disabled={isQueued || isActive}
                         >
                           {release.assets.map(a => (
                             <option key={a.downloadUrl} value={a.downloadUrl}>
@@ -468,13 +489,25 @@ export default function SettingsView() {
                             </option>
                           ))}
                         </select>
-                        {downloading || downloadProgress ? (
+                        {isQueued ? (
                           <div className="text-sm flex items-center gap-3" style={{ color: 'var(--text-muted)' }}>
                             <Loader2 size={14} className="spin" />
-                            {downloadProgress?.phase === 'extracting' ? 'Extracting...' : `Downloading... ${downloadProgress?.percent || 0}%`}
+                            {`Queued (#${myProgress?.queuePosition || 1})`}
                             <button
                               className="btn btn-ghost btn-sm text-danger"
-                              onClick={() => { window.api.cancelBackendDownload(); setDownloading(false); setDownloadProgress(null) }}
+                              onClick={() => { window.api.cancelBackendDownload(t.id); setDownloadProgress(t.id, null) }}
+                              style={{ padding: '0 8px' }}
+                            >
+                              Cancel
+                            </button>
+                          </div>
+                        ) : isActive ? (
+                          <div className="text-sm flex items-center gap-3" style={{ color: 'var(--text-muted)' }}>
+                            <Loader2 size={14} className="spin" />
+                            {myProgress?.phase === 'extracting' ? 'Extracting...' : `Downloading... ${myProgress?.percent || 0}%`}
+                            <button
+                              className="btn btn-ghost btn-sm text-danger"
+                              onClick={() => { window.api.cancelBackendDownload(t.id); setDownloadProgress(t.id, null) }}
                               style={{ padding: '0 8px' }}
                             >
                               Cancel
@@ -503,7 +536,7 @@ export default function SettingsView() {
           <button
             className="btn btn-secondary w-full justify-center"
             onClick={handleCheckAllBackends}
-            disabled={checkingAllBackends || downloading}
+            disabled={checkingAllBackends || Object.keys(downloadProgress).length > 0}
           >
             <RefreshCw size={14} className={checkingAllBackends ? 'spin' : ''} />
             {checkingAllBackends ? 'Checking all backends...' : 'Check for updates (all backends)'}
@@ -512,6 +545,7 @@ export default function SettingsView() {
       </div>
 
       <McpSettingsSection />
+      <LaunchSettingsSection />
     </div>
   )
 }

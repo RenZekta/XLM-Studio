@@ -33,7 +33,10 @@ interface AppStore {
   prefillModelPath: string | null
   updateDismissed: boolean
   checkingUpdate: boolean
-  downloadProgress: { percent: number; phase: string } | null
+  // Keyed by trackedId (every download is tagged with one -- see
+  // ipc.ts's downloadQueue) so simultaneous downloads/queue positions for
+  // different backends don't clobber each other's progress display.
+  downloadProgress: Record<string, { percent: number; phase: string; queuePosition?: number }>
   templateSearch: string
   modelDownloads: Record<string, ModelDownloadInfo>
   hfDownloads: { repoId: string; filename: string; percent: number; phase: 'downloading' | 'paused' | 'saving' | 'creating_template' | 'done' | 'error' | 'starting'; speed?: number }[]
@@ -92,7 +95,7 @@ interface AppStore {
   setPaths: (p: { models: string; templates: string; backend: string; mainModelFolder: string; mainBackendFolder: string }) => void
   setUpdateDismissed: (v: boolean) => void
   setCheckingUpdate: (v: boolean) => void
-  setDownloadProgress: (data: { percent: number; phase: string } | null) => void
+  setDownloadProgress: (trackedId: string, data: { percent: number; phase: string; queuePosition?: number } | null) => void
   setTemplateSearch: (q: string) => void
   upsertModelDownload: (d: ModelDownloadInfo) => void
   removeModelDownload: (id: string) => void
@@ -150,7 +153,7 @@ export const useStore = create<AppStore>((set) => ({
   cards: [], backends: [], models: [], activeBackend: null,
   commandsSchema: null, releaseInfo: null, paths: null,
   view: 'cards', showCreateModal: false, editingTemplate: null, prefillModelPath: null,
-  updateDismissed: false, checkingUpdate: false, downloadProgress: null,
+  updateDismissed: false, checkingUpdate: false, downloadProgress: {},
   templateSearch: '', modelDownloads: {}, hfDownloads: [],
   hubQuery: '', hubResults: [], hubSelectedModelId: null, hubSort: 'downloads', hubDirection: -1,
   compactSidebarEnabled: localStorage.getItem('compactSidebar') === 'true',
@@ -196,7 +199,15 @@ export const useStore = create<AppStore>((set) => ({
   setPaths: (p) => set({ paths: p }),
   setUpdateDismissed: (v) => set({ updateDismissed: v }),
   setCheckingUpdate: (v) => set({ checkingUpdate: v }),
-  setDownloadProgress: (data) => set({ downloadProgress: data }),
+  setDownloadProgress: (trackedId, data) => set((s) => {
+    if (data === null) {
+      if (!(trackedId in s.downloadProgress)) return {}
+      const next = { ...s.downloadProgress }
+      delete next[trackedId]
+      return { downloadProgress: next }
+    }
+    return { downloadProgress: { ...s.downloadProgress, [trackedId]: data } }
+  }),
   setTemplateSearch: (q) => set({ templateSearch: q }),
   upsertModelDownload: (d) => set((s) => ({ modelDownloads: { ...s.modelDownloads, [d.id]: d } })),
   removeModelDownload: (id) => set((s) => {

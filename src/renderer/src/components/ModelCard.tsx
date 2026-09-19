@@ -1,11 +1,12 @@
 import React, { useState, useEffect, useRef, useMemo } from 'react'
 import { useStore } from '../store/useStore'
-import { Play, Square, Settings, ChevronDown, MoreVertical, Copy, Trash, Download, Globe, AlertCircle, Gauge, Loader2 } from 'lucide-react'
-import type { CardState } from '../../../shared/types'
+import { Play, Square, Settings, ChevronDown, MoreVertical, Copy, Trash, Download, Globe, AlertCircle, Gauge, Loader2, Star } from 'lucide-react'
+import type { CardState, Template } from '../../../shared/types'
 import CmdParamsEditor from './CmdParamsEditor'
+import { effectiveTemplatePort, starColorForPort } from '../utils/templatePort'
 interface Props { card: CardState }
 export default function ModelCard({ card }: Props) {
-  const { toggleCardExpanded, setCardStatus, removeCard, backends, activeBackend, commandsSchema, setShowCreateModal, models, modelDefaults, ggufMetadata } = useStore()
+  const { toggleCardExpanded, setCardStatus, removeCard, backends, activeBackend, commandsSchema, setShowCreateModal, models, modelDefaults, ggufMetadata, cards, baseUrlOverride, updateCard } = useStore()
 
   // Compute the EFFECTIVE context that will be passed to
   // llama.cpp on the next run. Precedence:
@@ -68,6 +69,13 @@ export default function ModelCard({ card }: Props) {
         ? Math.max(1, Number(isMoeModel ? modelDefaults.parallelOverrideValueMoe : modelDefaults.parallelOverrideValueDense) || 4)
         : Math.max(1, Number(modelDefaults.parallelOverrideValue) || 4))
     : null  // null = don't touch, use whatever's in the template's own args
+  const isMainTemplate = card.template.mainForPort === true
+  const myEffectivePort = effectiveTemplatePort(card.template, baseUrlOverride)
+  const starColor = useMemo(() => {
+    if (!isMainTemplate) return undefined
+    const mainTemplates = cards.map(c => c.template).filter(t => t.mainForPort === true)
+    return starColorForPort(myEffectivePort, mainTemplates, baseUrlOverride)
+  }, [isMainTemplate, myEffectivePort, cards, baseUrlOverride])
   const [showMenu, setShowMenu] = useState(false)
   const menuRef = useRef<HTMLDivElement>(null)
   const isRunning = card.status === 'running'
@@ -235,8 +243,25 @@ export default function ModelCard({ card }: Props) {
   async function handleExport() { await window.api.exportTemplate(card.template); setShowMenu(false) }
   function handleEdit() { setShowCreateModal(true, card.template); setShowMenu(false) }
   function handleDuplicate() {
-    const t = { ...card.template, id: Date.now().toString(), name: `${card.template.name} (Copy)` }
+    // A duplicate never inherits the Main Template star -- it would
+    // otherwise immediately dethrone the original, which shares the same
+    // port until the user changes it.
+    const { mainForPort, mainStarredAt, ...rest } = card.template
+    const t = { ...rest, id: Date.now().toString(), name: `${card.template.name} (Copy)` }
     window.api.saveTemplate(t).then(res => { if (res.success) useStore.getState().addCard(t) })
+    setShowMenu(false)
+  }
+  async function handleToggleMain() {
+    const nowMain = !isMainTemplate
+    const patch: Partial<Template> = nowMain
+      ? { mainForPort: true, mainStarredAt: Date.now() }
+      : { mainForPort: false, mainStarredAt: undefined }
+    updateCard(card.template.id, patch)
+    // The main process is the source of truth for the one-Main-Template-
+    // per-port invariant and may dethrone a DIFFERENT template as a side
+    // effect -- it broadcasts 'templates-changed' either way, which the
+    // App-level listener uses to reconcile every card from disk.
+    await window.api.saveTemplate({ ...card.template, ...patch })
     setShowMenu(false)
   }
   return (
@@ -258,6 +283,11 @@ export default function ModelCard({ card }: Props) {
         <div className="card-info">
           <div style={{ display: 'flex', alignItems: 'center', gap: 6, minWidth: 0 }}>
             <h3 className="card-name" title={card.template.name}>{card.template.name}</h3>
+            {isMainTemplate && (
+              <span title={`Main Template for port ${myEffectivePort}`} style={{ display: 'inline-flex', flexShrink: 0 }}>
+                <Star size={14} style={{ fill: starColor, color: starColor }} />
+              </span>
+            )}
             {/* Feature (context): badge showing the context amount that will be
                 (or is being) used by llama.cpp. When the Minimum Context Length
                 Override is ON (and the per-preset "Ignore" is OFF), the badge is
@@ -303,6 +333,10 @@ export default function ModelCard({ card }: Props) {
           {showMenu && (
             <div className="dropdown-menu" style={{ position: 'absolute', right: 0, top: 'calc(100% + 4px)', zIndex: 500 }}>
               <button className="dropdown-item" onClick={handleEdit}><Settings size={14} /> Edit Template</button>
+              <button className="dropdown-item" onClick={handleToggleMain}>
+                <Star size={14} style={isMainTemplate ? { fill: starColor, color: starColor } : undefined} />
+                {isMainTemplate ? 'Unstar Main Template' : `Star as Main Template (port ${myEffectivePort})`}
+              </button>
               <button className="dropdown-item" onClick={handleDuplicate}><Copy size={14} /> Duplicate</button>
               <button className="dropdown-item" onClick={handleExport}><Download size={14} /> Export</button>
               <div className="dropdown-divider" />

@@ -16,7 +16,7 @@ export interface ControlDeps {
   loadSettings: () => Promise<any>
   saveSettings: (s: any) => Promise<void>
   listTemplates: () => any[]
-  saveTemplate: (t: Record<string, unknown>) => { success: true; id: string }
+  saveTemplate: (t: Record<string, unknown>) => Promise<{ success: true; id: string }>
   deleteTemplate: (id: string) => { success: boolean; error?: string }
   listModels: () => Promise<any[]>
   listBackends: () => Promise<any[]>
@@ -383,7 +383,7 @@ export async function toolTemplateDuplicate(args: { template: string; copies: nu
     }
     tagAsMcpMade(copy)
     delete copy._file
-    D().saveTemplate(copy)
+    await D().saveTemplate(copy)
     created.push(copy.name)
   }
   return { template: t.name, copiesCreated: created }
@@ -447,7 +447,7 @@ export async function toolTemplateCreate(args: { name: string; model: string; ba
     lastSessionAt: null
   }
   tagAsMcpMade(template)
-  const res = D().saveTemplate(template)
+  const res = await D().saveTemplate(template)
   return { name: template.name, id: res.id, port, backendKey: backend.backendKey, backendVersion: backend.name, resolvedVia: args.backend ? 'explicit' : 'global-default', tags: template.tags }
 }
 
@@ -497,7 +497,7 @@ export async function toolTemplateEdit(args: { templates: string[]; changes: Rec
       }
       patch.args = newArgs
       delete patch._file
-      D().saveTemplate(patch)
+      await D().saveTemplate(patch)
       results.push({ template: t.name, success: true })
     } catch (err: any) {
       results.push({ template: t.name, success: false, error: err?.message || String(err) })
@@ -562,7 +562,7 @@ export async function toolApplyParametersPreset(args: { preset: string | number;
     preserved['__lastPreset'] = 'clear'
     const patch = { ...t, args: preserved, updatedAt: new Date().toISOString() }
     delete (patch as any)._file
-    D().saveTemplate(patch)
+    await D().saveTemplate(patch)
     return { template: t.name, preset: 'Clean', applied: true }
   }
   if (!t.modelPath) throw new ToolError(`"${t.name}" has no model assigned yet — set one with template-edit first.`)
@@ -593,7 +593,7 @@ export async function toolApplyParametersPreset(args: { preset: string | number;
     mergedArgs['__lastPreset'] = 'quick'
     const patch = { ...t, backendKey: backend.backendKey, backendVersion: backend.name, args: mergedArgs, updatedAt: new Date().toISOString() }
     delete (patch as any)._file
-    D().saveTemplate(patch)
+    await D().saveTemplate(patch)
     return { template: t.name, preset: 'Quick', applied: true }
   }
   // full-auto: same merged baseline, then the same two overrides
@@ -607,7 +607,7 @@ export async function toolApplyParametersPreset(args: { preset: string | number;
   mergedArgs['__lastPreset'] = 'fullauto'
   const patch = { ...t, backendKey: backend.backendKey, backendVersion: backend.name, args: mergedArgs, updatedAt: new Date().toISOString() }
   delete (patch as any)._file
-  D().saveTemplate(patch)
+  await D().saveTemplate(patch)
   return { template: t.name, preset: 'FULL AUTO', applied: true }
 }
 
@@ -946,7 +946,7 @@ export async function toolBenchmark(args: { template: string; prompts?: string[]
       const history = [record, ...(freshTarget.benchmarkHistory || [])].slice(0, maxHistory)
       const patch = { ...freshTarget, benchmarkHistory: history }
       delete (patch as any)._file
-      D().saveTemplate(patch)
+      await D().saveTemplate(patch)
     }
   } catch {}
 

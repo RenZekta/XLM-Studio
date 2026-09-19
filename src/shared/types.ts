@@ -130,6 +130,16 @@ export interface Template {
   // newest first, trimmed on write. See mcpControl.ts's toolBenchmark/
   // toolDisplayBenchmark.
   benchmarkHistory?: BenchmarkRecord[]
+  // At most one Template per (effective) port can be the "Main Template" for
+  // that port -- see effectiveTemplatePort in ipc.ts, which is what "same
+  // port" means here: it accounts for the global Base URL Override and this
+  // Template's own __ignoreBaseUrlOverride flag, not just serverPort.
+  // Enforced server-side in saveTemplateImpl, not just in the renderer.
+  mainForPort?: boolean
+  // Epoch ms when this Template was last marked mainForPort. Used purely to
+  // order the star colors (earliest-starred port gets the first color) --
+  // never touched when the Template is saved for any other reason.
+  mainStarredAt?: number
   _file?: string
 }
 

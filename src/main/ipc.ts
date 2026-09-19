@@ -1,7 +1,8 @@
 import { ipcMain, dialog, shell, BrowserWindow, nativeTheme } from 'electron'
 import {
   existsSync, readdirSync, readFileSync, writeFileSync, mkdirSync,
-  unlinkSync, createWriteStream, statSync, rmdirSync, renameSync, promises as fsPromises
+  unlinkSync, createWriteStream, statSync, rmdirSync, renameSync, promises as fsPromises,
+  copyFileSync as fsCopyFileSync
 } from 'fs'
 import { join, extname, basename, dirname, resolve } from 'path'
 import { spawn, ChildProcess, exec } from 'child_process'
@@ -18,6 +19,7 @@ import type {
 import { MCP_TOOL_IDS } from '../shared/types'
 import { initPerfMonitor, registerPerfHandlers, startTracking, stopTracking, stopAllTracking } from './perfMonitor'
 import { initMcpLayer, registerMcpHandlers } from './mcpServer'
+import { toolTemplateAction } from './mcpControl'
 import { randomBytes } from 'crypto'
 
 const APP_ROOT = app.isPackaged ? join(app.getPath('userData')) : join(process.cwd())
@@ -89,6 +91,48 @@ const DEFAULT_TRACKED: TrackedBackend[] = [
   }
 ]
 
+// Filesystem-safe folder name for a "owner/repo" tracked backend, guaranteed
+// not to collide with anything in `taken`. ggml-org/llama.cpp keeps the bare
+// repo name (matching the built-in official entry's folder) -- every other
+// repo folds the owner in, because most llama.cpp forks keep the exact
+// upstream repo name instead of renaming it. Extracting two different forks
+// (or a fork and upstream) into the same folder means "clean up old
+// versions" after updating ONE of them can silently delete the OTHER's
+// files (their build numbers are unrelated but get compared as if they
+// were the same backend's version history), and its own update check ends
+// up comparing against whatever's left behind in that shared folder.
+function backendFolderNameFor(repo: string, taken: Set<string>): string {
+  const [owner, repoName] = repo.split('/')
+  const isOfficial = (owner || '').toLowerCase() === 'ggml-org' && (repoName || '').toLowerCase() === 'llama.cpp'
+  let base = isOfficial ? repoName : `${repoName}-${owner}`
+  base = base.toLowerCase().replace(/[^a-z0-9.]+/g, '-').replace(/^-+|-+$/g, '') || 'backend'
+  let folderName = base
+  let n = 2
+  while (taken.has(folderName)) { folderName = `${base}-${n}`; n++ }
+  return folderName
+}
+
+// Repairs any pre-existing folder collision among already-saved tracked
+// backends (see backendFolderNameFor above for why one can happen) --
+// pure and order-stable so it's safe to run on every settings load instead
+// of needing a one-time persisted migration. Built-ins always keep their
+// folder name; a custom entry that collides with one (or with another
+// custom entry processed earlier) gets moved to an owner-disambiguated
+// name. An entry that isn't actually colliding with anything is returned
+// unchanged, so this never renames an already-fine custom backend.
+function dedupeTrackedBackendFolders(tracked: TrackedBackend[]): TrackedBackend[] {
+  const seen = new Set<string>()
+  for (const t of tracked) if (t.isDefault) seen.add(t.folderName.toLowerCase())
+  return tracked.map(t => {
+    if (t.isDefault) return t
+    const key = t.folderName.toLowerCase()
+    if (!seen.has(key)) { seen.add(key); return t }
+    const folderName = backendFolderNameFor(t.repo, seen)
+    seen.add(folderName)
+    return { ...t, folderName }
+  })
+}
+
 // --------------------------------------------------------------------------
 // Settings persistence
 // --------------------------------------------------------------------------
@@ -105,6 +149,8 @@ interface AppSettings {
   starredPresetId?: string
   mcp?: McpSettings
   globalBackend?: { backendKey: string; backendVersion: string } | null
+  launchOnStartup?: boolean
+  autostartMainTemplates?: boolean
 }
 
 // Default Base URL Override: enabled by default, port 1234, no LAN, no API key.
@@ -173,7 +219,9 @@ const DEFAULT_SETTINGS: AppSettings = {
     tools: Object.fromEntries(MCP_TOOL_IDS.map(id => [id, true])) as Record<typeof MCP_TOOL_IDS[number], boolean>,
     restrictEditToMcpMade: true,
     maxBenchmarkHistory: 5
-  }
+  },
+  launchOnStartup: false,
+  autostartMainTemplates: false
 }
 
 // Merge a (possibly missing/partial/legacy) mcp settings blob with defaults.
@@ -209,13 +257,14 @@ async function loadSettings(): Promise<AppSettings> {
     for (const def of DEFAULT_TRACKED) {
       if (!tracked.find((t: TrackedBackend) => t.id === def.id)) tracked.push(def)
     }
+    const dedupedTracked = dedupeTrackedBackendFolders(tracked)
     return {
       externalModelFolders: Array.isArray(data.externalModelFolders) ? data.externalModelFolders : [],
       externalBackendFolders: Array.isArray(data.externalBackendFolders) ? data.externalBackendFolders : [],
       mainModelFolder: typeof data.mainModelFolder === 'string' ? data.mainModelFolder : null,
       mainBackendFolder: typeof data.mainBackendFolder === 'string' ? data.mainBackendFolder : null,
       theme: (['system', 'dark', 'light'].includes(data.theme) ? data.theme : 'system') as ThemePref,
-      trackedBackends: tracked,
+      trackedBackends: dedupedTracked,
       modelDefaults: {
         autoFitEnabled: data.modelDefaults?.autoFitEnabled ?? DEFAULT_SETTINGS.modelDefaults!.autoFitEnabled,
         autoFitContextLength: data.modelDefaults?.autoFitContextLength ?? DEFAULT_SETTINGS.modelDefaults!.autoFitContextLength,
@@ -257,7 +306,9 @@ async function loadSettings(): Promise<AppSettings> {
       samplingPresets: Array.isArray(data.samplingPresets) ? data.samplingPresets : [],
       starredPresetId: typeof data.starredPresetId === 'string' ? data.starredPresetId : 'lm-studio',
       globalBackend: (data.globalBackend && typeof data.globalBackend.backendKey === 'string') ? { backendKey: data.globalBackend.backendKey, backendVersion: data.globalBackend.backendVersion } : null,
-      mcp: migrateMcpSettings(data.mcp)
+      mcp: migrateMcpSettings(data.mcp),
+      launchOnStartup: !!data.launchOnStartup,
+      autostartMainTemplates: !!data.autostartMainTemplates
     }
   } catch {
     return { ...DEFAULT_SETTINGS }
@@ -265,6 +316,19 @@ async function loadSettings(): Promise<AppSettings> {
 }
 async function saveSettings(s: AppSettings): Promise<void> {
   await fsPromises.writeFile(SETTINGS_PATH, JSON.stringify(s, null, 2))
+}
+
+// Electron's login-item registration is OS-level (registry key / plist /
+// autostart .desktop file) and persists independently of settings.json, so
+// this is called both whenever the user flips the switch and once at
+// startup to re-assert it -- packaging changes (e.g. the exe moving after
+// an update) can otherwise leave the OS-level entry pointing at a stale path.
+function applyLoginItemSettings(enabled: boolean): void {
+  try {
+    app.setLoginItemSettings({ openAtLogin: enabled })
+  } catch (err) {
+    console.error('[startup] Failed to update login item settings:', err)
+  }
 }
 
 function isSafePath(base: string, target: string): boolean {
@@ -1213,16 +1277,71 @@ function rmrf(dir: string): void {
   rmdirSync(dir)
 }
 
+function copyDirRecursive(src: string, dst: string): void {
+  mkdirSync(dst, { recursive: true })
+  for (const e of readdirSync(src, { withFileTypes: true })) {
+    const s = join(src, e.name)
+    const d = join(dst, e.name)
+    if (e.isDirectory()) copyDirRecursive(s, d)
+    else fsCopyFileSync(s, d)
+  }
+}
+
+// renameSync fails with EXDEV when source and destination are on different
+// filesystems/drives (common for external model folders on another disk),
+// so fall back to a recursive copy + delete in that case.
+function moveDirRecursive(src: string, dst: string): void {
+  try {
+    renameSync(src, dst)
+  } catch (err: any) {
+    if (err && err.code === 'EXDEV') {
+      copyDirRecursive(src, dst)
+      rmrf(src)
+    } else {
+      throw err
+    }
+  }
+}
+
+// Parses a backend version/tag string into a comparable shape. Most tracked
+// forks version themselves as "bNNNNN" (the upstream llama.cpp build number
+// alone), but some forks bump their own release independently of upstream
+// and encode that as a suffix, e.g. TurboQuant's "b10269-1.6.0" (upstream
+// base b10269, fork semver 1.6.0). The base build number is NOT sufficient
+// to order these: two fork releases can share the same upstream base while
+// one is strictly newer, so the fork semver (when present) is compared as
+// a tiebreaker after the base build number.
+function parseBackendVersion(name: string): { build: number; fork: number[] } {
+  const buildMatch = name.match(/(\d{3,6})/)
+  const build = buildMatch ? parseInt(buildMatch[1], 10) : 0
+  const forkMatch = name.match(/-(\d+(?:\.\d+)+)/)
+  const fork = forkMatch ? forkMatch[1].split('.').map(n => parseInt(n, 10)) : []
+  return { build, fork }
+}
+
+// Returns negative if a < b, 0 if equal, positive if a > b.
+function compareBackendVersions(a: string, b: string): number {
+  const pa = parseBackendVersion(a)
+  const pb = parseBackendVersion(b)
+  if (pa.build !== pb.build) return pa.build - pb.build
+  const len = Math.max(pa.fork.length, pb.fork.length)
+  for (let i = 0; i < len; i++) {
+    const diff = (pa.fork[i] || 0) - (pb.fork[i] || 0)
+    if (diff !== 0) return diff
+  }
+  return 0
+}
+
 // Auto-delete outdated backend versions in the same fork folder.
-// After a new version is downloaded & extracted, any OLDER version (by numeric
-// build number) in the same forkDir is removed to save disk space. The newly
-// downloaded version is always kept. Versions without a parseable build number
-// are left untouched (safety). This runs across ALL backend roots that contain
-// the same fork folder name, so an update also cleans up copies in external
+// After a new version is downloaded & extracted, any OLDER version in the
+// same forkDir is removed to save disk space. The newly downloaded version
+// is always kept. Versions without a parseable build number are left
+// untouched (safety). This runs across ALL backend roots that contain the
+// same fork folder name, so an update also cleans up copies in external
 // backend folders.
 async function cleanupOldBackendVersions(backendKey: string, newVersion: string): Promise<{ deleted: string[] }> {
   const deleted: string[] = []
-  const newNum = parseInt((newVersion.match(/(\d{3,6})/) || ['0', '0'])[1], 10)
+  const newNum = parseBackendVersion(newVersion).build
   if (!newNum) return { deleted } // can't compare — skip
   const roots = await backendRoots()
   for (const root of roots) {
@@ -1235,8 +1354,8 @@ async function cleanupOldBackendVersions(backendKey: string, newVersion: string)
       if (e.name === newVersion) continue
       // Skip staging folders.
       if (e.name.startsWith('.staging-')) continue
-      const verNum = parseInt((e.name.match(/(\d{3,6})/) || ['0', '0'])[1], 10)
-      if (verNum && verNum < newNum) {
+      const verNum = parseBackendVersion(e.name).build
+      if (verNum && compareBackendVersions(e.name, newVersion) < 0) {
         const oldDir = join(forkDir, e.name)
         try {
           rmrf(oldDir)
@@ -1424,6 +1543,55 @@ export function registerIpcHandlers(): void {
     if (s.mainModelFolder === folder) s.mainModelFolder = null
     await saveSettings(s)
     return { success: true, folders: sortExternalFolders(s.externalModelFolders, s.mainModelFolder) }
+  })
+
+  // Moves every model-group subfolder of an external model root (i.e. one
+  // that scanModelFolder recognises as containing models, an mmproj file, or
+  // speculative-decoding sidecars) into the main model folder, folder and
+  // all. Loose model files sitting directly at the root (not in their own
+  // subfolder) are left alone, since there's no per-model folder to migrate.
+  ipcMain.handle('migrate-model-folders', async (_e, rootFolder: string) => {
+    try {
+      const s = await loadSettings()
+      if (!s.externalModelFolders.includes(rootFolder)) {
+        return { success: false, error: 'Not a registered external model folder' }
+      }
+      const mainFolder = await resolveMainModelFolder()
+      if (resolve(rootFolder) === resolve(mainFolder)) {
+        return { success: false, error: 'This is already the main model folder' }
+      }
+      let entries: import('fs').Dirent[]
+      try {
+        entries = readdirSync(rootFolder, { withFileTypes: true })
+      } catch (err) {
+        return { success: false, error: String(err) }
+      }
+      const migrated: string[] = []
+      const failed: string[] = []
+      for (const e of entries) {
+        if (!e.isDirectory()) continue
+        const srcDir = join(rootFolder, e.name)
+        const group = await scanModelFolder(srcDir, true)
+        if (!group) continue
+        let destDir = join(mainFolder, e.name)
+        if (existsSync(destDir)) {
+          // Name collision with something already in the main folder — suffix
+          // rather than clobber a folder that happens to share the name.
+          let n = 2
+          while (existsSync(join(mainFolder, `${e.name} (${n})`))) n++
+          destDir = join(mainFolder, `${e.name} (${n})`)
+        }
+        try {
+          moveDirRecursive(srcDir, destDir)
+          migrated.push(e.name)
+        } catch (err) {
+          failed.push(e.name)
+        }
+      }
+      return { success: true, migrated, failed }
+    } catch (err) {
+      return { success: false, error: String(err) }
+    }
   })
 
   // ----- Model file operations (operate on individual files) -----
@@ -1686,9 +1854,11 @@ export function registerIpcHandlers(): void {
     else return { success: false, error: 'Unrecognised GitHub link. Use https://github.com/owner/repo or owner/repo.' }
     const s = await loadSettings()
     if (s.trackedBackends.find(t => t.repo === repo)) return { success: false, error: 'Already tracked' }
-    const folderName = repo.split('/').pop() || repo
-    const id = folderName.toLowerCase().replace(/[^a-z0-9]+/g, '-') + '-' + Date.now().toString(36)
-    const tracked: TrackedBackend = { id, repo, name: folderName, folderName, isDefault: false }
+    const taken = new Set(s.trackedBackends.map(t => t.folderName.toLowerCase()))
+    const folderName = backendFolderNameFor(repo, taken)
+    const displayName = repo.split('/').pop() || repo
+    const id = folderName + '-' + Date.now().toString(36)
+    const tracked: TrackedBackend = { id, repo, name: displayName, folderName, isDefault: false }
     s.trackedBackends.push(tracked)
     await saveSettings(s)
     return { success: true, tracked }
@@ -1765,6 +1935,17 @@ export function registerIpcHandlers(): void {
   })
 
   // ----- Templates -----
+  // The port a Template actually serves on: the global Base URL Override's
+  // port when the override is enabled and this Template hasn't opted out via
+  // __ignoreBaseUrlOverride, else the Template's own serverPort. Mirrors the
+  // resolution in runModelImpl/ModelCard.tsx exactly -- "same port" for the
+  // one-Main-Template-per-port invariant below means the same thing it means
+  // when the server actually launches.
+  function effectiveTemplatePort(template: Record<string, any>, baseUrlOverride: BaseUrlOverride | undefined): number {
+    const ignore = template?.args?.['__ignoreBaseUrlOverride'] === true
+    if (!ignore && baseUrlOverride?.enabled) return baseUrlOverride.port || 1234
+    return Number(template?.serverPort) || 8080
+  }
   function listTemplatesImpl(): Record<string, any>[] {
     if (!existsSync(TEMPLATES_DIR)) return []
     return readdirSync(TEMPLATES_DIR)
@@ -1790,13 +1971,66 @@ export function registerIpcHandlers(): void {
       .filter(Boolean) as Record<string, any>[]
   }
   ipcMain.handle('list-templates', () => listTemplatesImpl())
-  function saveTemplateImpl(template: Record<string, unknown>): { success: true; id: string } {
+  async function saveTemplateImpl(template: Record<string, unknown>): Promise<{ success: true; id: string }> {
     const id = (template.id as string) || Date.now().toString()
-    writeFileSync(join(TEMPLATES_DIR, `${id}.json`), JSON.stringify({ ...template, id }, null, 2))
+    const fp = join(TEMPLATES_DIR, `${id}.json`)
+    const settings = await loadSettings()
+    let oldRaw: Record<string, any> | null = null
+    if (existsSync(fp)) {
+      try { oldRaw = JSON.parse(readFileSync(fp, 'utf-8')) } catch { oldRaw = null }
+    }
+    const finalTemplate: Record<string, any> = { ...template, id }
+    const wasMain = oldRaw?.mainForPort === true
+    const isMain = finalTemplate.mainForPort === true
+    // Enforce "at most one Main Template per port". Which template gives up
+    // its star depends on WHY the conflict is happening:
+    //   - A fresh star (wasMain false -> true) is an explicit user action and
+    //     always wins, dethroning whichever other template currently holds
+    //     that port.
+    //   - A Template that was ALREADY main and only had its (effective) port
+    //     change underneath it is not an explicit star action -- if that
+    //     move lands it on a port someone else already holds, it loses its
+    //     own star instead, leaving the existing holder untouched.
+    if (isMain) {
+      const newPort = effectiveTemplatePort(finalTemplate, settings.baseUrlOverride)
+      const oldPort = oldRaw ? effectiveTemplatePort(oldRaw, settings.baseUrlOverride) : null
+      const portChanged = wasMain && oldPort !== newPort
+      if (!wasMain) {
+        finalTemplate.mainStarredAt = Date.now()
+      }
+      if (!wasMain || portChanged) {
+        let others: string[] = []
+        try { others = readdirSync(TEMPLATES_DIR).filter(f => f.endsWith('.json') && f !== `${id}.json`) } catch {}
+        let dethroned = false
+        for (const f of others) {
+          const otherPath = join(TEMPLATES_DIR, f)
+          let other: Record<string, any>
+          try { other = JSON.parse(readFileSync(otherPath, 'utf-8')) } catch { continue }
+          if (other.mainForPort !== true) continue
+          if (effectiveTemplatePort(other, settings.baseUrlOverride) !== newPort) continue
+          if (!wasMain) {
+            // Fresh star wins: dethrone the incumbent.
+            other.mainForPort = false
+            delete other.mainStarredAt
+            try { writeFileSync(otherPath, JSON.stringify(other, null, 2)) } catch {}
+          } else {
+            // Port drifted into an occupied slot: this template loses its
+            // own star instead, preserving the incumbent.
+            finalTemplate.mainForPort = false
+            delete finalTemplate.mainStarredAt
+            dethroned = true
+          }
+          break
+        }
+        if (dethroned) { /* handled above */ }
+      }
+    }
+    writeFileSync(fp, JSON.stringify(finalTemplate, null, 2))
     // Broadcast so any window whose Template list didn't originate this
     // write (in particular: MCP/skill-triggered template-create/-duplicate/
     // -edit, which write straight to disk with no renderer round-trip)
-    // picks up the change without needing an app restart.
+    // picks up the change without needing an app restart. Also the only way
+    // OTHER cards learn they were just dethroned above.
     BrowserWindow.getAllWindows().forEach(win => {
       if (!win.isDestroyed()) win.webContents.send('templates-changed')
     })
@@ -1835,6 +2069,11 @@ export function registerIpcHandlers(): void {
     if (r.canceled || !r.filePaths.length) return null
     const data = JSON.parse(readFileSync(r.filePaths[0], 'utf-8'))
     const id = Date.now().toString(); data.id = id
+    // An imported file may carry a stale mainForPort from wherever it was
+    // exported -- importing it should never silently dethrone an unrelated
+    // Template already main for that port on this machine.
+    delete data.mainForPort
+    delete data.mainStarredAt
     // Apply the same '--mmap'/'--mlock' → '--load-mode' migration as
     // list-templates, so an imported template (possibly exported from an
     // older version of the app) is normalized immediately rather than
@@ -2287,6 +2526,82 @@ export function registerIpcHandlers(): void {
 
   // ----- Backends: tracker (global check for updates across all tracked repos) -----
   let cancelBackendDl: (() => void) | null = null
+  // Only one backend download actually runs at a time (cancelBackendDl is a
+  // single handle) -- a second request while one is running is queued
+  // rather than rejected, and runs automatically once its turn comes.
+  let activeDownloadTrackedId: string | null = null
+  interface QueuedDownload {
+    opts: { url: string; version: string; assetName: string; backendKey: string; trackedId?: string }
+    sender: Electron.WebContents
+    resolve: (result: { success: boolean; path?: string; error?: string; deletedOld?: string[] }) => void
+  }
+  const downloadQueue: QueuedDownload[] = []
+
+  function sendDownloadProgress(sender: Electron.WebContents, data: { percent: number; phase: string; trackedId: string | null; queuePosition?: number }) {
+    if (!sender.isDestroyed()) sender.send('download-progress', data)
+  }
+  // Tells every still-queued item its current position (1-based, ahead of
+  // the one actively downloading) so the UI can show "Queued (#N)" instead
+  // of leaving it looking stuck.
+  function broadcastQueuePositions(): void {
+    downloadQueue.forEach((q, i) => {
+      sendDownloadProgress(q.sender, { percent: 0, phase: 'queued', trackedId: q.opts.trackedId || null, queuePosition: i + 1 })
+    })
+  }
+
+  async function runQueuedDownload(q: QueuedDownload): Promise<void> {
+    const { opts, sender } = q
+    const archivePath = join(app.getPath('temp'), opts.assetName)
+    const isTarGz = opts.assetName.toLowerCase().endsWith('.tar.gz')
+    activeDownloadTrackedId = opts.trackedId || null
+    try {
+      sendDownloadProgress(sender, { percent: 0, phase: 'downloading', trackedId: activeDownloadTrackedId })
+      await new Promise<void>((resolve, reject) => {
+        cancelBackendDl = startDownload(opts.url, archivePath, 0,
+          (r, t) => sendDownloadProgress(sender, { percent: t > 0 ? Math.round(r / t * 100) : 0, phase: 'downloading', trackedId: activeDownloadTrackedId }),
+          resolve, reject)
+      })
+      cancelBackendDl = null
+      sendDownloadProgress(sender, { percent: 100, phase: 'extracting', trackedId: activeDownloadTrackedId })
+      const versionHint = opts.version || opts.assetName.replace(/\.(zip|tar\.gz)$/i, '')
+      const { versionDir } = await smartExtractBackend({
+        archivePath,
+        backendKey: opts.backendKey,
+        versionHint,
+        isTarGz
+      })
+      // Auto-delete outdated backend versions in the same fork folder.
+      // Runs immediately after extraction so old versions are cleaned up
+      // before the frontend re-reads the installed backends list.
+      const cleanup = await cleanupOldBackendVersions(opts.backendKey, versionHint)
+      if (cleanup.deleted.length > 0) {
+        // Broadcast so any open windows refresh their backend list.
+        BrowserWindow.getAllWindows().forEach(win => {
+          if (!win.isDestroyed()) win.webContents.send('backends-changed', { deleted: cleanup.deleted })
+        })
+      }
+      try { unlinkSync(archivePath) } catch (e) { console.error('Failed to cleanup temp file', e) }
+      q.resolve({ success: true, path: versionDir, deletedOld: cleanup.deleted })
+    } catch (err) {
+      try { unlinkSync(archivePath) } catch (e) { console.error('Failed to cleanup temp file', e) }
+      q.resolve({ success: false, error: String(err) })
+    } finally {
+      cancelBackendDl = null
+      activeDownloadTrackedId = null
+    }
+  }
+
+  // Drains the queue one item at a time. Safe to call whenever the queue
+  // might have grown or the active slot might have just freed up --
+  // re-entrant calls while a download is already running are a no-op.
+  async function processDownloadQueue(): Promise<void> {
+    if (cancelBackendDl !== null || activeDownloadTrackedId !== null) return
+    const next = downloadQueue.shift()
+    if (!next) return
+    broadcastQueuePositions()
+    await runQueuedDownload(next)
+    processDownloadQueue()
+  }
 
   async function fetchTrackedRelease(tracked: TrackedBackend): Promise<TrackedBackendRelease> {
     const base: TrackedBackendRelease = {
@@ -2355,23 +2670,20 @@ export function registerIpcHandlers(): void {
         release = releases[0]
         platformAssets = platformAssetsFor(release)
       }
-      const latestNum = parseInt((release.tag_name || '').replace(/^b/, ''), 10)
       let isNewer = true
       // Determine if a version of this tracked backend is already
-      // installed. The version folder name now matches the release tag exactly,
-      // so we check for an exact match OR a numeric build-number match.
+      // installed. The version folder name matches the release tag exactly on
+      // a fresh download, so an exact match is the common case, but forks
+      // that keep the same upstream base build across their own version
+      // bumps (e.g. TurboQuant's "b10269-1.5.1" -> "b10269-1.6.0") need the
+      // full build+fork-semver comparison to tell those apart.
       const roots = await backendRoots()
       for (const root of roots) {
         const forkDir = join(root.dir, tracked.folderName)
         if (!existsSync(forkDir)) continue
         for (const v of readdirSync(forkDir, { withFileTypes: true }).filter(d => d.isDirectory())) {
-          // Exact tag match (e.g. "b10448" or "TurboQuant b10269-1.5.1").
           if (v.name === release.tag_name) { isNewer = false; break }
-          // Substring match for fork-specific naming (e.g. "TurboQuant b10269-1.5.1" contains "b10269").
-          if (release.tag_name && v.name.includes(release.tag_name)) { isNewer = false; break }
-          // Numeric build-number match (extract first 3-6 digit group).
-          const m = v.name.match(/(\d{3,6})/)
-          if (m && latestNum && parseInt(m[1], 10) >= latestNum) { isNewer = false; break }
+          if (release.tag_name && compareBackendVersions(v.name, release.tag_name) >= 0) { isNewer = false; break }
         }
         if (!isNewer) break
       }
@@ -2407,51 +2719,47 @@ export function registerIpcHandlers(): void {
   })
 
   // Download a specific tracked backend release into <mainBackendFolder>/<folderName>/<version>/.
-  ipcMain.handle('download-release', async (event, opts: {
+  // Queues behind any download already in progress instead of rejecting --
+  // the promise only resolves once this one has actually run.
+  ipcMain.handle('download-release', (event, opts: {
     url: string
     version: string
     assetName: string
     backendKey: string
+    trackedId?: string
   }) => {
-    const archivePath = join(app.getPath('temp'), opts.assetName)
-    const isTarGz = opts.assetName.toLowerCase().endsWith('.tar.gz')
-    try {
-      event.sender.send('download-progress', { percent: 0, phase: 'downloading' })
-      await new Promise<void>((resolve, reject) => {
-        cancelBackendDl = startDownload(opts.url, archivePath, 0,
-          (r, t) => event.sender.send('download-progress', { percent: t > 0 ? Math.round(r / t * 100) : 0, phase: 'downloading' }),
-          resolve, reject)
-      })
-      cancelBackendDl = null
-      event.sender.send('download-progress', { percent: 100, phase: 'extracting' })
-      const versionHint = opts.version || opts.assetName.replace(/\.(zip|tar\.gz)$/i, '')
-      const { versionDir } = await smartExtractBackend({
-        archivePath,
-        backendKey: opts.backendKey,
-        versionHint,
-        isTarGz
-      })
-      // Auto-delete outdated backend versions in the same fork folder.
-      // Runs immediately after extraction so old versions are cleaned up
-      // before the frontend re-reads the installed backends list.
-      const cleanup = await cleanupOldBackendVersions(opts.backendKey, versionHint)
-      if (cleanup.deleted.length > 0) {
-        // Broadcast so any open windows refresh their backend list.
-        BrowserWindow.getAllWindows().forEach(win => {
-          if (!win.isDestroyed()) win.webContents.send('backends-changed', { deleted: cleanup.deleted })
-        })
-      }
-      try { unlinkSync(archivePath) } catch (e) { console.error('Failed to cleanup temp file', e) }
-      return { success: true, path: versionDir, deletedOld: cleanup.deleted }
-    } catch (err) {
-      cancelBackendDl = null
-      try { unlinkSync(archivePath) } catch (e) { console.error('Failed to cleanup temp file', e) }
-      return { success: false, error: String(err) }
-    }
+    return new Promise<{ success: boolean; path?: string; error?: string; deletedOld?: string[] }>(resolve => {
+      downloadQueue.push({ opts, sender: event.sender, resolve })
+      broadcastQueuePositions()
+      processDownloadQueue()
+    })
   })
-  ipcMain.handle('cancel-backend-download', () => {
+  // Cancels the currently-running download, or -- when trackedId matches a
+  // still-queued (not yet started) item -- just removes it from the queue
+  // without touching whatever is actively downloading.
+  ipcMain.handle('cancel-backend-download', (_e, trackedId?: string) => {
+    if (trackedId) {
+      const idx = downloadQueue.findIndex(q => q.opts.trackedId === trackedId)
+      if (idx !== -1) {
+        const [removed] = downloadQueue.splice(idx, 1)
+        removed.resolve({ success: false, error: 'Cancelled' })
+        broadcastQueuePositions()
+        return { success: true }
+      }
+    }
     if (cancelBackendDl) { cancelBackendDl(); cancelBackendDl = null }
+    activeDownloadTrackedId = null
     return { success: true }
+  })
+
+  // Re-checks a single tracked backend (used right after a download
+  // completes, so that row's "New version available" badge clears without
+  // re-checking every OTHER tracked backend too via check-all-backends).
+  ipcMain.handle('check-tracked-backend', async (_e, trackedId: string) => {
+    const s = await loadSettings()
+    const t = s.trackedBackends.find(x => x.id === trackedId)
+    if (!t) return { error: 'Not tracked' }
+    return fetchTrackedRelease(t)
   })
 
   ipcMain.handle('open-folder', (_e, folderPath: string) => shell.openPath(folderPath))
@@ -3410,6 +3718,25 @@ export function registerIpcHandlers(): void {
     return { success: true }
   })
 
+  // ----- Launch settings (OS-level startup + Main Template autostart) -----
+  ipcMain.handle('get-launch-settings', async () => {
+    const s = await loadSettings()
+    return { launchOnStartup: !!s.launchOnStartup, autostartMainTemplates: !!s.autostartMainTemplates }
+  })
+  ipcMain.handle('set-launch-on-startup', async (_e, enabled: boolean) => {
+    const s = await loadSettings()
+    s.launchOnStartup = !!enabled
+    await saveSettings(s)
+    applyLoginItemSettings(s.launchOnStartup)
+    return { success: true }
+  })
+  ipcMain.handle('set-autostart-main-templates', async (_e, enabled: boolean) => {
+    const s = await loadSettings()
+    s.autostartMainTemplates = !!enabled
+    await saveSettings(s)
+    return { success: true }
+  })
+
   // ----- Base URL Override -----
   ipcMain.handle('get-base-url-override', async () => {
     const s = await loadSettings()
@@ -3522,6 +3849,11 @@ export function registerIpcHandlers(): void {
   // Apply the persisted theme on startup.
   loadSettings().then(s => applyNativeTheme(s.theme))
 
+  // Re-assert the OS-level login item on every launch (see
+  // applyLoginItemSettings) and, once the MCP control layer is ready,
+  // silently start every Main Template if the user opted in.
+  loadSettings().then(s => applyLoginItemSettings(!!s.launchOnStartup))
+
   // ----- Silent automated multi-backend check on startup -----
   // Runs check-all-backends in the background without spawning UI; results are
   // broadcast to all windows so the UpdateBanner / tracker cards can react.
@@ -3575,6 +3907,21 @@ export function registerIpcHandlers(): void {
       } catch { return { firstTps: null, avgTps: null } }
     }
   }).catch(err => console.error('[mcp] Failed to initialize MCP layer:', err))
+    .then(async () => {
+      // Best-effort: start every Main Template (mainForPort) once the
+      // control layer (runModel + friends) is wired up, if the user opted
+      // in. One failing template must not block the others.
+      const s = await loadSettings()
+      if (!s.autostartMainTemplates) return
+      const mains = listTemplatesImpl().filter(t => t.mainForPort === true)
+      for (const t of mains) {
+        try {
+          await toolTemplateAction({ template: t.name, action: 'start' })
+        } catch (err) {
+          console.error(`[startup] Failed to autostart Main Template "${t.name}":`, err)
+        }
+      }
+    })
 }
 
 // --------------------------------------------------------------------------

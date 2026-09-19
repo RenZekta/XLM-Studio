@@ -27,6 +27,7 @@ const api = {
   removeExternalModelFolder: (folder: string) => ipcRenderer.invoke('remove-external-model-folder', folder),
   getMainModelFolder: () => ipcRenderer.invoke('get-main-model-folder') as Promise<{ folder: string; isDefault: boolean }>,
   setMainModelFolder: (folder: string) => ipcRenderer.invoke('set-main-model-folder', folder),
+  migrateModelFolders: (rootFolder: string) => ipcRenderer.invoke('migrate-model-folders', rootFolder),
 
   // ----- Backends -----
   listBackends: () => ipcRenderer.invoke('list-backends') as Promise<BackendVersion[]>,
@@ -46,11 +47,12 @@ const api = {
   addTrackedBackend: (link: string) => ipcRenderer.invoke('add-tracked-backend', link) as Promise<{ success: boolean; error?: string; tracked?: TrackedBackend }>,
   removeTrackedBackend: (trackedId: string) => ipcRenderer.invoke('remove-tracked-backend', trackedId),
   checkAllBackends: () => ipcRenderer.invoke('check-all-backends') as Promise<{ results: TrackedBackendRelease[] }>,
+  checkTrackedBackend: (trackedId: string) => ipcRenderer.invoke('check-tracked-backend', trackedId) as Promise<TrackedBackendRelease | { error: string }>,
   // Legacy single check (for UpdateBanner / Titlebar) — returns llama.cpp release.
   checkUpdates: () => ipcRenderer.invoke('check-updates') as Promise<ReleaseInfo>,
   downloadRelease: (opts: object) => ipcRenderer.invoke('download-release', opts),
-  cancelBackendDownload: () => ipcRenderer.invoke('cancel-backend-download'),
-  onDownloadProgress: (callback: (data: { percent: number; phase: string }) => void) => {
+  cancelBackendDownload: (trackedId?: string) => ipcRenderer.invoke('cancel-backend-download', trackedId),
+  onDownloadProgress: (callback: (data: { percent: number; phase: string; trackedId?: string | null; queuePosition?: number }) => void) => {
     ipcRenderer.removeAllListeners('download-progress')
     ipcRenderer.on('download-progress', (_event, data) => callback(data))
   },
@@ -183,6 +185,9 @@ const api = {
   // ----- Base URL Override -----
   getBaseUrlOverride: () => ipcRenderer.invoke('get-base-url-override') as Promise<any>,
   setBaseUrlOverride: (opts: any) => ipcRenderer.invoke('set-base-url-override', opts) as Promise<{ success: boolean }>,
+  getLaunchSettings: () => ipcRenderer.invoke('get-launch-settings') as Promise<{ launchOnStartup: boolean; autostartMainTemplates: boolean }>,
+  setLaunchOnStartup: (enabled: boolean) => ipcRenderer.invoke('set-launch-on-startup', enabled) as Promise<{ success: boolean }>,
+  setAutostartMainTemplates: (enabled: boolean) => ipcRenderer.invoke('set-autostart-main-templates', enabled) as Promise<{ success: boolean }>,
   getGlobalBackend: () => ipcRenderer.invoke('get-global-backend') as Promise<{ backendKey: string; backendVersion: string } | null>,
   setGlobalBackend: (backend: { backendKey: string; backendVersion: string } | null) => ipcRenderer.invoke('set-global-backend', backend) as Promise<{ success: boolean }>,
   getMcpSettings: () => ipcRenderer.invoke('get-mcp-settings') as Promise<any>,

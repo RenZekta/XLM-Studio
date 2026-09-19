@@ -1,5 +1,5 @@
 import React from 'react'
-import { Trash, FolderPlus } from 'lucide-react'
+import { Trash, FolderPlus, FolderInput } from 'lucide-react'
 import { StarIcon } from '../utils/format'
 
 interface Props {
@@ -11,13 +11,18 @@ interface Props {
   addLabel: string
   emptyText: string
   onAfterChange?: () => void
+  // When provided, shows a "migrate" button (before the trash icon) on every
+  // non-main row that moves that folder's model-group subfolders into the
+  // main folder. Omitted entirely for the backend folder list, which has no
+  // equivalent operation.
+  onMigrate?: (folder: string) => Promise<any>
 }
 
 // A reusable list of external folders with star (main) selector, alphabetical
 // sorting (main pinned to top), and deletion. Used for both model and backend
 // external folder sections.
 export default function ExternalFolderList({
-  folders, mainFolder, onAdd, onRemove, onSetMain, addLabel, emptyText, onAfterChange
+  folders, mainFolder, onAdd, onRemove, onSetMain, addLabel, emptyText, onAfterChange, onMigrate
 }: Props) {
   async function handleAdd() {
     await onAdd()
@@ -33,6 +38,17 @@ export default function ExternalFolderList({
     const target = mainFolder === folder ? '' : folder
     await onSetMain(target)
     onAfterChange?.()
+  }
+  async function handleMigrate(folder: string) {
+    if (!onMigrate) return
+    const res = await onMigrate(folder)
+    onAfterChange?.()
+    if (res && res.success === false) {
+      alert(`Migration failed: ${res.error || 'Unknown error'}`)
+    } else if (res && Array.isArray(res.migrated)) {
+      if (res.migrated.length === 0) alert('No model folders found to migrate.')
+      else alert(`Migrated ${res.migrated.length} folder${res.migrated.length === 1 ? '' : 's'} to the main model folder.`)
+    }
   }
 
   return (
@@ -62,6 +78,15 @@ export default function ExternalFolderList({
                     MAIN
                   </span>
                 )}
+                {onMigrate && !isMain && (
+                  <button
+                    className="btn btn-ghost btn-icon"
+                    onClick={() => handleMigrate(f)}
+                    title="Migrate model folders (with models, mmproj or speculative-decoding heads) into the main folder"
+                  >
+                    <FolderInput size={14} />
+                  </button>
+                )}
                 <button
                   className="btn btn-ghost btn-icon text-danger"
                   onClick={() => handleRemove(f)}
@@ -80,3 +105,4 @@ export default function ExternalFolderList({
     </>
   )
 }
+

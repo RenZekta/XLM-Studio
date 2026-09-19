@@ -62,6 +62,17 @@ interface Props {
   modelPathFallback?: string
   serverPortFallback?: number
   disabled?: boolean
+  // The Template's own pinned backend selection (its Backend Version
+  // dropdown), when known before it's saved to a Template on disk --
+  // CreateModal tracks this as local state while creating/editing, so it
+  // passes it through explicitly. When omitted, this falls back to the
+  // matching card's own template.backendKey/backendVersion (ModelCard's
+  // usage, where the Template is already saved). Either way, an unset value
+  // ("Default (active)") means "follow the global active backend", exactly
+  // like actually launching this Template does -- see targetBackend's
+  // resolution in ModelCard.tsx's handleRunToggle, mirrored below.
+  backendKey?: string | null
+  backendVersionName?: string | null
   // CreateModal wants the Settings/Parameters
   // toggles + CPU/model/Free-VRAM info banners to always be visible above the
   // collapsible "Advanced Parameters" section, not hidden inside it. Rather
@@ -141,11 +152,11 @@ function NgramModifierBlock({ title, flagPrefix, enabled, onToggle, disabled, fi
   )
 }
 
-export default function CmdParamsEditor({ templateId, args, onChange, modelPathFallback, serverPortFallback, disabled: disabledProp, headerPortalTarget }: Props) {
+export default function CmdParamsEditor({ templateId, args, onChange, modelPathFallback, serverPortFallback, disabled: disabledProp, backendKey: backendKeyProp, backendVersionName: backendVersionProp, headerPortalTarget }: Props) {
   const {
     commandsSchema, updateCard, cards, models, cpuInfo,
     detectedSpeculation, setDetectedSpeculation, markSpeculationApplied,
-    ggufMetadata, setGgufMetadata, activeBackend,
+    ggufMetadata, setGgufMetadata, activeBackend, backends,
     paramViewMode, setParamViewMode,
     setPresetMode, modelDefaults, samplingPresets, baseUrlOverride
   } = useStore()
@@ -158,6 +169,26 @@ export default function CmdParamsEditor({ templateId, args, onChange, modelPathF
   const card = templateId ? cards.find(c => c.template.id === templateId) : null
   const isRunning = card?.status === 'running'
   const disabled = disabledProp || isRunning
+
+  // The backend THIS Template will actually run on: its own pinned
+  // selection (Backend Version dropdown, whether passed live from
+  // CreateModal's local state or already committed to a saved card's
+  // template) if set, else the sidebar's global active backend --
+  // mirroring targetBackend's resolution in ModelCard.tsx's
+  // handleRunToggle exactly, so backend-dependent defaults (KV cache
+  // quant types below) match what will actually launch instead of always
+  // tracking the global backend regardless of a per-Template override.
+  const effectiveBackendKey = backendKeyProp !== undefined ? backendKeyProp : card?.template.backendKey
+  const effectiveBackendVersionName = backendVersionProp !== undefined ? backendVersionProp : card?.template.backendVersion
+  const effectiveBackend = useMemo(() => {
+    let b = effectiveBackendKey
+      ? backends.find(x => x.backendKey === effectiveBackendKey && x.name === effectiveBackendVersionName)
+      : undefined
+    if (!b && effectiveBackendVersionName) {
+      b = backends.find(x => x.name === effectiveBackendVersionName || x.version === effectiveBackendVersionName || x.id === effectiveBackendVersionName)
+    }
+    return b || activeBackend
+  }, [effectiveBackendKey, effectiveBackendVersionName, backends, activeBackend])
 
   // Keep a ref mirroring the latest `args` prop. Async
   // callbacks (e.g. the speculation/MTP file-scan below) close over `args` as
@@ -319,8 +350,8 @@ export default function CmdParamsEditor({ templateId, args, onChange, modelPathF
   // to turbo4 while V defaults to turbo3 — the lighter V-only quant is what
   // actually buys back the VRAM/context headroom TurboQuant is for, without
   // silently triggering llama.cpp's K fallback the way an all-turbo3 pair did.
-  const defaultKvQuantK = defaultKvQuantFor(activeBackend?.backendKey)
-  const defaultKvQuantV = defaultKvQuantVFor(activeBackend?.backendKey)
+  const defaultKvQuantK = defaultKvQuantFor(effectiveBackend?.backendKey)
+  const defaultKvQuantV = defaultKvQuantVFor(effectiveBackend?.backendKey)
   const kvQuantK = (typeof args['--cache-type-k'] === 'string' && args['--cache-type-k']) ? String(args['--cache-type-k']) : defaultKvQuantK
   const kvQuantV = (typeof args['--cache-type-v'] === 'string' && args['--cache-type-v']) ? String(args['--cache-type-v']) : defaultKvQuantV
   // Per-preset context-fill toggle + memory overhead.
@@ -899,12 +930,12 @@ export default function CmdParamsEditor({ templateId, args, onChange, modelPathF
   // implicitly set. Anything that diverges from the previous backend's
   // default is treated as a deliberate override and survives the switch
   // unchanged (as long as it's still a valid option).
-  const prevKvBackendKeyRef = useRef<string | null | undefined>(activeBackend?.backendKey)
+  const prevKvBackendKeyRef = useRef<string | null | undefined>(effectiveBackend?.backendKey)
   useEffect(() => {
     if (disabled || !commandsSchema) return
     const curArgs = argsRef.current
     const prevBackendKey = prevKvBackendKeyRef.current
-    prevKvBackendKeyRef.current = activeBackend?.backendKey
+    prevKvBackendKeyRef.current = effectiveBackend?.backendKey
     const prevDefaultK = defaultKvQuantFor(prevBackendKey)
     const prevDefaultV = defaultKvQuantVFor(prevBackendKey)
     const findOptions = (arg: string): string[] | undefined => {
@@ -936,7 +967,7 @@ export default function CmdParamsEditor({ templateId, args, onChange, modelPathF
     }
     if (changed) commit(newArgs, { silent: true })
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [disabled, defaultKvQuantK, defaultKvQuantV, commandsSchema, activeBackend?.backendKey])
+  }, [disabled, defaultKvQuantK, defaultKvQuantV, commandsSchema, effectiveBackend?.backendKey])
 
   const reasoningPreserveOn = args['--reasoning-preserve'] !== false
   function setReasoningPreserveOn(on: boolean) {

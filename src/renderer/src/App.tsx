@@ -342,7 +342,8 @@ export default function App() {
 
   useEffect(() => {
     window.api.onDownloadProgress((data) => {
-      useStore.getState().setDownloadProgress(data)
+      const key = data.trackedId || 'llama-cpp'
+      useStore.getState().setDownloadProgress(key, { percent: data.percent, phase: data.phase, queuePosition: data.queuePosition })
     })
     return () => window.api.removeDownloadListener()
   }, [])

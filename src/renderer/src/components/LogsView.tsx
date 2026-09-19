@@ -29,6 +29,11 @@ export default function LogsView() {
   const [filter, setFilter] = useState('')
   const [selectedModel, setSelectedModel] = useState<string>('all')
   const scrollRef = useRef<HTMLDivElement>(null)
+  // Tracks whether the user was scrolled to the bottom before the log list
+  // last changed, so new lines only pull the view along when it was already
+  // following the tail — otherwise a user scrolled up to read history would
+  // get yanked back down on every incoming line.
+  const stickToBottomRef = useRef(true)
 
   const logs = paused ? (pausedSnapshot || storeLogs) : storeLogs
 
@@ -38,9 +43,17 @@ export default function LogsView() {
     setPaused(!paused)
   }
 
-  // Auto-scroll to bottom when new logs arrive (not while paused).
+  function handleScroll() {
+    const el = scrollRef.current
+    if (!el) return
+    const distanceFromBottom = el.scrollHeight - el.scrollTop - el.clientHeight
+    stickToBottomRef.current = distanceFromBottom < 4
+  }
+
+  // Auto-scroll to bottom when new logs arrive, but only if the user was
+  // already at the bottom (not while paused, and not while scrolled up).
   useEffect(() => {
-    if (!paused && scrollRef.current) {
+    if (!paused && scrollRef.current && stickToBottomRef.current) {
       scrollRef.current.scrollTop = scrollRef.current.scrollHeight
     }
   }, [logs, paused])
@@ -127,6 +140,7 @@ export default function LogsView() {
       {/* Log window */}
       <div
         ref={scrollRef}
+        onScroll={handleScroll}
         style={{
           flex: 1,
           background: 'var(--surface)',
