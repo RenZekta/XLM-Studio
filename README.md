@@ -224,7 +224,7 @@ cd (X:\your\chosen\destination)\XLM-Studio && npm install && npm run build && np
 - [ ] **Built-in Chat Interface**: Native chat client to interact with models directly within XLM Studio without launching external browser tabs — would also let Monitoring see real per-request data instead of polling `/metrics`. Optional goal, it works just fine with a separate chat window too.
 - [ ] **Multi-Language Support**: Complete internationalization (i18n) to support languages beyond English.
 - [X] MCP control over XLM Studio
-- [ ] Persistent KV Cache for quick conversation resume after switching or restarting templates (tested, broken for hybrid attention architectures until https://github.com/ggml-org/llama.cpp/issues/25913 is fixed, + will depend on the individual fork after that)
+- [ ] Persistent KV Cache for quick conversation resume after switching or restarting templates (tested, broken for hybrid attention architectures until https://github.com/ggml-org/llama.cpp/issues/25913 is fixed or https://github.com/ggml-org/llama.cpp/pull/26004 is merged, + will depend on the individual fork after that)
 
 ### Phase 4: Multi-Backend & Advanced Engines (Long-Term)
 - [ ] Optional **Alternative Backend Integration**: Expand support beyond `llama.cpp` to include:
