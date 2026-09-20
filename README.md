@@ -11,10 +11,19 @@
 
 XLM Studio is a fast, native desktop interface for discovering, downloading, configuring, and serving local Large Language Models with llama.cpp-compatible backends. It strips away the friction of command-line execution and manual VRAM math, giving you a single workspace that goes from "found a GGUF on Hugging Face" to "running server with sane defaults" in a couple of clicks.
 
-XLM Studio is a fork of [Hexllama](https://github.com/andersondanieln/hexllama), heavily extended with many features, including a memory-aware configuration engine: it reads a model's actual GGUF metadata (architecture, layer count, KV-cache geometry, MoE expert layout, quantization, speculative-decoding tensors, native chat template) and uses it to compute real VRAM/RAM budgets and recommend settings, instead of asking you to guess.
+XLM Studio is a fork of [Hexllama](https://github.com/andersondanieln/hexllama), heavily extended with many features, including a memory-aware configuration engine: it reads a model's actual GGUF metadata (architecture, layer count, KV-cache geometry, MoE expert layout, quantization, speculative-decoding tensors, native chat template) and uses it to compute real VRAM/RAM budgets and recommend settings, instead of making you guess loading parameters.
 
 
 ## Features
+
+
+**Template-Based Execution**
+
+Save your configurations as reusable templates. Run multiple models simultaneously on different ports without conflict. Launch them in "Chat UI" mode to automatically open the built-in llama.cpp web interface, or "API Only" mode to serve them silently in the background.
+
+<img width="1319" height="766" alt="image" src="https://github.com/user-attachments/assets/12dee642-d70f-4ab3-ab7f-0e054871ac44" />
+
+
 
 **Integrated Model Hub**
 
@@ -26,12 +35,12 @@ Search Hugging Face directly within the application. Browse repositories, view f
 
 **Smart Download Manager**
 
-Pause, resume, or cancel large model downloads reliably. You can also paste direct GGUF links. When a download completes, XLM Studio automatically generates an execution template with recommended settings tailored to the model's architecture and your hardware. If you prefer to interact with HF CLI, I have a project to greatly improve the HF CLI experience and control over it: https://github.com/RenZekta/HF-CFD
+Pause, resume, or cancel large model downloads reliably. You can also paste direct GGUF links. When a download completes, XLM Studio automatically generates an execution template with recommended settings tailored to the model's architecture and your hardware. If you prefer to interact with CLI, I have a project to greatly improve the HF CLI experience and control over it: https://github.com/RenZekta/HF-CFD
 
 
 **Automatic Metadata Extraction**
 
-Every detected model gets its GGUF metadata (architecture, layer/expert counts, context length, quantization, KV-cache geometry, chat template, speculative-decoding tensors) extracted and cached the moment it's discovered — scanned in parallel at launch, with a single consolidated "Extracting model metadata" notification (hover it to see which models are still being processed) instead of one popup per model. A "Reextract model data" button in the Models tab lets you force a clean re-scan of everything, e.g. after replacing a file in place or updating the app.
+Every detected model gets its GGUF metadata (architecture, layer/expert counts, context length, quantization, KV-cache geometry, chat template, speculative-decoding tensors) extracted and cached the moment it's discovered — scanned in parallel at launch, with a single consolidated "Extracting model metadata" notification (hover it to see which models are still being processed).
 
 <img width="472" height="203" alt="image" src="https://github.com/user-attachments/assets/e4be6d3f-de6f-484f-8f5a-cf1555895c9c" />
 
@@ -40,16 +49,18 @@ Every detected model gets its GGUF metadata (architecture, layer/expert counts, 
 **Memory-Aware VRAM/RAM Budget Calculator**
 
 Every template shows a live Free VRAM breakdown (model weight, KV cache, compute buffer, runtime overhead) computed from the model's actual attention geometry — including MLA, grouped-query attention, sliding-window attention, and hybrid SSM/attention architectures (e.g. Qwen3-Next-style models where only a fraction of layers carry a KV cache). It tells you, in plain language:
-- **Dense models:** how many of the model's layers fit on your GPU at the selected context, and — separately — how much context you'd get if you kept (ideally) all layers on the fastest tier available.
-- **MoE models:** how many layers need to be offloaded to (or forced onto CPU from) VRAM to fit the selected context, honoring whichever MoE offload strategy you've picked.
+- **Dense models:** how many of the model's layers fit on your GPU at the selected context, and separately — how much context you'd get if you kept (ideally) all layers on the fastest memory available.
+- **MoE models:** how many layers need to be offloaded to (or forced onto CPU from) VRAM to fit the selected context.
 
 Each recommendation line has a small apply button to commit it directly.
 
-MoE:
-<img width="540" height="219" alt="image" src="https://github.com/user-attachments/assets/e7cfe713-ecf8-4c72-aea8-3bb8ea1ef3ac" />
-
 Dense:
-<img width="531" height="227" alt="image" src="https://github.com/user-attachments/assets/ed5b3043-dca3-4e94-803a-c560ecc4c41e" />
+
+<img width="490" height="303" alt="image" src="https://github.com/user-attachments/assets/ba8e1a8a-eb8f-42d1-be2a-6f42e2140dbd" />
+
+MoE:
+
+<img width="490" height="303" alt="image" src="https://github.com/user-attachments/assets/2be057e2-cfe4-44e0-b770-af82369aaf5f" />
 
 
 **Three-Way Configuration Presets**
@@ -63,13 +74,15 @@ Common parameters shows only the most impactful parameters (LM Studio style), Fu
 
 Parameters that differ from the currently-selected preset (or, for sampling values, from your main selected sampling preset) are highlighted with a reset-to-default button.
 
-<img width="327" height="123" alt="image" src="https://github.com/user-attachments/assets/6bff1dd2-3759-470a-8468-d1db2ee01cd5" />
+<img width="330" height="122" alt="image" src="https://github.com/user-attachments/assets/aaf946c7-3f40-4bbb-a339-fb4944590d53" />
+
 
 **Visual Command Editor**
 
-No need to memorize execution flags or save your commands in an endless unreadable diary. Edit backend-specific commands through a structured user interface, with a "Common" view for everyday parameters and a "Full" view for everything the backend schema exposes. Toggle booleans, set limits on numerical inputs, and define default parameter values. You can still input commands directly in the Import section.
+No need to memorize execution flags or save your commands in an endless unreadable diary. Edit backend-specific commands through a structured user interface, with a "Common" view for everyday parameters and a "Full" view for all supported parameters. Toggle booleans, set limits on numerical inputs, and define default parameter values. You can still input commands directly in the Import section.
 
-<img width="482" height="500" alt="image" src="https://github.com/user-attachments/assets/272b4189-ee5f-43b0-8446-1e372828ced5" />
+<img width="480" height="712" alt="image" src="https://github.com/user-attachments/assets/b6c514ea-b6cd-46ee-bd2e-e1fba93e74c0" />
+
 
 
 **Speculative Decoding — full tier system, auto-detected**
@@ -100,6 +113,7 @@ A model's native Jinja chat template, if present, is detected and shown for refe
 <img width="469" height="400" alt="image" src="https://github.com/user-attachments/assets/a99553c1-8081-4eac-9c3d-26275a6d1ee3" />
 
 
+
 **Monitoring**
 
 A dedicated tab tracks real generation speed and prompt-processing (prefill) speed for every running template, by polling llama-server's own `/metrics` endpoint (since Chat UI mode opens in your default browser, this is the only way to see live performance without proxying every request). Switch between active sessions and saved session history, compare multiple sessions side by side on the same charts, export/import session data as JSON, and configure how many past sessions to keep.
@@ -114,13 +128,17 @@ A dedicated tab tracks real generation speed and prompt-processing (prefill) spe
 
 Global settings that apply across every template in one place: the Base URL override, per-model defaults (AutoFit context minimum, MoE offload strategy, CPU-threads recommendation percentage, mmproj auto-enable, and more), and a Parallel Inference override that can force `--parallel`/`-np` to a single value for all models, or independent values for Dense vs. MoE.
 
-<img width="1261" height="791" alt="image" src="https://github.com/user-attachments/assets/a6824c82-f195-44da-b5ce-1551c0c4ef63" />
+<img width="806" height="984" alt="image" src="https://github.com/user-attachments/assets/47c55a63-3063-4982-82aa-df8302c55a42" />
+
+
+
 
 **YaRN Context Scaling**
 
 Need more context than a model's native window? Turn on Automatic YaRN scaling control (per-template, or globally as an "upscale to AutoFit" override) and XLM Studio computes and applies `--rope-scaling yarn`, `--rope-scale`, and `--yarn-orig-ctx` for you as you move the context slider — no manual RoPE math required.
 
 <img width="503" height="269" alt="image" src="https://github.com/user-attachments/assets/90ca473e-1153-49c3-90cd-06c33acf2ffb" />
+
 
 
 **Command Preview**
@@ -131,18 +149,12 @@ Every template shows a live preview of the exact `llama-server` command that wil
 
 
 
-**Template-Based Execution**
-
-Save your configurations as reusable templates. Run multiple models simultaneously on different ports without conflict. Launch them in "Chat UI" mode to automatically open the built-in llama.cpp web interface, or "API Only" mode to serve them silently in the background.
-
-<img width="1257" height="690" alt="image" src="https://github.com/user-attachments/assets/ea45d530-cb5e-4321-b38f-37e16f47479c" />
-
-
 **Version and Backend Management**
 
 Running cutting-edge models sometimes requires different builds of llama.cpp (or compatible with extra feature forks, e.g. TurboQuant-enabled builds). XLM Studio lets you maintain and seamlessly switch between multiple backend binaries, and can check upstream repositories for new releases and download/extract them straight from the settings panel.
 
-<img width="806" height="733" alt="image" src="https://github.com/user-attachments/assets/8fb6f00f-2099-4b64-94df-437006f39fbf" />
+<img width="2553" height="1388" alt="image" src="https://github.com/user-attachments/assets/128c738d-de86-4906-8752-f5a7f255820d" />
+
 
 
 **Logs**
@@ -150,6 +162,15 @@ Running cutting-edge models sometimes requires different builds of llama.cpp (or
 Server logs are collected in the background for the life of the app and stay available until you clear them manually or close the app.
 
 <img width="2129" height="777" alt="image" src="https://github.com/user-attachments/assets/113dfc32-4bc4-4e3f-883b-bbbcde0df009" />
+
+
+
+**MCP server and agentic control over XLM-Studio**
+
+Let your agents switch the model running behind themselves with a skill, chosing the faster or more intelligent model for the taask when you need it. You can benchmark, manage, create, and do much more with your templates!
+
+<img width="785" height="693" alt="image" src="https://github.com/user-attachments/assets/ce261fce-9386-47f5-b64c-edae42b72122" />
+
 
 
 ## Installation
