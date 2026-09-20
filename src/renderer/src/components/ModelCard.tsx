@@ -103,12 +103,23 @@ export default function ModelCard({ card }: Props) {
     // backendVersion (the version subfolder name) is only unique within a
     // single fork -- forks that track the same upstream can cut releases
     // under an identical version tag. backendKey pins the fork itself, so it
-    // takes precedence. Templates saved before backendKey existed fall back
-    // to the old name-only match, which stays ambiguous for those templates
-    // until they're re-saved.
+    // takes precedence. Since multi-backend-type support shipped, backendKey
+    // + version ALONE also stopped being unique (the same fork+version can
+    // exist under several type folders at once, e.g. a vulkan and a rocm
+    // build of the same release) -- so backendType is checked too whenever
+    // the template actually has one recorded, and only falls back to the
+    // old key+version-only match for templates saved before that field
+    // existed (or when the exact pinned variant is no longer installed).
     let targetBackend = card.template.backendKey
-      ? backends.find(b => b.backendKey === card.template.backendKey && b.name === card.template.backendVersion)
+      ? backends.find(b =>
+          b.backendKey === card.template.backendKey &&
+          b.name === card.template.backendVersion &&
+          (card.template.backendType === undefined || (b.backendType ?? null) === (card.template.backendType ?? null))
+        )
       : undefined
+    if (!targetBackend && card.template.backendKey) {
+      targetBackend = backends.find(b => b.backendKey === card.template.backendKey && b.name === card.template.backendVersion)
+    }
     if (!targetBackend && card.template.backendVersion) {
       targetBackend = backends.find(b => b.name === card.template.backendVersion || b.version === card.template.backendVersion || b.id === card.template.backendVersion)
     }

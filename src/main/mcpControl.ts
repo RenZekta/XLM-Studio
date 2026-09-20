@@ -101,6 +101,21 @@ async function resolveBackend(template: Template): Promise<any> {
   const backends = await D().listBackends()
   if (backends.length === 0) throw new ToolError('No backends installed — install a backend in the Backends tab first.')
   if (template.backendKey) {
+    // backendKey+version alone stopped being unique once multi-backend-type
+    // support shipped (the same fork+version can exist under several type
+    // folders at once, e.g. a vulkan and a rocm build of the same release),
+    // so match backendType too whenever the template actually recorded one.
+    // Templates saved before that field existed (backendType undefined)
+    // fall back to the old key+version match, which stays ambiguous only
+    // for those.
+    if ((template as any).backendType !== undefined) {
+      const exact = backends.find((b: any) =>
+        b.backendKey === template.backendKey &&
+        b.name === template.backendVersion &&
+        (b.backendType ?? null) === ((template as any).backendType ?? null)
+      )
+      if (exact) return exact
+    }
     const byKeyAndVersion = backends.find((b: any) => b.backendKey === template.backendKey && b.name === template.backendVersion)
     if (byKeyAndVersion) return byKeyAndVersion
     const byKey = backends.find((b: any) => b.backendKey === template.backendKey)
@@ -109,6 +124,14 @@ async function resolveBackend(template: Template): Promise<any> {
   const settings = await D().loadSettings()
   const globalBackend = settings.globalBackend
   if (globalBackend?.backendKey) {
+    if (globalBackend.backendType !== undefined) {
+      const exact = backends.find((b: any) =>
+        b.backendKey === globalBackend.backendKey &&
+        b.name === globalBackend.backendVersion &&
+        (b.backendType ?? null) === (globalBackend.backendType ?? null)
+      )
+      if (exact) return exact
+    }
     const match = backends.find((b: any) => b.backendKey === globalBackend.backendKey && b.name === globalBackend.backendVersion)
     if (match) return match
   }
@@ -403,13 +426,12 @@ export async function toolTemplateCreate(args: { name: string; model: string; ba
   }
   // Resolve the EFFECTIVE backend now (explicit arg, else the persisted
   // Global Backend, else newest-installed) and pin it directly onto the
-  // template — matching how the renderer's own CreateModal bakes in
-  // activeBackend at creation time, rather than leaving it to be resolved
-  // again at every future start. Resolving it here also means the Quick
-  // baseline's backend-specific defaults (e.g. TurboQuant's KV cache quant
-  // types) are computed against the backend that will actually run the
-  // model, not an unresolved/undefined backendKey falling back to generic
-  // q8_0.
+  // template — MCP-created templates always pin a concrete backend (unlike
+  // the renderer's own CreateModal, which now defaults new templates to
+  // "Default (Active)"/unpinned), since Quick baseline's backend-specific
+  // defaults (e.g. TurboQuant's KV cache quant types) need a concrete
+  // backend to compute against, not an unresolved/undefined backendKey
+  // falling back to generic q8_0.
   const backend = explicitBackend || await resolveBackend({} as Template)
   // "Creates the template the same way as user does - with Quick preset by
   // default and everything else" — build the Quick baseline from GGUF
@@ -438,6 +460,7 @@ export async function toolTemplateCreate(args: { name: string; model: string; ba
     modelPath: model.path,
     backendKey: backend.backendKey,
     backendVersion: backend.name,
+    backendType: backend.backendType ?? null,
     serverPort: port,
     args: baseline,
     createdAt: new Date().toISOString(),
@@ -469,8 +492,13 @@ export async function toolTemplateEdit(args: { templates: string[]; changes: Rec
       const { labelToFlag } = await getSchemaLookup(t)
       for (const [k, v] of Object.entries(args.changes)) {
         if (k === 'model' || k === 'modelPath') { patch.modelPath = v; continue }
-        if (k === 'backend' || k === 'backendKey') { patch.backendKey = v; continue }
-        if (k === 'backendVersion') { patch.backendVersion = v; continue }
+        // backendType isn't independently settable through this tool (there's
+        // no sensible free-text identity for it), so clear the old one
+        // whenever backend/backendVersion changes — carrying over a stale
+        // type here would make resolveBackend's exact-match check fail
+        // silently against the NEW backend it doesn't actually belong to.
+        if (k === 'backend' || k === 'backendKey') { patch.backendKey = v; patch.backendType = null; continue }
+        if (k === 'backendVersion') { patch.backendVersion = v; patch.backendType = null; continue }
         if (k === 'serverPort' || k === 'port') { patch.serverPort = Number(v); continue }
         if (k === 'name') { patch.name = String(v); continue }
         if (k === 'launchMode') continue  // vestigial field, no longer meaningful — Chat UI/API Only per-Template switch was removed; see settings.modelDefaults.autoOpenChatUI

@@ -73,6 +73,13 @@ interface Props {
   // resolution in ModelCard.tsx's handleRunToggle, mirrored below.
   backendKey?: string | null
   backendVersionName?: string | null
+  // Pins the specific GPU-runtime variant (vulkan, cuda-12.4, rocm, ...) --
+  // needed alongside backendKey/backendVersionName because those two alone
+  // stopped being a unique identity once multi-backend-type support shipped
+  // (the same fork+version can exist under several type folders at once).
+  // Same omitted-means-"fall back to the saved card's own template field"
+  // rule as the other two.
+  backendType?: string | null
   // CreateModal wants the Settings/Parameters
   // toggles + CPU/model/Free-VRAM info banners to always be visible above the
   // collapsible "Advanced Parameters" section, not hidden inside it. Rather
@@ -152,7 +159,7 @@ function NgramModifierBlock({ title, flagPrefix, enabled, onToggle, disabled, fi
   )
 }
 
-export default function CmdParamsEditor({ templateId, args, onChange, modelPathFallback, serverPortFallback, disabled: disabledProp, backendKey: backendKeyProp, backendVersionName: backendVersionProp, headerPortalTarget }: Props) {
+export default function CmdParamsEditor({ templateId, args, onChange, modelPathFallback, serverPortFallback, disabled: disabledProp, backendKey: backendKeyProp, backendVersionName: backendVersionProp, backendType: backendTypeProp, headerPortalTarget }: Props) {
   const {
     commandsSchema, updateCard, cards, models, cpuInfo,
     detectedSpeculation, setDetectedSpeculation, markSpeculationApplied,
@@ -180,15 +187,32 @@ export default function CmdParamsEditor({ templateId, args, onChange, modelPathF
   // tracking the global backend regardless of a per-Template override.
   const effectiveBackendKey = backendKeyProp !== undefined ? backendKeyProp : card?.template.backendKey
   const effectiveBackendVersionName = backendVersionProp !== undefined ? backendVersionProp : card?.template.backendVersion
+  const effectiveBackendType = backendTypeProp !== undefined ? backendTypeProp : card?.template.backendType
   const effectiveBackend = useMemo(() => {
-    let b = effectiveBackendKey
-      ? backends.find(x => x.backendKey === effectiveBackendKey && x.name === effectiveBackendVersionName)
-      : undefined
+    let b = undefined as (typeof backends)[number] | undefined
+    if (effectiveBackendKey) {
+      // Prefer an exact type match whenever we actually know the type
+      // (including "explicitly no type" for a legacy install) -- backendKey
+      // + version alone stopped being unique once the SAME fork+version
+      // could exist under several type folders at once (e.g. a vulkan and
+      // a rocm build of the same release), so without this a template could
+      // silently resolve to whichever variant happened to sort first and
+      // launch (or preview defaults for) the wrong binary.
+      if (effectiveBackendType !== undefined) {
+        b = backends.find(x => x.backendKey === effectiveBackendKey && x.name === effectiveBackendVersionName && (x.backendType ?? null) === (effectiveBackendType ?? null))
+      }
+      // Fall back to the old key+version-only match when we have no type
+      // info at all (a Template saved before this field existed) or the
+      // exact variant it pinned is no longer installed.
+      if (!b) {
+        b = backends.find(x => x.backendKey === effectiveBackendKey && x.name === effectiveBackendVersionName)
+      }
+    }
     if (!b && effectiveBackendVersionName) {
       b = backends.find(x => x.name === effectiveBackendVersionName || x.version === effectiveBackendVersionName || x.id === effectiveBackendVersionName)
     }
     return b || activeBackend
-  }, [effectiveBackendKey, effectiveBackendVersionName, backends, activeBackend])
+  }, [effectiveBackendKey, effectiveBackendVersionName, effectiveBackendType, backends, activeBackend])
 
   // Keep a ref mirroring the latest `args` prop. Async
   // callbacks (e.g. the speculation/MTP file-scan below) close over `args` as

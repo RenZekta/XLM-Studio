@@ -111,6 +111,17 @@ export interface Template {
   // and fall back to a name-only match at run time.
   backendVersion?: string
   backendKey?: string
+  // Pins the specific GPU-runtime variant (vulkan, cuda-12.4, rocm, ...) —
+  // see shared/backendType.ts. Needed because backendKey+backendVersion
+  // alone stopped being unique once multi-backend-type support shipped: the
+  // SAME fork+version can exist under several type folders at once (e.g. a
+  // vulkan AND a rocm build of the same release tag), so without this a
+  // template resolving "its" backend at run time could silently match
+  // whichever variant happened to sort first and launch the wrong binary.
+  // Undefined on templates saved before this field existed, or when the
+  // matched backend has no explicit type (legacy single-type install) —
+  // both fall back to a backendKey+version-only match.
+  backendType?: string | null
   modelPath?: string
   serverPort: number
   args: Record<string, string | number | boolean | null>
