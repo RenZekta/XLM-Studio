@@ -167,7 +167,7 @@ Server logs are collected in the background for the life of the app and stay ava
 
 **MCP server and agentic control over XLM-Studio**
 
-Let your agents switch the model running behind themselves with a skill, chosing the faster or more intelligent model for the taask when you need it. You can benchmark, manage, create, and do much more with your templates!
+Let your agents switch the model running behind themselves with a skill, chosing the faster or more intelligent model for the task when you ask it. You can benchmark, manage, create templates this way, and much more!
 
 <img width="785" height="693" alt="image" src="https://github.com/user-attachments/assets/ce261fce-9386-47f5-b64c-edae42b72122" />
 
@@ -223,7 +223,8 @@ cd (X:\your\chosen\destination)\XLM-Studio && npm install && npm run build && np
 ### Phase 3: Enhanced Inference & Native UI (Short to Mid-Term)
 - [ ] **Built-in Chat Interface**: Native chat client to interact with models directly within XLM Studio without launching external browser tabs — would also let Monitoring see real per-request data instead of polling `/metrics`. Optional goal, it works just fine with a separate chat window too.
 - [ ] **Multi-Language Support**: Complete internationalization (i18n) to support languages beyond English.
-- [ ] MCP control over XLM Studio
+- [X] MCP control over XLM Studio
+- [ ] Persistent KV Cache for quick conversation resume after switching or restarting templates
 
 ### Phase 4: Multi-Backend & Advanced Engines (Long-Term)
 - [ ] Optional **Alternative Backend Integration**: Expand support beyond `llama.cpp` to include:
