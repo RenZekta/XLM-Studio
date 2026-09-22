@@ -1,7 +1,8 @@
 import { create } from 'zustand'
 import type {
   Template, BackendVersion, CommandsSchema, ReleaseInfo, RunningStatus,
-  ModelGroup, TrackedBackend, TrackedBackendRelease, ThemePref, SpecDetectionResult
+  ModelGroup, TrackedBackend, TrackedBackendRelease, ThemePref, SpecDetectionResult,
+  KvCacheCheckpointSettings
 } from '../../../shared/types'
 
 interface CardState {
@@ -71,6 +72,7 @@ interface AppStore {
   systemRam: { totalRAMMB: number; freeRAMMB: number } | null
   modelDefaults: { autoFitEnabled: boolean; autoFitContextLength: number; guardrailMode: string; customMaxSizeGB: number; useCurrentMemState?: boolean; moeOffloadStrategy?: 'offload' | 'max'; autoFitUse2xIncrements?: boolean; autoFitYarnAutoScale?: boolean; autoEnableMmproj?: boolean; cpuThreadsOverrideEnabled?: boolean; cpuThreadsOverridePercent?: number; parallelOverrideEnabled?: boolean; parallelInferenceMode?: 'unified' | 'separate'; parallelOverrideValue?: number; parallelOverrideValueDense?: number; parallelOverrideValueMoe?: number; perfMaxSessions?: number; autoOpenChatUI?: boolean }
   baseUrlOverride: { enabled: boolean; port: number; serveOnLocalNetwork: boolean; apiKeyEnabled: boolean; apiKey: string }
+  kvCacheCheckpoints: KvCacheCheckpointSettings
   samplingPresets: any[]
   paramViewMode: 'common' | 'full'
   quickBaselineActive: boolean      // tracks if Quick preset is the active baseline
@@ -140,6 +142,7 @@ interface AppStore {
   setSystemRam: (info: { totalRAMMB: number; freeRAMMB: number }) => void
   setModelDefaults: (defaults: any) => void
   setBaseUrlOverride: (opts: any) => void
+  setKvCacheCheckpoints: (opts: KvCacheCheckpointSettings) => void
   setSamplingPresets: (presets: any[]) => void
   setParamViewMode: (mode: 'common' | 'full') => void
   setQuickBaselineActive: (active: boolean) => void
@@ -179,6 +182,7 @@ export const useStore = create<AppStore>((set) => ({
   systemRam: null,
   modelDefaults: { autoFitEnabled: true, autoFitContextLength: 60000, guardrailMode: 'strict', customMaxSizeGB: 0, useCurrentMemState: false, moeOffloadStrategy: 'max' /* default to MAX+ForceMoEtoCPU */, autoEnableMmproj: true, cpuThreadsOverrideEnabled: false, cpuThreadsOverridePercent: 100, parallelOverrideEnabled: false, parallelInferenceMode: 'unified', parallelOverrideValue: 4, parallelOverrideValueDense: 4, parallelOverrideValueMoe: 4, perfMaxSessions: 20, autoOpenChatUI: false },
   baseUrlOverride: { enabled: true, port: 1234, serveOnLocalNetwork: false, apiKeyEnabled: false, apiKey: '' },
+  kvCacheCheckpoints: { enabled: false, mode: 'model', autoDeleteRedundant: false, externalFolders: [], mainFolder: null },
   samplingPresets: [],
   paramViewMode: 'common',
   quickBaselineActive: true,  // Quick settings is the default baseline
@@ -286,6 +290,7 @@ export const useStore = create<AppStore>((set) => ({
   setSystemRam: (info) => set({ systemRam: info }),
   setModelDefaults: (defaults) => set({ modelDefaults: defaults }),
   setBaseUrlOverride: (opts) => set({ baseUrlOverride: opts }),
+  setKvCacheCheckpoints: (opts) => set({ kvCacheCheckpoints: opts }),
   setSamplingPresets: (presets) => set({ samplingPresets: presets }),
   setParamViewMode: (mode) => set({ paramViewMode: mode }),
   setQuickBaselineActive: (active) => set({ quickBaselineActive: active }),

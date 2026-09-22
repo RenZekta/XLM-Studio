@@ -89,6 +89,12 @@ export interface CommandParam {
   // this" (e.g. 'auto'), so a separate blank placeholder would just be a
   // confusing duplicate of one of the real choices.
   requireValue?: boolean
+  // Custom label for the synthetic empty "Default" choice (ignored when
+  // requireValue is set, since that choice doesn't exist then). Use when
+  // "Default" would be misleading -- e.g. --lazy-mode's blank choice isn't
+  // a value preference, it's "never pass this flag", because older backend
+  // builds don't recognize it and reject the argument outright.
+  emptyLabel?: string
 }
 export interface CommandCategory {
   name: string
@@ -414,4 +420,34 @@ export interface BaseUrlOverride {
   apiKey: string               // the API key string
 }
 
+// KV Cache Checkpoints: saves each Template's llama-server slot (its KV
+// cache) to disk on Stop and restores it on the next Start, so switching
+// away from a Template and back doesn't re-read the whole prompt from
+// scratch. See --slot-save-path and the /slots/N?action=save|restore
+// endpoints, standard in llama.cpp since b3000.
+export interface KvCacheCheckpointSettings {
+  enabled: boolean
+  // 'model': one checkpoint per model, shared across every Template that
+  // loads it. 'model-template': one checkpoint per (model, Template) pair —
+  // for setups that run the same model under different Templates for
+  // different purposes (specialized agents, multi-agent setups on different
+  // ports) and don't want them clobbering each other's cache.
+  mode: 'model' | 'model-template'
+  // When true, a checkpoint flagged redundant by the scan (see
+  // findRedundantCheckpoints) is deleted immediately instead of waiting for
+  // the user to hit the Overrides/Settings "Delete?" confirm button.
+  autoDeleteRedundant: boolean
+  externalFolders: string[]
+  mainFolder: string | null
+}
 
+// One entry in the result of the redundant-checkpoint scan (main process's
+// computeRedundantCheckpoints), as sent to the renderer.
+export interface RedundantCheckpoint {
+  file: string
+  reason: string
+  tokens: number | null
+  modelName: string
+  templateName: string
+  mode: string
+}

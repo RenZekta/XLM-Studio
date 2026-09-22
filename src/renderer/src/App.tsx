@@ -52,6 +52,7 @@ export default function App() {
     setMainModelFolder, setMainBackendFolder,
     setTrackedBackends, setCpuInfo,
     setVramInfo, setSystemRam, setModelDefaults, setBaseUrlOverride, setSamplingPresets,
+    setKvCacheCheckpoints,
     setTrackerResult,
     setGgufMetadataBulk, setGgufMetadata, setMetadataExtraction, clearMetadataExtraction
   } = useStore()
@@ -157,6 +158,7 @@ export default function App() {
       // Load model defaults + base URL override + sampling presets (features 18/24/28).
       try { setModelDefaults(await window.api?.getModelDefaults?.()) } catch {}
       try { setBaseUrlOverride(await window.api?.getBaseUrlOverride?.()) } catch {}
+      try { setKvCacheCheckpoints(await window.api?.getKvCacheCheckpoints?.()) } catch {}
       try { setSamplingPresets(await window.api?.listSamplingPresets?.()) } catch {}
       checkUpdates()
     }

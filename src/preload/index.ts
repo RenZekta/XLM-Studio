@@ -72,7 +72,7 @@ const api = {
 
   // ----- Run model -----
   runModel: (opts: object) => ipcRenderer.invoke('run-model', opts),
-  stopModel: (id: string) => ipcRenderer.invoke('stop-model', id),
+  stopModel: (id: string, opts?: { skipCheckpoint?: boolean }) => ipcRenderer.invoke('stop-model', id, opts),
   onModelError: (cb: (data: { id: string; error: string }) => void) => {
     ipcRenderer.removeAllListeners('model-error')
     ipcRenderer.on('model-error', (_e, data) => cb(data))
@@ -195,6 +195,17 @@ const api = {
   setMcpSettings: (mcp: any) => ipcRenderer.invoke('set-mcp-settings', mcp) as Promise<{ success: boolean }>,
   addSkillFiles: () => ipcRenderer.invoke('add-skill-files') as Promise<{ success: boolean; error?: string }>,
   removeSkillFiles: () => ipcRenderer.invoke('remove-skill-files') as Promise<{ success: boolean }>,
+
+  // ----- KV Cache Checkpoints -----
+  getKvCacheCheckpoints: () => ipcRenderer.invoke('get-kv-cache-checkpoints') as Promise<any>,
+  setKvCacheCheckpoints: (opts: any) => ipcRenderer.invoke('set-kv-cache-checkpoints', opts) as Promise<{ success: boolean }>,
+  listExternalCheckpointFolders: () => ipcRenderer.invoke('list-external-checkpoint-folders') as Promise<string[]>,
+  addExternalCheckpointFolder: () => ipcRenderer.invoke('add-external-checkpoint-folder'),
+  removeExternalCheckpointFolder: (folder: string) => ipcRenderer.invoke('remove-external-checkpoint-folder', folder),
+  getMainCheckpointFolder: () => ipcRenderer.invoke('get-main-checkpoint-folder') as Promise<{ folder: string; isDefault: boolean }>,
+  setMainCheckpointFolder: (folder: string) => ipcRenderer.invoke('set-main-checkpoint-folder', folder),
+  scanRedundantCheckpoints: () => ipcRenderer.invoke('scan-redundant-checkpoints') as Promise<{ file: string; reason: string; tokens: number | null; modelName: string; templateName: string; mode: string }[]>,
+  deleteRedundantCheckpoints: (files: string[]) => ipcRenderer.invoke('delete-redundant-checkpoints', files) as Promise<{ success: boolean; deleted: number }>,
 
   // ----- Sampling presets -----
   listSamplingPresets: () => ipcRenderer.invoke('list-sampling-presets') as Promise<any[]>,

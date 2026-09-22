@@ -1,7 +1,7 @@
 import type {
   Template, BackendVersion, CommandsSchema, ReleaseInfo,
   ModelGroup, TrackedBackend, TrackedBackendRelease, ThemePref,
-  CpuInfo, SpeculationMode
+  CpuInfo, SpeculationMode, KvCacheCheckpointSettings, RedundantCheckpoint
 } from '../../shared/types'
 
 interface ModelDownloadInfo {
@@ -81,8 +81,8 @@ interface LlamaCppApi {
   pickAnyFile: () => Promise<string | null>
 
   // Run model
-  runModel: (opts: { id: string; name: string; backendPath: string; exe: string; args: string[]; openBrowser: boolean; port: number; ignoreBaseUrlOverride?: boolean }) => Promise<{ success: boolean; pid?: number; error?: string; port?: number }>
-  stopModel: (id: string) => Promise<{ success: boolean; error?: string; alreadyStopped?: boolean }>
+  runModel: (opts: { id: string; name: string; backendPath: string; exe: string; args: string[]; openBrowser: boolean; port: number; ignoreBaseUrlOverride?: boolean; skipCheckpoint?: boolean }) => Promise<{ success: boolean; pid?: number; error?: string; port?: number }>
+  stopModel: (id: string, opts?: { skipCheckpoint?: boolean }) => Promise<{ success: boolean; error?: string; alreadyStopped?: boolean }>
   onModelError: (cb: (data: { id: string; error: string }) => void) => void
   onModelExited: (cb: (data: { id: string }) => void) => void
   onModelStarted: (cb: (data: { id: string; pid?: number; port: number }) => void) => void
@@ -162,6 +162,17 @@ interface LlamaCppApi {
   setMcpSettings: (mcp: any) => Promise<{ success: boolean }>
   addSkillFiles: () => Promise<{ success: boolean; error?: string }>
   removeSkillFiles: () => Promise<{ success: boolean }>
+
+  // KV Cache Checkpoints
+  getKvCacheCheckpoints: () => Promise<KvCacheCheckpointSettings>
+  setKvCacheCheckpoints: (opts: Partial<KvCacheCheckpointSettings>) => Promise<{ success: boolean }>
+  listExternalCheckpointFolders: () => Promise<string[]>
+  addExternalCheckpointFolder: () => Promise<{ success: boolean; folders?: string[] }>
+  removeExternalCheckpointFolder: (folder: string) => Promise<{ success: boolean; folders: string[] }>
+  getMainCheckpointFolder: () => Promise<{ folder: string; isDefault: boolean }>
+  setMainCheckpointFolder: (folder: string) => Promise<{ success: boolean; mainFolder: string | null }>
+  scanRedundantCheckpoints: () => Promise<RedundantCheckpoint[]>
+  deleteRedundantCheckpoints: (files: string[]) => Promise<{ success: boolean; deleted: number }>
 
   // Sampling presets
   listSamplingPresets: () => Promise<any[]>

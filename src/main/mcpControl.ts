@@ -30,8 +30,8 @@ export interface ControlDeps {
   // that). Used by info-models so listing models stays cheap.
   getCachedMetadata: (modelPath: string) => any | null
   getCommands: (backendKey: string) => Promise<any>
-  runModel: (opts: { id: string; name: string; backendPath: string; exe: string; args: string[]; openBrowser: boolean; port: number; ignoreBaseUrlOverride?: boolean }) => Promise<{ success: boolean; pid?: number; error?: string; port?: number }>
-  stopModel: (id: string) => Promise<{ success: boolean; error?: string }>
+  runModel: (opts: { id: string; name: string; backendPath: string; exe: string; args: string[]; openBrowser: boolean; port: number; ignoreBaseUrlOverride?: boolean; skipCheckpoint?: boolean }) => Promise<{ success: boolean; pid?: number; error?: string; port?: number }>
+  stopModel: (id: string, opts?: { skipCheckpoint?: boolean }) => Promise<{ success: boolean; error?: string }>
   isRunning: (templateId: string) => { running: boolean; port?: number }
   getOverridePort: () => Promise<number | null>
   getSessionSpeeds: (templateId: string) => { firstTps: number | null; avgTps: number | null }
@@ -489,7 +489,7 @@ export async function toolTemplateEdit(args: { templates: string[]; changes: Rec
       }
       const patch: Record<string, any> = { ...t, updatedAt: new Date().toISOString() }
       let newArgs: Record<string, any> = { ...(t.args || {}) }
-      const { labelToFlag } = await getSchemaLookup(t)
+      const { labelToFlag, shortToFlag } = await getSchemaLookup(t)
       for (const [k, v] of Object.entries(args.changes)) {
         if (k === 'model' || k === 'modelPath') { patch.modelPath = v; continue }
         // backendType isn't independently settable through this tool (there's
@@ -514,13 +514,18 @@ export async function toolTemplateEdit(args: { templates: string[]; changes: Rec
         if (kLower === 'automatic yarn scaling control' || kLower === 'yarn-auto-scale') { newArgs['__yarnAutoScale'] = !!v; continue }
         // Every other parameter (model, backend, multimodal projector,
         // speculative decoding, and every other UI parameter) is stored as
-        // an args key. Accept either the raw flag ("ctx-size"/"--ctx-size")
-        // OR the same label display-parameters-*/the app's own interface
-        // shows for it ("Context Size") — resolved via the same
-        // CommandsSchema lookup — auto-filling a leading "--" for a bare
-        // flag name that didn't match a label.
+        // an args key. Accept the raw flag ("ctx-size"/"--ctx-size"), its
+        // short alias ("-c", with or without the dash), OR the same label
+        // display-parameters-*/the app's own interface shows for it
+        // ("Context Size") — all resolved via the same CommandsSchema
+        // lookup — auto-filling a leading "--" for a bare flag name that
+        // didn't match any of those. Short-flag lookup is checked before
+        // the bare-flag fallback: a single-dash short flag like "-lm" would
+        // otherwise fail the "--" prefix check and get mangled into
+        // "---lm" by the auto-fill instead of resolving to "--load-mode".
         const byLabel = labelToFlag.get(kLower)
-        const flag = byLabel || (k.startsWith('--') || k.startsWith('__') ? k : `--${k}`)
+        const byShort = byLabel ? undefined : shortToFlag.get(kLower.replace(/^-+/, ''))
+        const flag = byLabel || byShort || (k.startsWith('--') || k.startsWith('__') ? k : `--${k}`)
         newArgs[flag] = v
       }
       patch.args = newArgs
@@ -645,9 +650,10 @@ export async function toolApplyParametersPreset(args: { preset: string | number;
 // template-edit can accept either a flag or its label. Falls back to an
 // empty schema (label defaults to the flag itself) if no schema is available
 // for some reason — callers degrade gracefully rather than failing.
-async function getSchemaLookup(t: Template): Promise<{ flagToParam: Map<string, any>; labelToFlag: Map<string, string> }> {
+async function getSchemaLookup(t: Template): Promise<{ flagToParam: Map<string, any>; labelToFlag: Map<string, string>; shortToFlag: Map<string, string> }> {
   const flagToParam = new Map<string, any>()
   const labelToFlag = new Map<string, string>()
+  const shortToFlag = new Map<string, string>()
   try {
     const backend = await resolveBackend(t)
     const schema = await D().getCommands(backend.backendKey)
@@ -655,10 +661,14 @@ async function getSchemaLookup(t: Template): Promise<{ flagToParam: Map<string, 
       for (const cmd of cat.commands || []) {
         flagToParam.set(cmd.arg, cmd)
         labelToFlag.set(cmd.label.toLowerCase(), cmd.arg)
+        // e.g. "-lm" -> "--load-mode", so template-edit accepts the short
+        // flag (with or without its leading "-") the same way the UI's own
+        // Parameters list shows it ("-lm, --load-mode").
+        if (cmd.short) shortToFlag.set(cmd.short.toLowerCase().replace(/^-+/, ''), cmd.arg)
       }
     }
   } catch {}
-  return { flagToParam, labelToFlag }
+  return { flagToParam, labelToFlag, shortToFlag }
 }
 
 // Shows the Template's parameters the same way the app's own interface
@@ -897,14 +907,14 @@ export async function toolBenchmark(args: { template: string; prompts?: string[]
     // whenever the caller happens to be running on it, including the
     // caller === target case) and the target itself if it's already
     // running some other way, then start the target fresh.
-    if (blocker && blockerWasRunning?.running) await D().stopModel(blocker.id)
-    if (targetWasRunning) await D().stopModel(target.id)
+    if (blocker && blockerWasRunning?.running) await D().stopModel(blocker.id, { skipCheckpoint: true })
+    if (targetWasRunning) await D().stopModel(target.id, { skipCheckpoint: true })
     const backend = await resolveBackend(target)
     const { args: launchArgs } = await buildLaunchArgs(target)
     const started = await D().runModel({
       id: target.id, name: target.name, backendPath: backend.path, exe: backend.exe,
       args: launchArgs, openBrowser: false, port: target.serverPort || 8080,
-      ignoreBaseUrlOverride: targetIgnoresOverride
+      ignoreBaseUrlOverride: targetIgnoresOverride, skipCheckpoint: true
     })
     if (!started.success || !started.port) throw new Error(started.error || 'Target failed to start')
     // Wait for the target to actually finish loading before the first
@@ -919,7 +929,7 @@ export async function toolBenchmark(args: { template: string; prompts?: string[]
   } catch (err: any) {
     error = err?.message || String(err)
   } finally {
-    try { await D().stopModel(target.id) } catch {}
+    try { await D().stopModel(target.id, { skipCheckpoint: true }) } catch {}
     // Restore exactly whichever thing was actually running before this
     // call started — the target itself for a self-benchmark (without this,
     // a self-benchmark would leave the caller's own server stopped with
@@ -934,7 +944,7 @@ export async function toolBenchmark(args: { template: string; prompts?: string[]
         const res = await D().runModel({
           id: target.id, name: target.name, backendPath: backend.path, exe: backend.exe,
           args: launchArgs, openBrowser: false, port: target.serverPort || 8080,
-          ignoreBaseUrlOverride: targetIgnoresOverride
+          ignoreBaseUrlOverride: targetIgnoresOverride, skipCheckpoint: true
         })
         if (res.success && res.port) await waitForServerReady(res.port)
       } catch {}
@@ -946,7 +956,7 @@ export async function toolBenchmark(args: { template: string; prompts?: string[]
         const res = await D().runModel({
           id: blocker.id, name: blocker.name, backendPath: backend.path, exe: backend.exe,
           args: launchArgs, openBrowser: false, port: blocker.serverPort || 8080,
-          ignoreBaseUrlOverride: blockerIgnoresOverride
+          ignoreBaseUrlOverride: blockerIgnoresOverride, skipCheckpoint: true
         })
         if (res.success && res.port) await waitForServerReady(res.port)
       } catch {}
@@ -1161,7 +1171,7 @@ export const TOOL_DEFS: ToolDef[] = [
   },
   {
     name: 'template-edit', handler: toolTemplateEdit,
-    description: 'Edit one or more Templates: model, backend, multimodal projector, speculative decoding, or any other parameter. Each parameter key accepts either its display-parameters label ("Context Size") or its raw flag ("ctx-size"/"--ctx-size"). Also accepts the three composite toggles from display-parameters-* as plain booleans: "N-gram Map (K4V)"/"ngram-map-k4v", "N-gram Modifier"/"ngram-mod" (each auto-applies/removes its own default sub-parameters), and "Automatic YaRN scaling control"/"yarn-auto-scale". Refuses to change model/backend of a currently-serving Template. If "Only allow Template edits via MCP for MCP-made Templates" is on, only "MCP-made"-tagged Templates can be edited.',
+    description: 'Edit one or more Templates: model, backend, multimodal projector, speculative decoding, or any other parameter. Each parameter key accepts its display-parameters label ("Context Size"), its raw flag ("ctx-size"/"--ctx-size"), or its short flag ("-c"). Also accepts the three composite toggles from display-parameters-* as plain booleans: "N-gram Map (K4V)"/"ngram-map-k4v", "N-gram Modifier"/"ngram-mod" (each auto-applies/removes its own default sub-parameters), and "Automatic YaRN scaling control"/"yarn-auto-scale". Refuses to change model/backend of a currently-serving Template. If "Only allow Template edits via MCP for MCP-made Templates" is on, only "MCP-made"-tagged Templates can be edited.',
     params: [
       { name: 'templates', type: 'string[]', required: true, description: 'One or more Template names' },
       { name: 'changes', type: 'object', required: true, description: 'Key/value map of parameters to change, e.g. {"ctx-size": 8192, "model": "..."}' }

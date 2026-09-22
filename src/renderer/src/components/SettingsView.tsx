@@ -1,9 +1,9 @@
-import React, { useState, useEffect, useCallback } from 'react'
+import React, { useState, useEffect, useCallback, useRef } from 'react'
 import { useStore } from '../store/useStore'
 import {
   HardDrive, Download, Trash, RefreshCw, Loader2, ChevronDown, Terminal,
   Bell, BellOff, Folder, Monitor, Moon, Sun, Plus, Link2,
-  AlertCircle, ExternalLink, Cpu, Layers
+  AlertCircle, ExternalLink, Cpu, Layers, Database
 } from 'lucide-react'
 import CommandsEditor from './CommandsEditor'
 import ExternalFolderList from './ExternalFolderList'
@@ -12,7 +12,7 @@ import LaunchSettingsSection from './LaunchSettingsSection'
 import { changeTheme } from '../hooks/useTheme'
 import { formatBytes } from '../utils/format'
 import { pickDefaultAsset, setLastAssetType } from '../utils/backendAssetPref'
-import type { ThemePref, TrackedBackend, TrackedBackendRelease } from '../../../shared/types'
+import type { ThemePref, TrackedBackend, TrackedBackendRelease, RedundantCheckpoint } from '../../../shared/types'
 
 const NOTIF_KEY = 'hexllama_update_notify'
 
@@ -31,7 +31,8 @@ export default function SettingsView() {
     trackedBackends, trackerResults, checkingAllBackends,
     setExternalModelFolders, setExternalBackendFolders,
     setMainModelFolder, setMainBackendFolder, setTrackedBackends,
-    setTrackerResult, setCheckingAllBackends
+    setTrackerResult, setCheckingAllBackends,
+    kvCacheCheckpoints, setKvCacheCheckpoints
   } = useStore()
 
   const [selectedAssetByUrl, setSelectedAssetByUrl] = useState<Record<string, string>>({})
@@ -39,6 +40,26 @@ export default function SettingsView() {
   const [notifPref, setNotifPref] = useState<'banner' | 'manual'>(getNotifPref())
   const [customBackendLink, setCustomBackendLink] = useState('')
   const [customBackendErr, setCustomBackendErr] = useState('')
+  // Checkpoints flagged by the last redundant-checkpoint scan (see
+  // scan-redundant-checkpoints) -- re-run on mount and whenever the
+  // Model/Model-Template mode changes, since both are exactly the moments a
+  // previously-fine checkpoint can become redundant.
+  const [redundantCheckpoints, setRedundantCheckpoints] = useState<RedundantCheckpoint[]>([])
+  const [deletingCheckpoints, setDeletingCheckpoints] = useState(false)
+  const kvCacheCheckpointsRef = useRef(kvCacheCheckpoints)
+  useEffect(() => { kvCacheCheckpointsRef.current = kvCacheCheckpoints }, [kvCacheCheckpoints])
+  const refreshRedundantCheckpoints = useCallback(async () => {
+    try {
+      const found = await window.api.scanRedundantCheckpoints()
+      if (found.length > 0 && kvCacheCheckpointsRef.current.autoDeleteRedundant) {
+        await window.api.deleteRedundantCheckpoints(found.map(c => c.file))
+        setRedundantCheckpoints([])
+        return
+      }
+      setRedundantCheckpoints(found)
+    } catch { setRedundantCheckpoints([]) }
+  }, [])
+  useEffect(() => { refreshRedundantCheckpoints() }, [refreshRedundantCheckpoints, kvCacheCheckpoints.mode])
   // Which tracked backend's asset-type dropdown is open (at most one at a
   // time). Closed on any click outside a ".asset-picker" element.
   const [openDropdownId, setOpenDropdownId] = useState<string | null>(null)
@@ -381,6 +402,164 @@ export default function SettingsView() {
               setBackends(updated)
             }}
           />
+        </div>
+      </div>
+
+      {/* KV Cache Checkpoints */}
+      <div className="settings-section">
+        <div className="settings-section-title"><Database /> KV Cache Checkpoints</div>
+        <div className="settings-row" style={{ borderBottom: 'none', flexDirection: 'column', alignItems: 'flex-start', gap: 12 }}>
+          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', width: '100%' }}>
+            <div>
+              <div className="settings-row-label">Store KV Cache Checkpoints</div>
+              <div className="settings-row-sub">
+                Save each Template's context to disk on Stop and restore it on the next Start, so switching
+                back to a Template doesn't re-read the whole prompt from scratch. Never applied to Benchmarks,
+                to keep their measurements fresh.
+              </div>
+            </div>
+            <div className="toggle-wrap">
+              <label className="toggle">
+                <input type="checkbox" checked={kvCacheCheckpoints.enabled} onChange={async (e) => {
+                  const o = { ...kvCacheCheckpoints, enabled: e.target.checked }
+                  setKvCacheCheckpoints(o)
+                  try { await window.api.setKvCacheCheckpoints(o) } catch {}
+                }} />
+                <span className="toggle-track"></span><span className="toggle-thumb"></span>
+              </label>
+            </div>
+          </div>
+
+          {kvCacheCheckpoints.enabled && (
+            <>
+              {/* Storage mode */}
+              <div style={{ width: '100%' }}>
+                <div className="settings-row-label">Store checkpoint per each:</div>
+                <div style={{ display: 'flex', gap: 8, marginTop: 8 }}>
+                  <button
+                    className={`launch-mode-btn ${kvCacheCheckpoints.mode === 'model' ? 'active' : ''}`}
+                    onClick={async () => {
+                      const o = { ...kvCacheCheckpoints, mode: 'model' as const }
+                      setKvCacheCheckpoints(o)
+                      try { await window.api.setKvCacheCheckpoints(o) } catch {}
+                    }}
+                  >
+                    Model
+                  </button>
+                  <button
+                    className={`launch-mode-btn ${kvCacheCheckpoints.mode === 'model-template' ? 'active' : ''}`}
+                    onClick={async () => {
+                      const o = { ...kvCacheCheckpoints, mode: 'model-template' as const }
+                      setKvCacheCheckpoints(o)
+                      try { await window.api.setKvCacheCheckpoints(o) } catch {}
+                    }}
+                  >
+                    Model-Template
+                  </button>
+                </div>
+                <div className="form-hint" style={{ marginTop: 6 }}>
+                  {kvCacheCheckpoints.mode === 'model'
+                    ? 'Checkpoint per model is recommended if you use all models for general purposes.'
+                    : 'Checkpoint per model-template is recommended if you use templates for different purposes, e.g. for specialized agents and multi-agent setups on different ports.'}
+                </div>
+              </div>
+
+              {/* Checkpoint folders */}
+              <div style={{ width: '100%' }}>
+                <div className="settings-row-label">Checkpoint Folders</div>
+                <div className="settings-row-sub" style={{ marginBottom: 8 }}>
+                  By default checkpoints are stored inside the app's own folder. Add a folder on a bigger
+                  drive and star it to store checkpoints there instead.
+                </div>
+                <ExternalFolderList
+                  folders={kvCacheCheckpoints.externalFolders}
+                  mainFolder={kvCacheCheckpoints.mainFolder}
+                  onAdd={async () => {
+                    const res = await window.api.addExternalCheckpointFolder()
+                    if (res.success && res.folders) setKvCacheCheckpoints({ ...kvCacheCheckpoints, externalFolders: res.folders })
+                    return res
+                  }}
+                  onRemove={async (folder) => {
+                    const res = await window.api.removeExternalCheckpointFolder(folder)
+                    setKvCacheCheckpoints({ ...kvCacheCheckpoints, externalFolders: res.folders, mainFolder: res.folders.includes(kvCacheCheckpoints.mainFolder || '') ? kvCacheCheckpoints.mainFolder : null })
+                    return res
+                  }}
+                  onSetMain={async (folder) => {
+                    const res = await window.api.setMainCheckpointFolder(folder)
+                    setKvCacheCheckpoints({ ...kvCacheCheckpoints, mainFolder: res.mainFolder })
+                    return res
+                  }}
+                  addLabel="Add Checkpoint Folder"
+                  emptyText="No external checkpoint folders configured. The default app folder is used."
+                />
+              </div>
+
+              {/* Redundant checkpoints */}
+              {redundantCheckpoints.length > 0 && (
+                <div style={{ width: '100%' }}>
+                  <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', width: '100%' }}>
+                    <div>
+                      <div className="settings-row-label" style={{ color: '#d99e00' }}>
+                        <AlertCircle size={14} style={{ verticalAlign: -2, marginRight: 4 }} />
+                        Redundant Checkpoints detected. Delete?
+                      </div>
+                      <div className="settings-row-sub">
+                        {redundantCheckpoints.length} checkpoint{redundantCheckpoints.length === 1 ? '' : 's'} no longer needed
+                        (leftover from a mode switch, a deleted Template, or a Template whose model changed).
+                      </div>
+                    </div>
+                    <button
+                      className="btn btn-secondary btn-sm"
+                      disabled={deletingCheckpoints}
+                      onClick={async () => {
+                        setDeletingCheckpoints(true)
+                        try {
+                          await window.api.deleteRedundantCheckpoints(redundantCheckpoints.map(c => c.file))
+                          await refreshRedundantCheckpoints()
+                        } finally {
+                          setDeletingCheckpoints(false)
+                        }
+                      }}
+                    >
+                      {deletingCheckpoints ? <Loader2 size={13} className="spin" /> : <Trash size={13} />} Confirm
+                    </button>
+                  </div>
+                  <div style={{ marginTop: 8, display: 'flex', flexDirection: 'column', gap: 4 }}>
+                    {redundantCheckpoints.map(c => (
+                      <div key={c.file} className="form-hint" style={{ display: 'flex', justifyContent: 'space-between' }}>
+                        <span>{c.modelName}{c.mode === 'model-template' ? ` — ${c.templateName}` : ''}</span>
+                        <span style={{ opacity: 0.7 }}>{c.reason}</span>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
+
+              {/* Auto-delete redundant */}
+              <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', width: '100%' }}>
+                <div>
+                  <div className="settings-row-label">Automatically delete redundant checkpoints</div>
+                  <div className="settings-row-sub">Skip the confirmation above and delete redundant checkpoints as soon as they're detected.</div>
+                </div>
+                <div className="toggle-wrap">
+                  <label className="toggle">
+                    <input type="checkbox" checked={kvCacheCheckpoints.autoDeleteRedundant} onChange={async (e) => {
+                      const o = { ...kvCacheCheckpoints, autoDeleteRedundant: e.target.checked }
+                      setKvCacheCheckpoints(o)
+                      try { await window.api.setKvCacheCheckpoints(o) } catch {}
+                      if (e.target.checked && redundantCheckpoints.length > 0) {
+                        try {
+                          await window.api.deleteRedundantCheckpoints(redundantCheckpoints.map(c => c.file))
+                          await refreshRedundantCheckpoints()
+                        } catch {}
+                      }
+                    }} />
+                    <span className="toggle-track"></span><span className="toggle-thumb"></span>
+                  </label>
+                </div>
+              </div>
+            </>
+          )}
         </div>
       </div>
 

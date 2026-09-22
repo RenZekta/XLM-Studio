@@ -1620,7 +1620,7 @@ export default function CmdParamsEditor({ templateId, args, onChange, modelPathF
           )}
           {!isHybrid && cmd.type === 'select' && (
             <select className="cmd-select" value={val} onChange={(e) => handleUpdate(cmd.arg, e.target.value)} disabled={disabled}>
-              {!cmd.requireValue && <option value="">Default</option>}
+              {!cmd.requireValue && <option value="">{cmd.emptyLabel || 'Default'}</option>}
               {cmd.options?.map(opt => <option key={opt} value={opt}>{opt}</option>)}
             </select>
           )}
@@ -2067,6 +2067,39 @@ export default function CmdParamsEditor({ templateId, args, onChange, modelPathF
     </div>
   )
 
+  // ----- Automatic Checkpoint Saving block -----
+  // Per-preset override for the global KV Cache Checkpoints setting
+  // (Settings → KV Cache Checkpoints). Off by default -- this preset follows
+  // whatever the global setting says. Turning it ON here skips both the
+  // save-on-stop and restore-on-start checkpoint calls for this preset only,
+  // regardless of the global toggle -- for presets where a stale/corrupt
+  // checkpoint is worse than no checkpoint (e.g. one hit repeatedly by a
+  // benchmark or agent loop), without having to turn checkpoints off
+  // globally for every other preset.
+  const disableAutoCheckpoint = args['__disableAutoCheckpoint'] === true
+  const renderAutoCheckpointBlock = () => (
+    <div className="spec-widget">
+      <div className="mmproj-widget-title"><Gauge size={15} /> Automatic Checkpoint Saving</div>
+      <div className="mmproj-widget-arg">Per-preset override control · --slot-save-path</div>
+      <div className="mmproj-widget-row">
+        <span className="mmproj-widget-label">Disable Automatic Checkpoint Saving</span>
+        <div className="toggle-wrap">
+          <label className="toggle" style={disabled ? { opacity: 0.45, cursor: 'not-allowed' } : {}}>
+            <input type="checkbox" checked={disableAutoCheckpoint} onChange={(e) => {
+              commit({ ...args, '__disableAutoCheckpoint': e.target.checked })
+            }} disabled={disabled} />
+            <span className="toggle-track"></span><span className="toggle-thumb"></span>
+          </label>
+        </div>
+      </div>
+      {disableAutoCheckpoint && (
+        <div style={{ fontSize: 11, color: 'var(--text-muted)', paddingLeft: 4 }}>
+          When ON, this preset never saves or restores a KV cache checkpoint, even while KV Cache Checkpoints is on globally in Settings.
+        </div>
+      )}
+    </div>
+  )
+
   // ----- Context block: Ignore-Override + AutoFill + Memory Overhead -----
   // (autoFillResult + its effect are computed in the component body above/below)
   const renderContextBlock = () => {
@@ -2461,6 +2494,7 @@ export default function CmdParamsEditor({ templateId, args, onChange, modelPathF
       {renderMemoryEngineBlock()}
       {renderContextBlock()}
       {renderBaseUrlOverrideBlock()}
+      {renderAutoCheckpointBlock()}
       <SamplingPresets
         onApply={(values) => {
           const newArgs = { ...args }

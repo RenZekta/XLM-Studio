@@ -14,7 +14,7 @@ import net from 'net'
 import type {
   ModelGroup, ModelEntry, MmprojFile, SpecDecodeSidecarFile, BackendVersion,
   CommandsSchema, TrackedBackend, TrackedBackendRelease,
-  ThemePref, ReleaseInfo, BaseUrlOverride, McpSettings
+  ThemePref, ReleaseInfo, BaseUrlOverride, McpSettings, KvCacheCheckpointSettings
 } from '../shared/types'
 import { MCP_TOOL_IDS } from '../shared/types'
 import { extractBackendTypeFromAssetName } from '../shared/backendType'
@@ -27,6 +27,13 @@ const APP_ROOT = app.isPackaged ? join(app.getPath('userData')) : join(process.c
 const MODELS_DIR    = join(APP_ROOT, 'models')
 const TEMPLATES_DIR = join(APP_ROOT, 'templates')
 const BACKEND_DIR   = join(APP_ROOT, 'backend')
+const CHECKPOINTS_DIR = join(APP_ROOT, 'KV-Checkpoints')
+// The index lives next to settings.json rather than inside CHECKPOINTS_DIR
+// itself -- the checkpoint FILES can live in an external folder the user
+// picks (see resolveCheckpointFolder), but the metadata that makes a .bin
+// file mean anything (which model/Template it belongs to, its saved token
+// count) needs one stable location that survives that folder changing.
+const CHECKPOINTS_INDEX_PATH = join(APP_ROOT, 'kv-checkpoints-index.json')
 // Sentinel file written into every backend "type" folder (vulkan, cuda,
 // rocm, ...) at extraction time -- see smartExtractBackend / scanBackendRoot
 // for why this disambiguation can't be done reliably by structure alone.
@@ -46,7 +53,7 @@ const METADATA_CACHE_PATH = join(APP_ROOT, 'metadata-cache.json')
 // read below will treat mismatched/missing-version entries as stale and
 // transparently re-extract instead of serving the incomplete old object.
 const METADATA_SCHEMA_VERSION = 5
-for (const dir of [MODELS_DIR, TEMPLATES_DIR, BACKEND_DIR]) {
+for (const dir of [MODELS_DIR, TEMPLATES_DIR, BACKEND_DIR, CHECKPOINTS_DIR]) {
   if (!existsSync(dir)) mkdirSync(dir, { recursive: true })
 }
 
@@ -70,6 +77,35 @@ function saveMetadataCache(): void {
   try { writeFileSync(METADATA_CACHE_PATH, JSON.stringify(metadataCache, null, 2)) } catch {}
 }
 loadMetadataCache()
+
+// --------------------------------------------------------------------------
+// KV Cache Checkpoints index (load/save + in-memory mirror)
+// --------------------------------------------------------------------------
+// One entry per saved slot file, keyed by its absolute path. `mode` records
+// which naming scheme the file was saved under (independent of the current
+// setting, since the user can switch modes after checkpoints already
+// exist -- see computeRedundantCheckpoints).
+interface CheckpointIndexEntry {
+  tokens: number | null
+  modelPath: string
+  templateId: string
+  templateName: string
+  mode: 'model' | 'model-template'
+  savedAt: number
+}
+let checkpointIndex: Record<string, CheckpointIndexEntry> = {}
+function loadCheckpointIndex(): void {
+  try {
+    if (existsSync(CHECKPOINTS_INDEX_PATH)) {
+      checkpointIndex = JSON.parse(readFileSync(CHECKPOINTS_INDEX_PATH, 'utf-8'))
+      if (!checkpointIndex || typeof checkpointIndex !== 'object' || Array.isArray(checkpointIndex)) checkpointIndex = {}
+    }
+  } catch { checkpointIndex = {} }
+}
+function saveCheckpointIndex(): void {
+  try { writeFileSync(CHECKPOINTS_INDEX_PATH, JSON.stringify(checkpointIndex, null, 2)) } catch {}
+}
+loadCheckpointIndex()
 
 // --------------------------------------------------------------------------
 // Tracked backends — built-in defaults
@@ -156,6 +192,7 @@ interface AppSettings {
   globalBackend?: { backendKey: string; backendVersion: string; backendType?: string | null } | null
   launchOnStartup?: boolean
   autostartMainTemplates?: boolean
+  kvCacheCheckpoints?: KvCacheCheckpointSettings
 }
 
 // Default Base URL Override: enabled by default, port 1234, no LAN, no API key.
@@ -204,6 +241,30 @@ function migrateBaseUrlOverride(raw: any): BaseUrlOverride {
   }
 }
 
+// Off by default -- automatic checkpoint save/restore currently corrupts
+// or fails against known llama-server versions (see the kv-checkpoints
+// restore/save error logging above), so a fresh install shouldn't silently
+// depend on it until that's sorted out. Existing users who already
+// enabled it keep their choice via migrateKvCacheCheckpoints's `??`.
+const DEFAULT_KV_CACHE_CHECKPOINTS: KvCacheCheckpointSettings = {
+  enabled: false,
+  mode: 'model',
+  autoDeleteRedundant: false,
+  externalFolders: [],
+  mainFolder: null
+}
+
+// Migrate a (possibly missing/partial) kvCacheCheckpoints settings blob.
+function migrateKvCacheCheckpoints(raw: any): KvCacheCheckpointSettings {
+  return {
+    enabled: raw?.enabled ?? DEFAULT_KV_CACHE_CHECKPOINTS.enabled,
+    mode: raw?.mode === 'model-template' ? 'model-template' : 'model',
+    autoDeleteRedundant: !!raw?.autoDeleteRedundant,
+    externalFolders: Array.isArray(raw?.externalFolders) ? raw.externalFolders : [],
+    mainFolder: typeof raw?.mainFolder === 'string' ? raw.mainFolder : null
+  }
+}
+
 const DEFAULT_SETTINGS: AppSettings = {
   externalModelFolders: [],
   externalBackendFolders: [],
@@ -226,7 +287,8 @@ const DEFAULT_SETTINGS: AppSettings = {
     maxBenchmarkHistory: 5
   },
   launchOnStartup: false,
-  autostartMainTemplates: false
+  autostartMainTemplates: false,
+  kvCacheCheckpoints: { ...DEFAULT_KV_CACHE_CHECKPOINTS }
 }
 
 // Merge a (possibly missing/partial/legacy) mcp settings blob with defaults.
@@ -315,7 +377,8 @@ async function loadSettings(): Promise<AppSettings> {
         : null,
       mcp: migrateMcpSettings(data.mcp),
       launchOnStartup: !!data.launchOnStartup,
-      autostartMainTemplates: !!data.autostartMainTemplates
+      autostartMainTemplates: !!data.autostartMainTemplates,
+      kvCacheCheckpoints: migrateKvCacheCheckpoints(data.kvCacheCheckpoints)
     }
   } catch {
     return { ...DEFAULT_SETTINGS }
@@ -353,6 +416,17 @@ async function resolveMainBackendFolder(): Promise<string> {
   if (s.mainBackendFolder && existsSync(s.mainBackendFolder)) return s.mainBackendFolder
   return BACKEND_DIR
 }
+// Resolve the effective checkpoint folder (starred external folder, else the
+// default CHECKPOINTS_DIR), creating it on first use the same way the
+// default model/backend/template folders are ensured at startup -- an
+// external folder the user picked is assumed to already exist.
+async function resolveCheckpointFolder(): Promise<string> {
+  const s = await loadSettings()
+  const mainFolder = s.kvCacheCheckpoints?.mainFolder
+  if (mainFolder && existsSync(mainFolder)) return mainFolder
+  if (!existsSync(CHECKPOINTS_DIR)) mkdirSync(CHECKPOINTS_DIR, { recursive: true })
+  return CHECKPOINTS_DIR
+}
 
 // All backend roots to scan: default BACKEND_DIR + external backend folders.
 async function backendRoots(): Promise<{ dir: string; external: boolean }[]> {
@@ -364,7 +438,7 @@ async function backendRoots(): Promise<{ dir: string; external: boolean }[]> {
   return roots
 }
 
-const runningProcesses = new Map<string, { proc: ChildProcess; port: number }>
+const runningProcesses = new Map<string, { proc: ChildProcess; port: number; modelPath?: string; templateName?: string; skipCheckpoint?: boolean }>
 let sharedChatWindow: BrowserWindow | null = null
 
 // Per-model flags so we only emit each "important" app-log event once per run.
@@ -1194,6 +1268,249 @@ function fetchJson(url: string): Promise<unknown> {
     }).on('error', reject)
   })
 }
+
+// --------------------------------------------------------------------------
+// KV Cache Checkpoints -- naming, save/restore over the llama-server slot
+// API, and the redundant-checkpoint scan.
+// --------------------------------------------------------------------------
+
+// Replace characters that are illegal (or awkward) in a filename on Windows
+// or POSIX so an arbitrary model/Template name can never produce a path
+// llama-server's --slot-save-path filename can't write to.
+function sanitizeCheckpointNamePart(s: string): string {
+  return s.replace(/[/\\:*?"<>|\x00-\x1f]/g, '_').replace(/\s+/g, ' ').trim().slice(0, 100) || 'unnamed'
+}
+
+// POST a JSON body to a local llama-server instance and parse the JSON
+// response. Slot save/restore are single request/response calls (no SSE),
+// unlike the streaming chat completion used by the benchmark tool.
+function postJsonLocal(port: number, path: string, body: unknown, timeoutMs = 8000): Promise<any> {
+  return new Promise((resolvePromise, reject) => {
+    const payload = JSON.stringify(body)
+    const req = http.request({
+      hostname: '127.0.0.1', port, path, method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(payload) },
+      timeout: timeoutMs
+    }, (res) => {
+      let data = ''
+      res.on('data', (c) => (data += c))
+      res.on('end', () => { try { resolvePromise(JSON.parse(data)) } catch (e) { reject(e) } })
+    })
+    req.on('error', reject)
+    req.on('timeout', () => { req.destroy(); reject(new Error('Request timed out')) })
+    req.write(payload)
+    req.end()
+  })
+}
+
+// Extract the --model path out of a launch-args array the same way
+// runModelImpl already pulls --port/--ctx-size out of it (index-based, since
+// these are plain CLI args, not a structured object at this point).
+function extractArgValue(args: string[], flag: string, shortFlag?: string): string | null {
+  const idx = args.indexOf(flag)
+  if (idx !== -1 && idx + 1 < args.length) return args[idx + 1]
+  if (shortFlag) {
+    const sIdx = args.indexOf(shortFlag)
+    if (sIdx !== -1 && sIdx + 1 < args.length) return args[sIdx + 1]
+  }
+  return null
+}
+
+function checkpointFileName(modelPath: string, mode: 'model' | 'model-template', templateName: string): string {
+  const modelBase = sanitizeCheckpointNamePart(basename(modelPath, extname(modelPath)))
+  if (mode === 'model') return `${modelBase}.bin`
+  return `${modelBase}-${sanitizeCheckpointNamePart(templateName)}.bin`
+}
+
+// Save the currently running slot's KV cache to disk and record its token
+// count in the index. Never throws -- a failed save (backend without
+// --slot-save-path support, disk full, server already gone) is logged and
+// otherwise ignored, since it must never block Stop.
+async function saveSlotCheckpoint(opts: {
+  port: number; modelPath: string; templateId: string; templateName: string
+}): Promise<void> {
+  try {
+    const settings = await loadSettings()
+    const cfg = settings.kvCacheCheckpoints
+    if (!cfg?.enabled || !opts.modelPath) return
+    const dir = await resolveCheckpointFolder()
+    const filename = checkpointFileName(opts.modelPath, cfg.mode, opts.templateName)
+    const filePath = join(dir, filename)
+    const res = await postJsonLocal(opts.port, '/slots/0?action=save', { filename })
+    // llama.cpp's save response has reported the saved token count under a
+    // couple of different key names across versions -- try each rather than
+    // pinning to one.
+    const tokens = typeof res?.n_saved === 'number' ? res.n_saved
+      : typeof res?.tokens_saved === 'number' ? res.tokens_saved
+      : typeof res?.n_tokens === 'number' ? res.n_tokens
+      : null
+    checkpointIndex[filePath] = {
+      tokens, modelPath: opts.modelPath, templateId: opts.templateId,
+      templateName: opts.templateName, mode: cfg.mode, savedAt: Date.now()
+    }
+    saveCheckpointIndex()
+    const saveMs = typeof res?.timings?.save_ms === 'number' ? res.timings.save_ms : null
+    emitAppLog(opts.templateId, opts.templateName, `💾 KV cache checkpoint saved — ${tokens != null ? `${tokens} tokens` : filename}${saveMs != null ? ` (${saveMs.toFixed(1)}ms)` : ''}`)
+  } catch (err) {
+    console.error('[kv-checkpoints] save failed:', err)
+  }
+}
+
+// Look up this Template's checkpoint under the CURRENT mode; if that's
+// missing, fall back to the other mode's file for the same model (renaming
+// it into the current mode's slot on disk and in the index so it isn't
+// looked up as a stray leftover next time -- see the plan's rules 1/3).
+function findCheckpointForTemplate(dir: string, modelPath: string, mode: 'model' | 'model-template', templateName: string): string | null {
+  const primary = join(dir, checkpointFileName(modelPath, mode, templateName))
+  if (existsSync(primary)) return primary
+  const otherMode = mode === 'model' ? 'model-template' : 'model'
+  const fallback = join(dir, checkpointFileName(modelPath, otherMode, templateName))
+  if (!existsSync(fallback)) return null
+  try {
+    renameSync(fallback, primary)
+    const entry = checkpointIndex[fallback]
+    delete checkpointIndex[fallback]
+    checkpointIndex[primary] = entry
+      ? { ...entry, mode }
+      : { tokens: null, modelPath, templateId: '', templateName, mode, savedAt: Date.now() }
+    saveCheckpointIndex()
+  } catch (err) {
+    console.error('[kv-checkpoints] fallback rename failed:', err)
+    return fallback
+  }
+  return primary
+}
+
+// Restore a saved slot into the freshly-started server, after checking the
+// saved token count against this launch's actual context size (the
+// over-context guard -- restoring a state larger than the context would
+// corrupt llama-server's buffer). ctxSize of 0 means native/unbounded, so
+// the guard never applies. Never throws.
+async function restoreSlotCheckpoint(opts: {
+  port: number; modelPath: string; templateId: string; templateName: string; ctxSize: number
+}): Promise<void> {
+  try {
+    const settings = await loadSettings()
+    const cfg = settings.kvCacheCheckpoints
+    if (!cfg?.enabled || !opts.modelPath) return
+    const dir = await resolveCheckpointFolder()
+    const filePath = findCheckpointForTemplate(dir, opts.modelPath, cfg.mode, opts.templateName)
+    if (!filePath) return
+    const entry = checkpointIndex[filePath]
+    if (entry?.tokens != null && opts.ctxSize > 0 && entry.tokens > opts.ctxSize) {
+      try { unlinkSync(filePath) } catch {}
+      delete checkpointIndex[filePath]
+      saveCheckpointIndex()
+      return
+    }
+    const res = await postJsonLocal(opts.port, '/slots/0?action=restore', { filename: basename(filePath) })
+    // Same key-name tolerance as the save path -- llama.cpp has used
+    // different field names for the restored token count across versions.
+    const tokens = typeof res?.n_restored === 'number' ? res.n_restored
+      : typeof res?.tokens_restored === 'number' ? res.tokens_restored
+      : typeof res?.n_tokens === 'number' ? res.n_tokens
+      : null
+    const restoreMs = typeof res?.timings?.restore_ms === 'number' ? res.timings.restore_ms : null
+    emitAppLog(opts.templateId, opts.templateName, `⏪ KV cache checkpoint restored — ${tokens != null ? `${tokens} tokens` : basename(filePath)}${restoreMs != null ? ` (${restoreMs.toFixed(1)}ms)` : ''}`)
+  } catch (err) {
+    console.error('[kv-checkpoints] restore failed:', err)
+  }
+}
+
+// Poll this Template's own serverReadyFlags entry (set by runModelImpl's
+// stdout listener) until the server has actually announced it's listening,
+// then restore. Runs detached from runModelImpl's return so a checkpoint
+// restore never delays the Start response itself; capped so a Template that
+// never becomes ready (crashes, hangs on load) doesn't poll forever.
+function restoreCheckpointWhenReady(opts: {
+  templateId: string; port: number; modelPath: string; templateName: string; ctxSize: number
+}): void {
+  const startedAt = Date.now()
+  const timeoutMs = 10 * 60 * 1000
+  const poll = () => {
+    if (serverReadyFlags.get(opts.templateId)) {
+      restoreSlotCheckpoint({ port: opts.port, modelPath: opts.modelPath, templateId: opts.templateId, templateName: opts.templateName, ctxSize: opts.ctxSize })
+      return
+    }
+    if (!runningProcesses.has(opts.templateId) || Date.now() - startedAt > timeoutMs) return
+    setTimeout(poll, 300)
+  }
+  poll()
+}
+
+// Delete every index entry (any mode) whose model file is no longer on
+// disk, plus the .bin file itself. Unconditional -- there is never a reason
+// to keep a checkpoint for a model that doesn't exist, so this runs on
+// every model list refresh and on model deletion, not gated behind the
+// redundant-checkpoints confirm/auto-delete setting.
+function pruneCheckpointsForMissingModels(detectedModelPaths: Set<string>): void {
+  let changed = false
+  for (const [filePath, entry] of Object.entries(checkpointIndex)) {
+    if (detectedModelPaths.has(entry.modelPath)) continue
+    try { if (existsSync(filePath)) unlinkSync(filePath) } catch {}
+    delete checkpointIndex[filePath]
+    changed = true
+  }
+  if (changed) saveCheckpointIndex()
+}
+
+// Compute the set of checkpoints that are redundant under the CURRENT mode
+// and the CURRENT set of Templates -- this single scan covers every case
+// from the original plan: a leftover of the other naming mode once its
+// replacement exists, a Template that was deleted, and a Template whose
+// model was swapped out from under it (its old model-template checkpoint no
+// longer matches what the Template would actually restore). Pure/read-only;
+// deletion happens separately once the user (or the auto-delete setting)
+// confirms.
+function computeRedundantCheckpoints(mode: 'model' | 'model-template', templates: Record<string, any>[]): { file: string; entry: CheckpointIndexEntry; reason: string }[] {
+  const templatesById = new Map(templates.map(t => [t.id, t]))
+  const modelPathsWithModelEntry = new Set(
+    Object.values(checkpointIndex).filter(e => e.mode === 'model').map(e => e.modelPath)
+  )
+  const modelTemplateCoverage = new Map<string, Set<string>>()
+  for (const e of Object.values(checkpointIndex)) {
+    if (e.mode !== 'model-template') continue
+    if (!modelTemplateCoverage.has(e.modelPath)) modelTemplateCoverage.set(e.modelPath, new Set())
+    modelTemplateCoverage.get(e.modelPath)!.add(e.templateId)
+  }
+  const templatesByModelPath = new Map<string, Set<string>>()
+  for (const t of templates) {
+    if (!t.modelPath) continue
+    if (!templatesByModelPath.has(t.modelPath)) templatesByModelPath.set(t.modelPath, new Set())
+    templatesByModelPath.get(t.modelPath)!.add(t.id)
+  }
+
+  const redundant: { file: string; entry: CheckpointIndexEntry; reason: string }[] = []
+  for (const [file, entry] of Object.entries(checkpointIndex)) {
+    if (entry.mode === 'model-template') {
+      const template = templatesById.get(entry.templateId)
+      if (entry.templateId && !template) {
+        redundant.push({ file, entry, reason: 'Template no longer exists' })
+        continue
+      }
+      if (template && template.modelPath && template.modelPath !== entry.modelPath) {
+        redundant.push({ file, entry, reason: "Template's model has changed" })
+        continue
+      }
+      if (mode === 'model' && modelPathsWithModelEntry.has(entry.modelPath)) {
+        redundant.push({ file, entry, reason: 'Superseded by a per-model checkpoint' })
+        continue
+      }
+    } else {
+      if (mode === 'model-template') {
+        const templatesForModel = templatesByModelPath.get(entry.modelPath)
+        const covered = modelTemplateCoverage.get(entry.modelPath)
+        const allCovered = !!templatesForModel && templatesForModel.size > 0 &&
+          [...templatesForModel].every(id => covered?.has(id))
+        if (allCovered) {
+          redundant.push({ file, entry, reason: 'Superseded by per-Template checkpoints' })
+        }
+      }
+    }
+  }
+  return redundant
+}
+
 function startDownload(
   url: string,
   destPath: string,
@@ -1565,6 +1882,10 @@ export function registerIpcHandlers(): void {
       }
     }
     if (pruned) saveMetadataCache()
+    // Delete any KV cache checkpoint whose model is no longer detected --
+    // see pruneCheckpointsForMissingModels: unconditional, not gated behind
+    // the redundant-checkpoints confirm/auto-delete setting.
+    pruneCheckpointsForMissingModels(detectedPaths)
     return groups
   }
   ipcMain.handle('list-models', async () => listModelsImpl())
@@ -1683,6 +2004,11 @@ export function registerIpcHandlers(): void {
         delete metadataCache[filePath]
         saveMetadataCache()
       }
+      // Same reasoning as the list-models prune: a checkpoint for a model
+      // that's just been deleted has nothing left to restore into.
+      pruneCheckpointsForMissingModels(new Set(
+        (await listModelsImpl()).flatMap(g => g.models.map(m => m.path)).filter(p => p !== filePath)
+      ))
       const dir = dirname(filePath)
       // Remove the now-empty model folder (but never the storage roots themselves).
       const isRoot = [MODELS_DIR, ...s.externalModelFolders].some(b => resolve(dir) === resolve(b))
@@ -1931,6 +2257,84 @@ export function registerIpcHandlers(): void {
     if (s.mainBackendFolder === folder) s.mainBackendFolder = null
     await saveSettings(s)
     return { success: true, folders: sortExternalFolders(s.externalBackendFolders, s.mainBackendFolder) }
+  })
+
+  // ----- KV Cache Checkpoint folders (same star/main mechanics) -----
+  ipcMain.handle('list-external-checkpoint-folders', async () => {
+    const s = await loadSettings()
+    const cfg = s.kvCacheCheckpoints || DEFAULT_KV_CACHE_CHECKPOINTS
+    return sortExternalFolders(cfg.externalFolders, cfg.mainFolder)
+  })
+  ipcMain.handle('get-main-checkpoint-folder', async () => {
+    const folder = await resolveCheckpointFolder()
+    return { folder, isDefault: folder === CHECKPOINTS_DIR }
+  })
+  ipcMain.handle('set-main-checkpoint-folder', async (_e, folder: string) => {
+    const s = await loadSettings()
+    const cfg = s.kvCacheCheckpoints || { ...DEFAULT_KV_CACHE_CHECKPOINTS }
+    cfg.mainFolder = cfg.externalFolders.includes(folder) ? folder : null
+    s.kvCacheCheckpoints = cfg
+    await saveSettings(s)
+    return { success: true, mainFolder: cfg.mainFolder }
+  })
+  ipcMain.handle('add-external-checkpoint-folder', async () => {
+    const r = await dialog.showOpenDialog({ title: 'Add Checkpoint Folder', properties: ['openDirectory'] })
+    if (r.canceled || !r.filePaths.length) return { success: false }
+    const folder = r.filePaths[0]
+    const s = await loadSettings()
+    const cfg = s.kvCacheCheckpoints || { ...DEFAULT_KV_CACHE_CHECKPOINTS }
+    if (!cfg.externalFolders.includes(folder)) cfg.externalFolders.push(folder)
+    s.kvCacheCheckpoints = cfg
+    await saveSettings(s)
+    return { success: true, folders: sortExternalFolders(cfg.externalFolders, cfg.mainFolder) }
+  })
+  ipcMain.handle('remove-external-checkpoint-folder', async (_e, folder: string) => {
+    const s = await loadSettings()
+    const cfg = s.kvCacheCheckpoints || { ...DEFAULT_KV_CACHE_CHECKPOINTS }
+    cfg.externalFolders = cfg.externalFolders.filter(f => f !== folder)
+    if (cfg.mainFolder === folder) cfg.mainFolder = null
+    s.kvCacheCheckpoints = cfg
+    await saveSettings(s)
+    return { success: true, folders: sortExternalFolders(cfg.externalFolders, cfg.mainFolder) }
+  })
+
+  // ----- KV Cache Checkpoint settings + redundant-checkpoint scan -----
+  ipcMain.handle('get-kv-cache-checkpoints', async () => {
+    const s = await loadSettings()
+    return s.kvCacheCheckpoints || { ...DEFAULT_KV_CACHE_CHECKPOINTS }
+  })
+  ipcMain.handle('set-kv-cache-checkpoints', async (_e, opts: Partial<KvCacheCheckpointSettings>) => {
+    const s = await loadSettings()
+    s.kvCacheCheckpoints = migrateKvCacheCheckpoints({ ...(s.kvCacheCheckpoints || DEFAULT_KV_CACHE_CHECKPOINTS), ...opts })
+    await saveSettings(s)
+    return { success: true }
+  })
+  // Recomputed fresh from the current mode + Templates + index every call --
+  // see computeRedundantCheckpoints. The renderer re-runs this on mount, on
+  // a mode change, and on 'templates-changed' (already broadcast by every
+  // template save/delete), which is what makes the model-switched-under-a-
+  // Template and Template-deleted cases surface here without any separate
+  // event wiring.
+  ipcMain.handle('scan-redundant-checkpoints', async () => {
+    const s = await loadSettings()
+    const mode = s.kvCacheCheckpoints?.mode || 'model'
+    const templates = listTemplatesImpl()
+    const redundant = computeRedundantCheckpoints(mode, templates)
+    return redundant.map(r => ({
+      file: r.file, reason: r.reason, tokens: r.entry.tokens,
+      modelName: basename(r.entry.modelPath), templateName: r.entry.templateName, mode: r.entry.mode
+    }))
+  })
+  ipcMain.handle('delete-redundant-checkpoints', async (_e, files: string[]) => {
+    let deleted = 0
+    for (const f of files) {
+      if (!checkpointIndex[f]) continue
+      try { if (existsSync(f)) unlinkSync(f) } catch {}
+      delete checkpointIndex[f]
+      deleted++
+    }
+    if (deleted > 0) saveCheckpointIndex()
+    return { success: true, deleted }
   })
 
   // ----- Backends: tracked repos (Backends Tracker) -----
@@ -2199,7 +2603,7 @@ export function registerIpcHandlers(): void {
   })
 
   // ----- Run model -----
-  async function runModelImpl(opts: { id: string; name: string; backendPath: string; exe: string; args: string[]; openBrowser: boolean; port: number; ignoreBaseUrlOverride?: boolean }) {
+  async function runModelImpl(opts: { id: string; name: string; backendPath: string; exe: string; args: string[]; openBrowser: boolean; port: number; ignoreBaseUrlOverride?: boolean; skipCheckpoint?: boolean }) {
     if (runningProcesses.has(opts.id)) return { success: false, error: 'Already running' }
     // If base URL override is enabled, use the override port, ignoring
     // the template's original Server Port completely. A template with its
@@ -2263,6 +2667,19 @@ export function registerIpcHandlers(): void {
     // args. Doesn't change behavior other than exposing the /metrics
     // endpoint — safe to always add.
     if (!finalArgs.includes('--metrics')) finalArgs.push('--metrics')
+    // Force-enable --slot-save-path when KV Cache Checkpoints is on, the same
+    // unconditional way as --metrics above, so the /slots save/restore
+    // endpoints exist regardless of the template's own args. Skipped for
+    // benchmark-driven starts (skipCheckpoint) so a benchmark's fresh-slot
+    // measurement is never contaminated by a leftover checkpoint.
+    let kvCheckpointsEnabled = false
+    if (!opts.skipCheckpoint) {
+      const kvSettings = await loadSettings()
+      kvCheckpointsEnabled = !!kvSettings.kvCacheCheckpoints?.enabled
+      if (kvCheckpointsEnabled && !finalArgs.includes('--slot-save-path')) {
+        finalArgs.push('--slot-save-path', await resolveCheckpointFolder())
+      }
+    }
     // Apply "Serve on local network" (--host 0.0.0.0) and
     // "API Key" (--api-key <key>) from the Base URL Override settings.
     // Skipped entirely when this template ignores the Base URL Override,
@@ -2405,9 +2822,28 @@ export function registerIpcHandlers(): void {
           if (!win.isDestroyed()) win.webContents.send('model-error', { id: opts.id, error: msg })
         })
       })
-      runningProcesses.set(opts.id, { proc, port: finalPort })
+      runningProcesses.set(opts.id, {
+        proc, port: finalPort,
+        modelPath: extractArgValue(finalArgs, '--model', '-m') || undefined,
+        templateName: opts.name,
+        skipCheckpoint: opts.skipCheckpoint
+      })
       // Begin polling this instance's /metrics endpoint.
       startTracking(opts.id, finalPort, opts.name)
+      // Kick off the KV cache checkpoint restore (if one applies) in the
+      // background -- it waits on serverReadyFlags itself, so it never
+      // delays this function's own return.
+      if (!opts.skipCheckpoint && kvCheckpointsEnabled) {
+        const modelPathForCheckpoint = extractArgValue(finalArgs, '--model', '-m')
+        const ctxRaw = extractArgValue(finalArgs, '--ctx-size', '-c')
+        const ctxSize = ctxRaw !== null ? (parseInt(ctxRaw, 10) || 0) : 0
+        if (modelPathForCheckpoint) {
+          restoreCheckpointWhenReady({
+            templateId: opts.id, port: finalPort, modelPath: modelPathForCheckpoint,
+            templateName: opts.name, ctxSize
+          })
+        }
+      }
       proc.on('exit', () => {
         // Guard against a STALE exit event: rapid stop→start→stop→start
         // cycles (exactly what benchmark/switch-template do, much faster
@@ -2602,13 +3038,24 @@ export function registerIpcHandlers(): void {
       if (!win.isDestroyed()) win.webContents.send('tab-moved-elsewhere', { url })
     })
   })
-  async function stopModelImpl(id: string) {
+  async function stopModelImpl(id: string, opts?: { skipCheckpoint?: boolean }) {
     const entry = runningProcesses.get(id)
     if (!entry) return { success: true, alreadyStopped: true }
     const { proc, port } = entry
     runningProcesses.delete(id)  // remove immediately so a concurrent Start doesn't see "Already running"
     serverReadyFlags.delete(id)
     modelLoadingFlags.delete(id)
+    // Save the KV cache checkpoint before killing the process -- once the
+    // process is gone the slot (and everything in it) is gone with it.
+    // Skipped when this Start never got --slot-save-path in the first place
+    // (entry.skipCheckpoint, or checkpoints were off at launch time) or when
+    // this particular Stop call opts out (benchmark's internal stop/restart
+    // cycle, see toolBenchmark).
+    if (!opts?.skipCheckpoint && !entry.skipCheckpoint && entry.modelPath) {
+      await saveSlotCheckpoint({
+        port, modelPath: entry.modelPath, templateId: id, templateName: entry.templateName || id
+      })
+    }
     // Kill the whole process tree (children included) and wait for the process
     // to actually exit. This fixes the Stop→Start race where the port was still
     // bound when the user clicked Start again right after Stop.
@@ -2618,7 +3065,7 @@ export function registerIpcHandlers(): void {
     await waitForPortFree(port, 8000, 100)
     return { success: true }
   }
-  ipcMain.handle('stop-model', async (_e, id: string) => stopModelImpl(id))
+  ipcMain.handle('stop-model', async (_e, id: string, opts?: { skipCheckpoint?: boolean }) => stopModelImpl(id, opts))
 
   // ----- Backends: tracker (global check for updates across all tracked repos) -----
   let cancelBackendDl: (() => void) | null = null
@@ -2900,7 +3347,9 @@ export function registerIpcHandlers(): void {
     templates: TEMPLATES_DIR,
     backend: BACKEND_DIR,
     mainModelFolder: await resolveMainModelFolder(),
-    mainBackendFolder: await resolveMainBackendFolder()
+    mainBackendFolder: await resolveMainBackendFolder(),
+    checkpoints: CHECKPOINTS_DIR,
+    mainCheckpointFolder: await resolveCheckpointFolder()
   }))
   ipcMain.handle('open-external', (_e, url: string) => {
     if (url.startsWith('https:') || url.startsWith('http:')) shell.openExternal(url)

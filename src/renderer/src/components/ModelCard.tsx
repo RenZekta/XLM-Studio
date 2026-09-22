@@ -95,7 +95,9 @@ export default function ModelCard({ card }: Props) {
       // the main process kills the tree and waits for the port to be released.
       // This is what makes rapid Stop→Start reliable (no more "port in use").
       setCardStatus(card.template.id, 'stopping')
-      const res = await window.api.stopModel(card.template.id)
+      const res = await window.api.stopModel(card.template.id, {
+        skipCheckpoint: card.template.args?.['__disableAutoCheckpoint'] === true
+      })
       if (res.success) setCardStatus(card.template.id, 'idle')
       else { setCardStatus(card.template.id, 'running'); alert(`Failed to stop: ${res.error}`) }
       return
@@ -239,7 +241,8 @@ export default function ModelCard({ card }: Props) {
       args,
       openBrowser,
       port: card.template.serverPort || 8080,
-      ignoreBaseUrlOverride: card.template.args?.['__ignoreBaseUrlOverride'] === true
+      ignoreBaseUrlOverride: card.template.args?.['__ignoreBaseUrlOverride'] === true,
+      skipCheckpoint: card.template.args?.['__disableAutoCheckpoint'] === true
     })
     if (res.success) setCardStatus(card.template.id, 'running', res.pid, res.port)
     else { alert(`Failed to run: ${res.error}`); setCardStatus(card.template.id, 'error') }
