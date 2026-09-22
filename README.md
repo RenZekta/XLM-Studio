@@ -230,7 +230,7 @@ cd (X:\your\chosen\destination)\XLM-Studio && npm install && npm run build && np
 - [ ] Optional **Alternative Backend Integration**: Expand support beyond `llama.cpp` to include:
   - **MLX**: Native backend for Apple Silicon optimized performance.
   - **vLLM / ExLlamaV2**: Support for high-throughput and GPU-optimized engines.
-  - Planned: **PicoLM** support as llama.cpp alternative
+  - Planned: [PicoLM](https://github.com/whoreson/picolm) support as llama.cpp alternative
 
 ## Acknowledgements
 
