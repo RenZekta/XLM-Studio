@@ -152,6 +152,25 @@ input[type="number"] {
   gap: 16px;
   align-items: start;
 }
+/* Drag-reorder (CardsView). The placeholder takes a real grid cell so
+   surrounding cards reflow around it exactly like the dragged card will
+   once dropped -- a transparent, dashed stand-in for the slot it'll land
+   in, rather than just highlighting the nearest card. */
+.card-drop-placeholder {
+  min-height: 96px;
+  border: 2px dashed var(--info-blue);
+  border-radius: var(--radius-lg);
+  background: rgba(59, 130, 246, .08);
+  animation: card-drop-pulse 1.1s ease-in-out infinite;
+  box-sizing: border-box;
+}
+@keyframes card-drop-pulse {
+  0%, 100% { opacity: .5; }
+  50% { opacity: 1; }
+}
+.card-drag-wrap { cursor: grab; }
+.card-drag-source { opacity: .35; }
+.card-drag-source .model-card { cursor: grabbing; }
 .model-card {
   background: var(--surface);
   border: 1.5px solid var(--border);

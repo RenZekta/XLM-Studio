@@ -2448,7 +2448,7 @@ export function registerIpcHandlers(): void {
   }
   function listTemplatesImpl(): Record<string, any>[] {
     if (!existsSync(TEMPLATES_DIR)) return []
-    return readdirSync(TEMPLATES_DIR)
+    const list = readdirSync(TEMPLATES_DIR)
       .filter(f => f.endsWith('.json'))
       .map(f => {
         try {
@@ -2469,8 +2469,44 @@ export function registerIpcHandlers(): void {
         catch { return null }
       })
       .filter(Boolean) as Record<string, any>[]
+    // Every template needs a persisted `order` for drag-reorder to survive a
+    // restart. One predating the field (or freshly imported) is appended
+    // after the current highest order, in this directory listing's own
+    // order, and the assignment is healed back to disk once so re-reading
+    // the same template doesn't reassign it a different slot next time.
+    let nextOrder = list.reduce((max, t) => typeof t.order === 'number' && t.order > max ? t.order : max, -1) + 1
+    for (const t of list) {
+      if (typeof t.order !== 'number') {
+        t.order = nextOrder++
+        try {
+          const { _file, ...rest } = t
+          writeFileSync(join(TEMPLATES_DIR, _file), JSON.stringify(rest, null, 2))
+        } catch {}
+      }
+    }
+    list.sort((a, b) => a.order - b.order)
+    return list
   }
   ipcMain.handle('list-templates', () => listTemplatesImpl())
+  // Persists a full drag-reorder in one pass: `orderedIds` is every
+  // Template's id in its new display order. Assigning fresh sequential
+  // `order` values (rather than diffing against the old ones) keeps the
+  // field dense and avoids the two-templates-tie case a naive swap could
+  // leave behind.
+  function reorderTemplatesImpl(orderedIds: string[]): { success: boolean } {
+    orderedIds.forEach((id, index) => {
+      const fp = join(TEMPLATES_DIR, `${id}.json`)
+      if (!existsSync(fp)) return
+      try {
+        const template = JSON.parse(readFileSync(fp, 'utf-8'))
+        if (template.order === index) return
+        template.order = index
+        writeFileSync(fp, JSON.stringify(template, null, 2))
+      } catch {}
+    })
+    return { success: true }
+  }
+  ipcMain.handle('reorder-templates', (_e, orderedIds: string[]) => reorderTemplatesImpl(orderedIds))
   async function saveTemplateImpl(template: Record<string, unknown>): Promise<{ success: true; id: string }> {
     const id = (template.id as string) || Date.now().toString()
     const fp = join(TEMPLATES_DIR, `${id}.json`)

@@ -61,6 +61,7 @@ const api = {
 
   // ----- Templates -----
   listTemplates: () => ipcRenderer.invoke('list-templates'),
+  reorderTemplates: (orderedIds: string[]) => ipcRenderer.invoke('reorder-templates', orderedIds),
   saveTemplate: (template: object, opts?: { silentSync?: boolean }) => ipcRenderer.invoke('save-template', template, opts),
   deleteTemplate: (id: string) => ipcRenderer.invoke('delete-template', id),
   importTemplate: () => ipcRenderer.invoke('import-template'),

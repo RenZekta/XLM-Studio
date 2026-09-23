@@ -71,6 +71,7 @@ interface LlamaCppApi {
 
   // Templates
   listTemplates: () => Promise<Template[]>
+  reorderTemplates: (orderedIds: string[]) => Promise<{ success: boolean }>
   saveTemplate: (template: object, opts?: { silentSync?: boolean }) => Promise<{ success: boolean; id: string }>
   deleteTemplate: (id: string) => Promise<{ success: boolean }>
   importTemplate: () => Promise<Template | null>

@@ -163,6 +163,10 @@ export interface Template {
   // order the star colors (earliest-starred port gets the first color) --
   // never touched when the Template is saved for any other reason.
   mainStarredAt?: number
+  // Persisted card position in the Templates grid, assigned by drag-reorder.
+  // Lower sorts first. Legacy templates without one are healed in on next
+  // read (see listTemplatesImpl), so this is always present after that.
+  order?: number
   _file?: string
 }
 
