@@ -3523,7 +3523,7 @@ export function registerIpcHandlers(): void {
   // UI can offer manual selection among them — e.g. switching to a lower-
   // tier Draft Model even when a higher-tier method was auto-selected, or
   // choosing between multiple same-tier sidecar files.
-  ipcMain.handle('detect-speculation', async (_e, modelPath: string, hasNativeMtp?: boolean) => {
+  async function detectSpeculationImpl(modelPath: string, hasNativeMtp?: boolean) {
     try {
       if (!modelPath || !existsSync(modelPath)) return { tier: 0, method: 'off' as const, candidates: [] }
 
@@ -3568,7 +3568,8 @@ export function registerIpcHandlers(): void {
     } catch (err) {
       return { tier: 0, method: 'off' as const, candidates: [], error: String(err) }
     }
-  })
+  }
+  ipcMain.handle('detect-speculation', async (_e, modelPath: string, hasNativeMtp?: boolean) => detectSpeculationImpl(modelPath, hasNativeMtp))
 
   // ----- GGUF metadata parser (features 12/13/14/16/29) -----
   // Parses the GGUF binary header to extract block_count, context_length,
@@ -4212,8 +4213,16 @@ export function registerIpcHandlers(): void {
           let totalVRAMMB = Math.round(Number(best.vram) || 0)  // systeminformation reports vram in MB
           let freeVRAMMB = 0
 
-          // --- 3. Linux amdgpu sysfs: accurate free VRAM for AMD ---
-          if (isLinux && vendor === 'AMD') {
+          // --- 3. Linux sysfs: accurate free VRAM for discrete AMD/Intel ---
+          // mem_info_vram_total/mem_info_vram_used is a generic DRM/TTM
+          // sysfs interface, not amdgpu-specific -- Intel's i915/xe driver
+          // exposes the same two files at the same path for discrete Arc
+          // cards. (Intel also has a newer lmem_total_bytes/lmem_avail_bytes
+          // pair, but that's still an unmerged kernel RFC as of mid-2025 --
+          // not reliably present, so it's not used here.) Integrated Intel
+          // GPUs have neither file and fall through to the static estimate
+          // below, same as any other vendor/driver without a live source.
+          if (isLinux && (vendor === 'AMD' || vendor === 'Intel')) {
             try {
               const drmEntries = readdirSync('/sys/class/drm').filter(d => /^card\d+$/.test(d))
               let foundSys = false
@@ -4231,28 +4240,40 @@ export function registerIpcHandlers(): void {
                   }
                 }
               }
-              if (!foundSys) console.log('[VRAM] amdgpu sysfs not found, using systeminformation vram')
+              if (!foundSys) console.log(`[VRAM] ${vendor} mem_info_vram sysfs not found, using systeminformation vram`)
             } catch (e) { console.log('[VRAM] sysfs read error:', String(e)) }
           }
 
-          // --- 4. Windows: live dedicated-VRAM usage via the built-in "GPU
-          // Adapter Memory" performance counter (Windows 10+, vendor-agnostic
-          // — works for AMD/Intel same as NVIDIA, unlike nvidia-smi/amdgpu
+          // --- 4. Windows: live VRAM usage via the built-in "GPU Adapter
+          // Memory" performance counter (Windows 10+, vendor-agnostic —
+          // works for AMD/Intel same as NVIDIA, unlike nvidia-smi/amdgpu
           // sysfs above). This is what actually makes "Use current memory
           // state" reflect real usage on Windows instead of a static number.
+          // Prefers "Total Committed" (dedicated + shared-aperture VidMm
+          // commitment) over "Dedicated Usage" (dedicated aperture only) —
+          // WDDM lets a process commit GPU memory beyond physical VRAM,
+          // backed by shared system memory, so Dedicated Usage alone can
+          // under-count real GPU memory pressure the same way os.freemem()
+          // under-counted RAM pressure (see getSystemRamImpl below). Falls
+          // back to Dedicated Usage where Total Committed isn't published
+          // (older Windows builds/drivers).
           if (isWin && freeVRAMMB === 0 && totalVRAMMB > 0) {
-            try {
+            const queryGpuAdapterCounter = async (counter: string): Promise<number | null> => {
               const psCmd = 'powershell -NoProfile -NonInteractive -Command '
-                + '"(Get-Counter \'\\GPU Adapter Memory(*)\\Dedicated Usage\' -ErrorAction Stop).CounterSamples '
+                + `"(Get-Counter '\\GPU Adapter Memory(*)\\${counter}' -ErrorAction Stop).CounterSamples `
                 + '| Measure-Object -Property CookedValue -Sum | Select-Object -ExpandProperty Sum"'
-              const usedBytesStr = await new Promise<string | null>((resolve) => {
+              const out = await new Promise<string | null>((resolve) => {
                 exec(psCmd, { timeout: 5000 }, (err, stdout) => {
                   if (err) return resolve(null)
                   resolve(stdout.trim())
                 })
               })
-              const usedBytes = usedBytesStr ? Number(usedBytesStr) : NaN
-              if (!isNaN(usedBytes) && usedBytes >= 0) {
+              const n = out ? Number(out) : NaN
+              return (!isNaN(n) && n >= 0) ? n : null
+            }
+            try {
+              const usedBytes = (await queryGpuAdapterCounter('Total Committed')) ?? (await queryGpuAdapterCounter('Dedicated Usage'))
+              if (usedBytes !== null) {
                 const usedMB = Math.round(usedBytes / (1024 * 1024))
                 freeVRAMMB = Math.max(0, totalVRAMMB - usedMB)
               }
@@ -4281,11 +4302,122 @@ export function registerIpcHandlers(): void {
   ipcMain.handle('get-vram-info', async () => getVramInfoImpl())
 
   // ----- System RAM info -----
+  // os.freemem() reports raw physical pages not currently touched by any
+  // process -- it says nothing about memory other processes have already
+  // committed/reserved (e.g. via malloc/VirtualAlloc) but haven't touched
+  // yet. That gap is real capacity risk, not slack: if those processes go
+  // on to touch what they already reserved, the system has to honor it,
+  // and a NEW large allocation (loading a model's weights) that assumed
+  // the gap was free can push total commitment past physical RAM, causing
+  // heavy paging or an outright freeze. Task Manager's own "Committed"
+  // figure (and Linux's Committed_AS) is exactly this: currently-promised
+  // memory system-wide, whether or not it's been touched yet. Available
+  // RAM for a new allocation is therefore total RAM minus that commit
+  // charge, not total minus "currently touched" -- os.freemem() answers a
+  // different, less useful question. See getVramInfoImpl's Windows
+  // "Total Committed" counter above for the identical reasoning applied
+  // to VRAM.
   async function getSystemRamImpl() {
     const os = await import('os')
     const total = os.totalmem()
+    const totalRAMMB = Math.round(total / (1024 * 1024))
+    if (process.platform === 'win32') {
+      // Win32_OperatingSystem.TotalVirtualMemorySize is the system commit
+      // LIMIT (physical RAM + pagefile, in KB); FreeVirtualMemory is how
+      // much of that limit is currently unused. Their difference is the
+      // system commit CHARGE -- what Task Manager's Performance tab calls
+      // "Committed". Subtracting that from physical RAM (not from the
+      // virtual/pagefile-inclusive limit) keeps this conservative: a large
+      // pagefile can leave plenty of *virtual* commit headroom while still
+      // guaranteeing heavy disk paging (i.e. a de facto freeze for a model
+      // load) well before that headroom is exhausted, so headroom that
+      // only exists on paper doesn't get reported as usable.
+      try {
+        const psCmd = 'powershell -NoProfile -NonInteractive -Command '
+          + '"$o = Get-CimInstance Win32_OperatingSystem; \'{0},{1},{2}\' -f $o.TotalVisibleMemorySize,$o.TotalVirtualMemorySize,$o.FreeVirtualMemory"'
+        const out = await new Promise<string | null>((resolve) => {
+          exec(psCmd, { timeout: 5000 }, (err, stdout) => {
+            if (err) return resolve(null)
+            resolve(stdout.trim())
+          })
+        })
+        const parts = (out || '').split(',').map(s => Number(s.trim()))
+        if (parts.length === 3 && parts.every(n => !isNaN(n) && n >= 0)) {
+          const [totalVisibleKB, totalVirtualKB, freeVirtualKB] = parts
+          const commitChargeMB = (totalVirtualKB - freeVirtualKB) / 1024
+          const totalVisibleMB = totalVisibleKB / 1024
+          return { totalRAMMB, freeRAMMB: Math.max(0, Math.round(totalVisibleMB - commitChargeMB)) }
+        }
+      } catch { /* fall through to os.freemem() below */ }
+    } else if (process.platform === 'linux') {
+      // Same reasoning via /proc/meminfo's own commit-charge fields:
+      // CommitLimit (RAM×overcommit_ratio + swap, depending on
+      // vm.overcommit_memory) and Committed_AS (currently promised,
+      // touched or not).
+      try {
+        const meminfo = readFileSync('/proc/meminfo', 'utf-8')
+        const grab = (label: string): number | null => {
+          const m = meminfo.match(new RegExp(`^${label}:\\s+(\\d+)\\s*kB`, 'm'))
+          return m ? Number(m[1]) : null
+        }
+        const commitLimitKB = grab('CommitLimit')
+        const committedAsKB = grab('Committed_AS')
+        if (commitLimitKB !== null && committedAsKB !== null) {
+          const freeCommitMB = (commitLimitKB - committedAsKB) / 1024
+          // Clamp to physical RAM: CommitLimit can exceed it (swap and/or
+          // overcommit_ratio > 100), but nothing can ever be MORE available
+          // than total physical memory.
+          return { totalRAMMB, freeRAMMB: Math.max(0, Math.min(totalRAMMB, Math.round(freeCommitMB))) }
+        }
+      } catch { /* fall through to os.freemem() below */ }
+    } else if (process.platform === 'darwin') {
+      // macOS doesn't have a Windows/Linux-style static commit LIMIT to
+      // measure a charge against -- it manages memory dynamically via
+      // compression instead of pre-committing pages, so there's no exact
+      // equivalent to subtract. os.freemem() there is still a poor proxy
+      // for the same underlying reason as Windows/Linux, though: it counts
+      // only strictly-free pages, while macOS deliberately keeps that
+      // number near zero (idle RAM becomes file cache) and reclaims
+      // inactive/purgeable pages on demand -- so raw free page count reads
+      // as "almost full" on a perfectly healthy system. vm_stat's own
+      // fields let us approximate what Activity Monitor's memory pressure
+      // gauge actually counts as used: anonymous (app-owned) pages, minus
+      // purgeable (reclaimable on demand), plus wired (pinned, can't be
+      // reclaimed) and compressor-occupied (already paid the compression
+      // cost, wouldn't free much back) pages.
+      try {
+        const psCmd = '/usr/bin/vm_stat'
+        const out = await new Promise<string | null>((resolve) => {
+          exec(psCmd, { timeout: 5000 }, (err, stdout) => {
+            if (err) return resolve(null)
+            resolve(stdout)
+          })
+        })
+        if (out) {
+          // vm_stat prints its own page size, which differs by
+          // architecture (4096 on Intel Macs, 16384 on Apple Silicon) --
+          // never assume one.
+          const pageSizeMatch = out.match(/page size of (\d+) bytes/)
+          const pageSize = pageSizeMatch ? Number(pageSizeMatch[1]) : 4096
+          const grab = (label: string): number => {
+            const m = out.match(new RegExp(`${label}:\\s+(\\d+)`))
+            return m ? Number(m[1]) : 0
+          }
+          const usedBytes = (
+            grab('Anonymous pages') - grab('Pages purgeable') + grab('Pages wired down') + grab('Pages occupied by compressor')
+          ) * pageSize
+          if (usedBytes > 0) {
+            return { totalRAMMB, freeRAMMB: Math.max(0, Math.round((total - usedBytes) / (1024 * 1024))) }
+          }
+        }
+      } catch { /* fall through to os.freemem() below */ }
+    }
+    // Either platform's query above failing (older Windows without CIM, a
+    // locked-down PowerShell policy, a /proc without Committed_AS, vm_stat
+    // missing/unparseable): fall back to the plain physical-free reading.
+    // Less accurate under real memory pressure, but always available.
     const free = os.freemem()
-    return { totalRAMMB: Math.round(total / (1024 * 1024)), freeRAMMB: Math.round(free / (1024 * 1024)) }
+    return { totalRAMMB, freeRAMMB: Math.round(free / (1024 * 1024)) }
   }
   ipcMain.handle('get-system-ram', async () => getSystemRamImpl())
 
@@ -4505,6 +4637,7 @@ export function registerIpcHandlers(): void {
     getVramInfo: getVramInfoImpl,
     getSystemRam: getSystemRamImpl,
     getGgufMetadata: getGgufMetadataImpl,
+    detectSpeculation: detectSpeculationImpl,
     getCachedMetadata: (modelPath: string) => {
       const cached = metadataCache[modelPath]
       return cached && cached.schemaVersion === METADATA_SCHEMA_VERSION ? cached : null

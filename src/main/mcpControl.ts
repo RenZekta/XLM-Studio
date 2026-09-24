@@ -12,6 +12,25 @@ import { COMMON_PARAM_FLAGS } from '../shared/commonParams'
 import { applyNgramModifierToggle, getNgramModifierState, NGRAM_MAP_K4V_FLAGS, NGRAM_MOD_FLAGS } from '../shared/specToggles'
 import type { Template } from '../shared/types'
 
+// Speculative-decoding tier table — mirrors src/main/ipc.ts's own
+// SPEC_TIER_DEFS/classifySidecarFilename (and CmdParamsEditor.tsx's
+// identical copy). Duplicated here rather than imported: mcpControl.ts
+// intentionally never imports from ipc.ts directly (see ControlDeps above)
+// since ipc.ts -> mcpServer.ts -> mcpControl.ts already forms one edge of
+// the dependency graph, and importing back from here to ipc.ts would make
+// it circular. Kept in sync manually — the tier numbers, methods, and
+// flags are a stable, rarely-changing reference table.
+type SpecMethod = 'off' | 'native-mtp' | 'draft-model' | 'eagle3' | 'dspark2' | 'dflash2'
+interface SpecTierDef { tier: number; method: SpecMethod; label: string; flag: string | null; draftMax: number; draftMin: number; draftPMin: number }
+const SPEC_TIER_DEFS: SpecTierDef[] = [
+  { tier: 0, method: 'off', label: 'Off', flag: null, draftMax: 0, draftMin: 0, draftPMin: 0 },
+  { tier: 1, method: 'native-mtp', label: 'Native MTP', flag: 'draft-mtp', draftMax: 3, draftMin: 0, draftPMin: 0.75 },
+  { tier: 2, method: 'draft-model', label: 'Draft Model', flag: 'draft-simple', draftMax: 5, draftMin: 0, draftPMin: 0.00 },
+  { tier: 3, method: 'eagle3', label: 'EAGLE3', flag: 'draft-eagle3', draftMax: 4, draftMin: 0, draftPMin: 0.50 },
+  { tier: 4, method: 'dspark2', label: 'DSpark2', flag: 'draft-dspark', draftMax: 6, draftMin: 0, draftPMin: 0.75 },
+  { tier: 5, method: 'dflash2', label: 'DFlash2', flag: 'draft-dflash', draftMax: 5, draftMin: 0, draftPMin: 0.80 }
+]
+
 export interface ControlDeps {
   loadSettings: () => Promise<any>
   saveSettings: (s: any) => Promise<void>
@@ -25,6 +44,7 @@ export interface ControlDeps {
   getVramInfo: () => Promise<any>
   getSystemRam: () => Promise<{ totalRAMMB: number; freeRAMMB: number }>
   getGgufMetadata: (modelPath: string) => Promise<any>
+  detectSpeculation: (modelPath: string, hasNativeMtp?: boolean) => Promise<any>
   // Read-only lookup into the already-populated metadata cache — does NOT
   // trigger a fresh GGUF parse for uncached paths (use getGgufMetadata for
   // that). Used by info-models so listing models stays cheap.
@@ -574,6 +594,101 @@ export async function toolTemplateEdit(args: { templates: string[]; changes: Rec
         if (kLower === 'n-gram map (k4v)' || kLower === 'ngram-map-k4v') { newArgs = applyNgramModifierToggle(newArgs, 'map-k4v', !!v); continue }
         if (kLower === 'n-gram modifier' || kLower === 'ngram-mod') { newArgs = applyNgramModifierToggle(newArgs, 'mod', !!v); continue }
         if (kLower === 'automatic yarn scaling control' || kLower === 'yarn-auto-scale') { newArgs['__yarnAutoScale'] = !!v; continue }
+        if (kLower === 'multimodal projector' || kLower === 'mmproj') {
+          const on = !!v
+          newArgs['__mmproj_manual'] = true
+          newArgs['__mmproj_enabled'] = on
+          if (!on) {
+            delete newArgs['--mmproj']
+          } else {
+            // An accompanying "mmprojPath" in the SAME call wins outright;
+            // otherwise keep whatever's already set, or fall back to the
+            // model's own auto-detected mmproj file -- same precedence as
+            // the widget's own switch (setMmprojOn) in CmdParamsEditor.tsx.
+            const explicitPath = args.changes['mmprojPath'] ?? args.changes['mmproj-path'] ?? args.changes['mmprojpath']
+            if (explicitPath !== undefined) {
+              newArgs['--mmproj'] = explicitPath
+            } else if (!newArgs['--mmproj']) {
+              const detected = await findDetectedMmproj(t)
+              newArgs['--mmproj'] = detected ? detected.path : ''
+            }
+          }
+          continue
+        }
+        if (kLower === 'mmprojpath' || kLower === 'mmproj-path') {
+          // Already applied above when paired with "mmproj" in the same
+          // call (harmless to redo). Given alone, a manual path implies
+          // "on" -- there'd be no point setting one otherwise.
+          newArgs['--mmproj'] = v
+          newArgs['__mmproj_manual'] = true
+          newArgs['__mmproj_enabled'] = true
+          continue
+        }
+        if (kLower === 'speculative decoding' || kLower === 'spec-decode') {
+          newArgs['__spec_manual'] = true
+          let tierDef: SpecTierDef | undefined
+          let sidecarPath: string | null | undefined
+          if (v === false || (typeof v === 'string' && v.toLowerCase() === 'off')) {
+            tierDef = SPEC_TIER_DEFS[0]
+          } else if (v === true) {
+            // No method named -- activate the single highest-tier detected
+            // method, mirroring the app's own auto-apply-on-first-open.
+            const detected = await findDetectedSpeculation(t)
+            const winner = detected.length > 0 ? detected[0] : null
+            tierDef = winner ? SPEC_TIER_DEFS.find(d => d.method === winner.method) : SPEC_TIER_DEFS[0]
+            sidecarPath = winner?.path ?? undefined
+          } else if (typeof v === 'string') {
+            // A method name ("eagle3") or its display label ("EAGLE3"),
+            // case-insensitive -- matches a display-parameters "detected"
+            // entry's own "method" field directly.
+            const vLower = v.toLowerCase()
+            tierDef = SPEC_TIER_DEFS.find(d => d.method === vLower || d.label.toLowerCase() === vLower)
+            if (!tierDef) throw new ToolError(`Unknown speculative decoding method "${v}" -- use one of: ${SPEC_TIER_DEFS.map(d => d.method).join(', ')}, or true/false. Check display-parameters' "detected" list for what's actually available for this model.`)
+            // Use the matching DETECTED candidate's own sidecar path when
+            // this method was actually found for this model -- otherwise
+            // fall through to whatever's already set (same as setSpecTier
+            // with no sidecarPath given), since a manually-forced,
+            // undetected sidecar-based method has nothing to auto-fill.
+            const detected = await findDetectedSpeculation(t)
+            const match = detected.find(c => c.method === tierDef!.method)
+            if (match) sidecarPath = match.path
+          }
+          if (!tierDef) continue
+          const ngram = getNgramModifierState(newArgs)
+          const specTypeParts = [tierDef.flag, ngram.mapK4vOn ? 'ngram-map-k4v' : null, ngram.modOn ? 'ngram-mod' : null].filter(Boolean)
+          if (specTypeParts.length > 0) newArgs['--spec-type'] = specTypeParts.join(',')
+          else delete newArgs['--spec-type']
+          if (tierDef.tier === 0) {
+            delete newArgs['--spec-draft-model']
+            delete newArgs['--spec-draft-n-max']
+            delete newArgs['--spec-draft-n-min']
+            delete newArgs['--spec-draft-p-min']
+          } else {
+            newArgs['--spec-draft-n-max'] = tierDef.draftMax
+            newArgs['--spec-draft-n-min'] = tierDef.draftMin
+            newArgs['--spec-draft-p-min'] = tierDef.draftPMin
+            if (tierDef.tier >= 2) {
+              // Sidecar-based tier. An accompanying "specDraftModel" in the
+              // SAME call wins outright (checked below); otherwise use the
+              // detected path resolved above, or leave whatever was already
+              // there.
+              const explicitPath = args.changes['specDraftModel'] ?? args.changes['spec-draft-model'] ?? args.changes['draftModelPath']
+              if (explicitPath !== undefined) newArgs['--spec-draft-model'] = explicitPath
+              else if (sidecarPath !== undefined) newArgs['--spec-draft-model'] = sidecarPath || ''
+              else if (!newArgs['--spec-draft-model']) newArgs['--spec-draft-model'] = ''
+            } else {
+              delete newArgs['--spec-draft-model']  // Native MTP is embedded, no sidecar file
+            }
+          }
+          continue
+        }
+        if (kLower === 'specdraftmodel' || kLower === 'spec-draft-model' || kLower === 'draftmodelpath') {
+          // Already applied above when paired with "spec-decode" in the
+          // same call (harmless to redo). Given alone, just points the
+          // CURRENT method's draft model at a different file.
+          newArgs['--spec-draft-model'] = v
+          continue
+        }
         // Every other parameter (model, backend, multimodal projector,
         // speculative decoding, and every other UI parameter) is stored as
         // an args key. Accept the raw flag ("ctx-size"/"--ctx-size"), its
@@ -749,6 +864,19 @@ export async function toolApplyParametersPreset(args: { preset: string | number;
 // template-edit can accept either a flag or its label. Falls back to an
 // empty schema (label defaults to the flag itself) if no schema is available
 // for some reason — callers degrade gracefully rather than failing.
+// Same lookup as CmdParamsEditor.tsx's own `modelGroup`/`detectedMmproj` --
+// the sibling mmproj file (if any) living in the same folder as the
+// Template's model, per listModels()'s own folder-grouping/detection. Used
+// both by display-parameters (to report it) and template-edit's "mmproj"
+// toggle (to auto-fill it, the same way turning the widget's own switch on
+// in the UI does).
+async function findDetectedMmproj(t: Template): Promise<{ name: string; path: string; size: number } | null> {
+  if (!t.modelPath) return null
+  const groups = await D().listModels()
+  const group = groups.find((g: any) => g.models.some((m: any) => m.path === t.modelPath))
+  return group?.mmproj || null
+}
+
 async function getSchemaLookup(t: Template): Promise<{ flagToParam: Map<string, any>; labelToFlag: Map<string, string>; shortToFlag: Map<string, string> }> {
   const flagToParam = new Map<string, any>()
   const labelToFlag = new Map<string, string>()
@@ -779,6 +907,44 @@ async function getSchemaLookup(t: Template): Promise<{ flagToParam: Map<string, 
 // launch-time-only transformation are display-preview's job exclusively;
 // here every value is exactly what's stored on the Template (and thus
 // exactly what template-edit would be changing).
+// Same --spec-type parsing as CmdParamsEditor.tsx's own specTypeSegments/
+// currentSpecTierDef: the primary method is whichever comma-separated
+// segment matches one of the mutually-exclusive method flags (the
+// ngram-map-k4v/ngram-mod segments are additive, not a primary method, and
+// are handled entirely by their own separate toggles above).
+function getCurrentSpecTier(args: Record<string, any>): SpecTierDef {
+  const v = args['--spec-type']
+  const segments = typeof v === 'string' && v.length > 0 ? v.split(',').map((s: string) => s.trim()).filter(Boolean) : []
+  for (const seg of segments) {
+    const match = SPEC_TIER_DEFS.find(d => d.flag === seg)
+    if (match) return match
+  }
+  return SPEC_TIER_DEFS[0]
+}
+
+// Same lookup as CmdParamsEditor.tsx's own detectedSpeculation: every
+// speculative-decoding source detected for the template's model (Native MTP
+// from GGUF metadata, plus sidecar draft/EAGLE3/DSpark2/DFlash2 files in the
+// model's own folder), each annotated with its tier's own default draft
+// parameters so a caller can see exactly what activating it would apply
+// without a separate lookup.
+async function findDetectedSpeculation(t: Template): Promise<any[]> {
+  if (!t.modelPath) return []
+  let hasNativeMtp = false
+  try {
+    const meta = await D().getGgufMetadata(t.modelPath)
+    hasNativeMtp = !!meta?.hasNativeMtp
+  } catch { /* treat as no native MTP declared */ }
+  const result = await D().detectSpeculation(t.modelPath, hasNativeMtp)
+  return (result?.candidates || []).map((c: any) => {
+    const tierDef = SPEC_TIER_DEFS.find(d => d.method === c.method)
+    return {
+      method: c.method, label: c.label, path: c.path, name: c.name, reason: c.reason,
+      defaultParams: tierDef ? { '--spec-draft-n-max': tierDef.draftMax, '--spec-draft-n-min': tierDef.draftMin, '--spec-draft-p-min': tierDef.draftPMin } : undefined
+    }
+  })
+}
+
 async function paramsView(t: Template, view: 'common' | 'full') {
   const args = t.args || {}
   let entries = Object.entries(args).filter(([k]) => !k.startsWith('__'))
@@ -808,6 +974,10 @@ async function paramsView(t: Template, view: 'common' | 'full') {
   // regardless of parameter-view filtering. template-edit accepts each
   // toggle's own label/key as a plain boolean — see toolTemplateEdit.
   const { mapK4vOn, modOn } = getNgramModifierState(args)
+  const mmprojEnabled = args['--mmproj'] !== undefined && args['--mmproj'] !== '' && args['--mmproj'] !== false
+  const detectedMmproj = await findDetectedMmproj(t)
+  const currentSpecTier = getCurrentSpecTier(args)
+  const detectedSpec = await findDetectedSpeculation(t)
   const toggles = [
     {
       label: 'N-gram Map (K4V)', key: 'ngram-map-k4v', enabled: mapK4vOn,
@@ -820,6 +990,21 @@ async function paramsView(t: Template, view: 'common' | 'full') {
     {
       label: 'Automatic YaRN scaling control', key: 'yarn-auto-scale', enabled: args['__yarnAutoScale'] === true,
       note: 'While on, RoPE Scaling / RoPE Scale / YaRN Original Context are managed automatically and should not be set directly.'
+    },
+    {
+      label: 'Multimodal Projector', key: 'mmproj', enabled: mmprojEnabled,
+      subParameters: mmprojEnabled ? { '--mmproj': args['--mmproj'] } : undefined,
+      detected: detectedMmproj ? { name: detectedMmproj.name, path: detectedMmproj.path } : null,
+      note: 'Usually managed automatically: the app turns this ON with the model\'s own auto-detected mmproj file (the "detected" field here, from info-models) whenever one exists, and leaves it off otherwise -- shouldn\'t normally need to be set directly. Toggle via template-edit\'s "mmproj"/"Multimodal Projector" key; pass "mmprojPath" alongside it to point at a specific file instead of the auto-detected one.'
+    },
+    {
+      label: 'Speculative Decoding', key: 'spec-decode', enabled: currentSpecTier.tier > 0,
+      method: currentSpecTier.method, methodLabel: currentSpecTier.label,
+      subParameters: currentSpecTier.tier > 0
+        ? Object.fromEntries(['--spec-type', '--spec-draft-model', '--spec-draft-n-max', '--spec-draft-n-min', '--spec-draft-p-min'].filter(f => args[f] !== undefined).map(f => [f, args[f]]))
+        : undefined,
+      detected: detectedSpec,
+      note: 'Usually managed automatically: the app activates the highest-tier method in "detected" here the first time a Template with this model is opened, and leaves it off otherwise -- shouldn\'t normally need to be set directly. Each detected entry\'s defaultParams are what activating it applies to --spec-draft-n-max/min/p-min. Toggle via template-edit\'s "spec-decode"/"Speculative Decoding" key: a detected entry\'s "method" (e.g. "eagle3") activates that tier with its own defaults and sidecar path (if any); "off"/false disables it; true activates the single highest-tier detected method. Pass "specDraftModel" alongside it to point at a specific sidecar file instead of the detected one.'
     }
   ]
   return {
@@ -1271,7 +1456,7 @@ export const TOOL_DEFS: ToolDef[] = [
   },
   {
     name: 'template-edit', handler: toolTemplateEdit,
-    description: 'Edit one or more Templates: model, backend, multimodal projector, speculative decoding, or any other parameter. Each parameter key accepts its display-parameters label ("Context Size"), its raw flag ("ctx-size"/"--ctx-size"), or its short flag ("-c"). Also accepts the three composite toggles from display-parameters-* as plain booleans: "N-gram Map (K4V)"/"ngram-map-k4v", "N-gram Modifier"/"ngram-mod" (each auto-applies/removes its own default sub-parameters), and "Automatic YaRN scaling control"/"yarn-auto-scale". Changing "backend"/"backendKey" or "backendVersion" without also setting "backendType" in the same call auto-resolves the type (adopts the installed match\'s type if the new key+version is unambiguous, else the Global Backend\'s type if it happens to be that same fork+version, else clears it back to ambiguous) -- pass "backendType" explicitly (from info-backends) to pin an exact GPU-runtime variant when more than one is installed for that fork+version. Refuses to change model/backend/backendVersion/backendType of a currently-serving Template. If "Only allow Template edits via MCP for MCP-made Templates" is on, only "MCP-made"-tagged Templates can be edited.',
+    description: 'Edit one or more Templates: model, backend, multimodal projector, speculative decoding, or any other parameter. Each parameter key accepts its display-parameters label ("Context Size"), its raw flag ("ctx-size"/"--ctx-size"), or its short flag ("-c"). Also accepts the five composite toggles from display-parameters-* as plain booleans: "N-gram Map (K4V)"/"ngram-map-k4v", "N-gram Modifier"/"ngram-mod" (each auto-applies/removes its own default sub-parameters), "Automatic YaRN scaling control"/"yarn-auto-scale", "Multimodal Projector"/"mmproj" (turning it on auto-fills the model\'s own detected mmproj file -- see display-parameters\' "detected" field -- unless "mmprojPath" is also given in the same call to point at a specific file instead; turning it off clears "--mmproj"), and "Speculative Decoding"/"spec-decode" (accepts true/false, OR one of the method names from display-parameters\' "detected" list, e.g. "eagle3" -- activates that method with ITS OWN default draft parameters and detected sidecar file, same as picking it in the UI; "true" alone activates the single highest-tier detected method; "false"/"off" disables it; "specDraftModel" alongside it points at a specific sidecar file instead of the detected one). Changing "backend"/"backendKey" or "backendVersion" without also setting "backendType" in the same call auto-resolves the type (adopts the installed match\'s type if the new key+version is unambiguous, else the Global Backend\'s type if it happens to be that same fork+version, else clears it back to ambiguous) -- pass "backendType" explicitly (from info-backends) to pin an exact GPU-runtime variant when more than one is installed for that fork+version. Refuses to change model/backend/backendVersion/backendType of a currently-serving Template. If "Only allow Template edits via MCP for MCP-made Templates" is on, only "MCP-made"-tagged Templates can be edited.',
     params: [
       { name: 'templates', type: 'string[]', required: true, description: 'One or more Template names' },
       { name: 'changes', type: 'object', required: true, description: 'Key/value map of parameters to change, e.g. {"ctx-size": 8192, "model": "...", "backendType": "vulkan"}. Set "backend"/"backendKey" to "" (empty string) to unpin and go back to following the Global Backend.' }
@@ -1297,12 +1482,12 @@ export const TOOL_DEFS: ToolDef[] = [
   },
   {
     name: 'display-parameters-common', handler: toolDisplayParametersCommon,
-    description: 'Show a Template\'s parameters the same way the app\'s interface shows them (label + raw flag + stored value + type), filtered to the curated "Common Parameters" set (ctx-size, threads, gpu-layers, batch/ubatch size, parallel, flash-attn, sampling, KV cache type/offload, load-mode, keep, seed) — only those actually set on the Template. Also includes a "toggles" array (N-gram Map (K4V), N-gram Modifier, Automatic YaRN scaling control) showing each toggle\'s on/off state and any active sub-parameters — pass a toggle\'s label straight to template-edit to flip it with defaults auto-applied. These are the Template\'s stored values, not the resolved launch command — use display-preview for that. Prefer this over display-parameters-full.',
+    description: 'Show a Template\'s parameters the same way the app\'s interface shows them (label + raw flag + stored value + type), filtered to the curated "Common Parameters" set (ctx-size, threads, gpu-layers, batch/ubatch size, parallel, flash-attn, sampling, KV cache type/offload, load-mode, keep, seed) — only those actually set on the Template. Also includes a "toggles" array (N-gram Map (K4V), N-gram Modifier, Automatic YaRN scaling control, Multimodal Projector, Speculative Decoding) showing each toggle\'s on/off state and any active sub-parameters — pass a toggle\'s label straight to template-edit to flip it with defaults auto-applied. These are the Template\'s stored values, not the resolved launch command — use display-preview for that. Try this before display-parameters-full — reach for -full only if the parameter you need isn\'t in this curated set, since it returns everything unfiltered and costs more context.',
     params: [{ name: 'template', type: 'string', required: true, description: 'Template name' }]
   },
   {
     name: 'display-parameters-full', handler: toolDisplayParametersFull,
-    description: 'Show every parameter actually set on a Template, unfiltered, the same way the app\'s interface shows them (label + raw flag + stored value + type). Also includes the same "toggles" array as display-parameters-common (N-gram Map (K4V), N-gram Modifier, Automatic YaRN scaling control). These are the Template\'s stored values, not the resolved launch command — use display-preview for that.',
+    description: 'Show every parameter actually set on a Template, unfiltered, the same way the app\'s interface shows them (label + raw flag + stored value + type). Also includes the same "toggles" array as display-parameters-common (N-gram Map (K4V), N-gram Modifier, Automatic YaRN scaling control, Multimodal Projector, Speculative Decoding). These are the Template\'s stored values, not the resolved launch command — use display-preview for that. Costs more context than display-parameters-common\'s curated subset — use that first and only fall back to this if the parameter you\'re after wasn\'t in it.',
     params: [{ name: 'template', type: 'string', required: true, description: 'Template name' }]
   },
   {
