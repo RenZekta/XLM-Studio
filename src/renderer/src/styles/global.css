@@ -168,9 +168,9 @@ input[type="number"] {
   0%, 100% { opacity: .5; }
   50% { opacity: 1; }
 }
-.card-drag-wrap { cursor: grab; }
+.card-drag-region { cursor: grab; }
 .card-drag-source { opacity: .35; }
-.card-drag-source .model-card { cursor: grabbing; }
+.card-drag-source .card-drag-region { cursor: grabbing; }
 .model-card {
   background: var(--surface);
   border: 1.5px solid var(--border);

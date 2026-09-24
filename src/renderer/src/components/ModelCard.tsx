@@ -4,8 +4,20 @@ import { Play, Square, Settings, ChevronDown, MoreVertical, Copy, Trash, Downloa
 import type { CardState, Template } from '../../../shared/types'
 import CmdParamsEditor from './CmdParamsEditor'
 import { effectiveTemplatePort, starColorForPort } from '../utils/templatePort'
-interface Props { card: CardState }
-export default function ModelCard({ card }: Props) {
+interface Props {
+  card: CardState
+  // Applied only to the grabbable region (header through the Start/Stop
+  // row) so a card can be reordered by dragging without hijacking mouse
+  // drags inside the expanded Parameters editor below it -- sliders, text
+  // selection in inputs, etc. Omitted entirely when the card isn't
+  // rendered inside a reorderable grid.
+  dragHandleProps?: {
+    draggable: true
+    onDragStart: (e: React.DragEvent) => void
+    onDragEnd: () => void
+  }
+}
+export default function ModelCard({ card, dragHandleProps }: Props) {
   const { toggleCardExpanded, setCardStatus, removeCard, backends, activeBackend, commandsSchema, setShowCreateModal, models, modelDefaults, ggufMetadata, cards, baseUrlOverride, updateCard } = useStore()
 
   // Compute the EFFECTIVE context that will be passed to
@@ -280,138 +292,140 @@ export default function ModelCard({ card }: Props) {
   }
   return (
     <div className={`model-card ${isRunning ? 'running' : ''}`} style={{ overflow: 'visible' }}>
-      <div className="card-header">
-        <div className="card-icon">
-          {isRunning ? (
-            <div className="spin"><Settings size={20} className="text-success" /></div>
-          ) : isStopping ? (
-            <div className="spin"><Settings size={20} className="text-warning" /></div>
-          ) : (
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-              <path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z" />
-              <polyline points="3.27 6.96 12 12.01 20.73 6.96" />
-              <line x1="12" y1="22.08" x2="12" y2="12" />
-            </svg>
-          )}
-        </div>
-        <div className="card-info">
-          <div style={{ display: 'flex', alignItems: 'center', gap: 6, minWidth: 0 }}>
-            <h3 className="card-name" title={card.template.name}>{card.template.name}</h3>
-            {isMainTemplate && (
-              <span title={`Main Template for port ${myEffectivePort}`} style={{ display: 'inline-flex', flexShrink: 0 }}>
-                <Star size={14} style={{ fill: starColor, color: starColor }} />
-              </span>
+      <div {...dragHandleProps} className={dragHandleProps ? 'card-drag-region' : undefined}>
+        <div className="card-header">
+          <div className="card-icon">
+            {isRunning ? (
+              <div className="spin"><Settings size={20} className="text-success" /></div>
+            ) : isStopping ? (
+              <div className="spin"><Settings size={20} className="text-warning" /></div>
+            ) : (
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                <path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z" />
+                <polyline points="3.27 6.96 12 12.01 20.73 6.96" />
+                <line x1="12" y1="22.08" x2="12" y2="12" />
+              </svg>
             )}
-            {/* Feature (context): badge showing the context amount that will be
-                (or is being) used by llama.cpp. When the Minimum Context Length
-                Override is ON (and the per-preset "Ignore" is OFF), the badge is
-                blue and matches the Model Defaults value; otherwise it reflects
-                the preset's --ctx-size. Always visible so the user can verify
-                the value before/while running. */}
-            <span
-              className={`ctx-badge ${ctxFromOverride ? 'ctx-badge-override' : ''} ${isRunning ? 'ctx-badge-live' : ''}`}
-              title={
-                ctxFromOverride
-                  ? `Context: ${effectiveCtx.toLocaleString()} tokens — from Minimum Context Length Override (Model Defaults). Passed to llama.cpp, /props and the chat window.`
-                  : `Context: ${effectiveCtx.toLocaleString()} tokens — from this preset's --ctx-size. Passed to llama.cpp, /props and the chat window.`
-              }
-            >
-              <Gauge size={11} />
-              ctx {effectiveCtx.toLocaleString()}
-            </span>
-            {/* Yellow hint when Ignore Context Length Override is ON. When
-                AutoFill is also ON, the hint shows "Auto Context Fill" with
-                a two-row tooltip. */}
-            {bothAutoFillOn ? (
-              <span
-                className="ctx-override-hint"
-                title={`Ignore Context Length Override in preset settings is turned on\nUse Automatic Context Fill is set to Auto`}
-              >
-                *Auto Context Fill
-              </span>
-            ) : ignoreCtxOverride ? (
-              <span
-                className="ctx-override-hint"
-                title="Ignore Context Length Override in preset settings is turned on"
-              >
-                *Override is ignored
-              </span>
-            ) : null}
           </div>
-          <p className="card-desc" title={card.template.description}>{card.template.description || 'No description'}</p>
-        </div>
-        <div className="card-menu-btn" ref={menuRef} style={{ position: 'relative', zIndex: 10 }}>
-          <button className="btn btn-ghost btn-icon" onClick={() => setShowMenu(!showMenu)}>
-            <MoreVertical size={16} />
-          </button>
-          {showMenu && (
-            <div className="dropdown-menu" style={{ position: 'absolute', right: 0, top: 'calc(100% + 4px)', zIndex: 500 }}>
-              <button className="dropdown-item" onClick={handleEdit}><Settings size={14} /> Edit Template</button>
-              <button className="dropdown-item" onClick={handleToggleMain}>
-                <Star size={14} style={isMainTemplate ? { fill: starColor, color: starColor } : undefined} />
-                {isMainTemplate ? 'Unstar Main Template' : `Star as Main Template (port ${myEffectivePort})`}
-              </button>
-              <button className="dropdown-item" onClick={handleDuplicate}><Copy size={14} /> Duplicate</button>
-              <button className="dropdown-item" onClick={handleExport}><Download size={14} /> Export</button>
-              <div className="dropdown-divider" />
-              <button className="dropdown-item danger" onClick={handleDelete}><Trash size={14} /> Delete</button>
+          <div className="card-info">
+            <div style={{ display: 'flex', alignItems: 'center', gap: 6, minWidth: 0 }}>
+              <h3 className="card-name" title={card.template.name}>{card.template.name}</h3>
+              {isMainTemplate && (
+                <span title={`Main Template for port ${myEffectivePort}`} style={{ display: 'inline-flex', flexShrink: 0 }}>
+                  <Star size={14} style={{ fill: starColor, color: starColor }} />
+                </span>
+              )}
+              {/* Feature (context): badge showing the context amount that will be
+                  (or is being) used by llama.cpp. When the Minimum Context Length
+                  Override is ON (and the per-preset "Ignore" is OFF), the badge is
+                  blue and matches the Model Defaults value; otherwise it reflects
+                  the preset's --ctx-size. Always visible so the user can verify
+                  the value before/while running. */}
+              <span
+                className={`ctx-badge ${ctxFromOverride ? 'ctx-badge-override' : ''} ${isRunning ? 'ctx-badge-live' : ''}`}
+                title={
+                  ctxFromOverride
+                    ? `Context: ${effectiveCtx.toLocaleString()} tokens — from Minimum Context Length Override (Model Defaults). Passed to llama.cpp, /props and the chat window.`
+                    : `Context: ${effectiveCtx.toLocaleString()} tokens — from this preset's --ctx-size. Passed to llama.cpp, /props and the chat window.`
+                }
+              >
+                <Gauge size={11} />
+                ctx {effectiveCtx.toLocaleString()}
+              </span>
+              {/* Yellow hint when Ignore Context Length Override is ON. When
+                  AutoFill is also ON, the hint shows "Auto Context Fill" with
+                  a two-row tooltip. */}
+              {bothAutoFillOn ? (
+                <span
+                  className="ctx-override-hint"
+                  title={`Ignore Context Length Override in preset settings is turned on\nUse Automatic Context Fill is set to Auto`}
+                >
+                  *Auto Context Fill
+                </span>
+              ) : ignoreCtxOverride ? (
+                <span
+                  className="ctx-override-hint"
+                  title="Ignore Context Length Override in preset settings is turned on"
+                >
+                  *Override is ignored
+                </span>
+              ) : null}
             </div>
-          )}
+            <p className="card-desc" title={card.template.description}>{card.template.description || 'No description'}</p>
+          </div>
+          <div className="card-menu-btn" ref={menuRef} style={{ position: 'relative', zIndex: 10 }}>
+            <button className="btn btn-ghost btn-icon" onClick={() => setShowMenu(!showMenu)}>
+              <MoreVertical size={16} />
+            </button>
+            {showMenu && (
+              <div className="dropdown-menu" style={{ position: 'absolute', right: 0, top: 'calc(100% + 4px)', zIndex: 500 }}>
+                <button className="dropdown-item" onClick={handleEdit}><Settings size={14} /> Edit Template</button>
+                <button className="dropdown-item" onClick={handleToggleMain}>
+                  <Star size={14} style={isMainTemplate ? { fill: starColor, color: starColor } : undefined} />
+                  {isMainTemplate ? 'Unstar Main Template' : `Star as Main Template (port ${myEffectivePort})`}
+                </button>
+                <button className="dropdown-item" onClick={handleDuplicate}><Copy size={14} /> Duplicate</button>
+                <button className="dropdown-item" onClick={handleExport}><Download size={14} /> Export</button>
+                <div className="dropdown-divider" />
+                <button className="dropdown-item danger" onClick={handleDelete}><Trash size={14} /> Delete</button>
+              </div>
+            )}
+          </div>
         </div>
-      </div>
-      <div className="card-meta">
-        <span className="card-tag" title={card.template.modelPath}>
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M14.5 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7.5L14.5 2z" /><polyline points="14 2 14 8 20 8" /></svg>
-          {!modelExists ? <span style={{ color: 'var(--danger)' }}>Missing File</span> : (card.template.modelPath?.split(/[/\\]/).pop() || 'No model')}
-        </span>
-        <span className="card-tag">
-          <span className={`status-dot ${isRunning ? 'running' : isStopping ? 'stopping' : 'idle'}`} />
-          {isRunning ? `Port ${card.tempPort || card.template.serverPort || 8080}${(useStore.getState().baseUrlOverride?.enabled && card.template.args?.['__ignoreBaseUrlOverride'] !== true) ? ' (Overridden)' : ''}` : isStopping ? 'Stopping…' : 'Ready'}
-        </span>
-        {card.template.tags?.map(t => (
-          <span key={t} className="card-tag" style={{ background: 'var(--surface-2, rgba(255,255,255,0.05))', border: '1px solid var(--border)' }}>
-            #{t}
+        <div className="card-meta">
+          <span className="card-tag" title={card.template.modelPath}>
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M14.5 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7.5L14.5 2z" /><polyline points="14 2 14 8 20 8" /></svg>
+            {!modelExists ? <span style={{ color: 'var(--danger)' }}>Missing File</span> : (card.template.modelPath?.split(/[/\\]/).pop() || 'No model')}
           </span>
-        ))}
-      </div>
-      {!modelExists && card.template.modelPath && (
-        <div className="hub-error" style={{ margin: '0 18px 12px', fontSize: 12 }}>
-          <AlertCircle size={14} />
-          <span>Model file not found at <code style={{ background: 'transparent', wordBreak: 'break-all' }}>{card.template.modelPath}</code>. Move the file back, re-download it, or edit the template.</span>
+          <span className="card-tag">
+            <span className={`status-dot ${isRunning ? 'running' : isStopping ? 'stopping' : 'idle'}`} />
+            {isRunning ? `Port ${card.tempPort || card.template.serverPort || 8080}${(useStore.getState().baseUrlOverride?.enabled && card.template.args?.['__ignoreBaseUrlOverride'] !== true) ? ' (Overridden)' : ''}` : isStopping ? 'Stopping…' : 'Ready'}
+          </span>
+          {card.template.tags?.map(t => (
+            <span key={t} className="card-tag" style={{ background: 'var(--surface-2, rgba(255,255,255,0.05))', border: '1px solid var(--border)' }}>
+              #{t}
+            </span>
+          ))}
         </div>
-      )}
-      {}
-      <div className="card-actions">
-        <button
-          className={`btn card-run-btn ${isRunning ? 'btn-danger' : 'btn-primary'}`}
-          onClick={handleRunToggle}
-          disabled={isStopping || (!isRunning && !modelExists)}
-          style={isRunning ? { flex: 0.5 } : {}}
-          title={isStopping ? 'Stopping… waiting for the port to be released' : (!isRunning && !modelExists ? 'Cannot start: model file is missing' : '')}
-        >
-          {isStopping ? <><Loader2 size={14} className="spin" /> Stopping…</> : isRunning ? <><Square size={14} /> Stop</> : <><Play size={14} /> Start</>}
-        </button>
-        {isRunning && (
-          <button
-            className="btn card-run-btn"
-            style={{ flex: 0.5, background: 'var(--accent)', color: 'var(--accent-fg)' }}
-            onClick={() => {
-              // Pass the EFFECTIVE context (override-aware) so the chat window
-              // badge shows the same value llama-server is actually using.
-              window.api.openChatWindow(card.tempPort || card.template.serverPort || 8080, card.template.name, effectiveCtx)
-            }}
-            title="Open Chat Window"
-          >
-            <Globe size={14} /> Open Chat
-          </button>
+        {!modelExists && card.template.modelPath && (
+          <div className="hub-error" style={{ margin: '0 18px 12px', fontSize: 12 }}>
+            <AlertCircle size={14} />
+            <span>Model file not found at <code style={{ background: 'transparent', wordBreak: 'break-all' }}>{card.template.modelPath}</code>. Move the file back, re-download it, or edit the template.</span>
+          </div>
         )}
-        <button
-          className={`card-expand-btn ${isExpanded ? 'open' : ''}`}
-          onClick={() => toggleCardExpanded(card.template.id)}
-          title="Configure CLI Parameters"
-        >
-          <ChevronDown size={16} />
-        </button>
+        {}
+        <div className="card-actions">
+          <button
+            className={`btn card-run-btn ${isRunning ? 'btn-danger' : 'btn-primary'}`}
+            onClick={handleRunToggle}
+            disabled={isStopping || (!isRunning && !modelExists)}
+            style={isRunning ? { flex: 0.5 } : {}}
+            title={isStopping ? 'Stopping… waiting for the port to be released' : (!isRunning && !modelExists ? 'Cannot start: model file is missing' : '')}
+          >
+            {isStopping ? <><Loader2 size={14} className="spin" /> Stopping…</> : isRunning ? <><Square size={14} /> Stop</> : <><Play size={14} /> Start</>}
+          </button>
+          {isRunning && (
+            <button
+              className="btn card-run-btn"
+              style={{ flex: 0.5, background: 'var(--accent)', color: 'var(--accent-fg)' }}
+              onClick={() => {
+                // Pass the EFFECTIVE context (override-aware) so the chat window
+                // badge shows the same value llama-server is actually using.
+                window.api.openChatWindow(card.tempPort || card.template.serverPort || 8080, card.template.name, effectiveCtx)
+              }}
+              title="Open Chat Window"
+            >
+              <Globe size={14} /> Open Chat
+            </button>
+          )}
+          <button
+            className={`card-expand-btn ${isExpanded ? 'open' : ''}`}
+            onClick={() => toggleCardExpanded(card.template.id)}
+            title="Configure CLI Parameters"
+          >
+            <ChevronDown size={16} />
+          </button>
+        </div>
       </div>
       <div className={`card-expanded ${isExpanded ? 'open' : ''}`}>
         <div className="expanded-inner">

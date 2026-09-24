@@ -182,12 +182,16 @@ export default function CardsView() {
                   if (el) wrapRefs.current.set(card.template.id, el)
                   else wrapRefs.current.delete(card.template.id)
                 }}
-                draggable
-                onDragStart={(e) => handleDragStart(card.template.id, e)}
-                onDragEnd={resetDrag}
-                className={`card-drag-wrap${draggedId === card.template.id ? ' card-drag-source' : ''}`}
+                className={draggedId === card.template.id ? 'card-drag-source' : undefined}
               >
-                <ModelCard card={card} />
+                <ModelCard
+                  card={card}
+                  dragHandleProps={{
+                    draggable: true,
+                    onDragStart: (e) => handleDragStart(card.template.id, e),
+                    onDragEnd: resetDrag
+                  }}
+                />
               </div>
             </React.Fragment>
           ))}

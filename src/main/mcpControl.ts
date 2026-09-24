@@ -100,6 +100,8 @@ async function assertEditAllowed(t: Template) {
 async function resolveBackend(template: Template): Promise<any> {
   const backends = await D().listBackends()
   if (backends.length === 0) throw new ToolError('No backends installed — install a backend in the Backends tab first.')
+  const settings = await D().loadSettings()
+  const globalBackend = settings.globalBackend
   if (template.backendKey) {
     // backendKey+version alone stopped being unique once multi-backend-type
     // support shipped (the same fork+version can exist under several type
@@ -116,13 +118,28 @@ async function resolveBackend(template: Template): Promise<any> {
       )
       if (exact) return exact
     }
+    // Ambiguous pin: a fork+version with no (or no matching) recorded type.
+    // Before grabbing whichever installed variant happens to sort first,
+    // prefer whichever matches the Global Backend's own type IF the Global
+    // Backend is ALSO this same fork+version -- the template is very likely
+    // just tracking "whatever's active" and lost its type somewhere (e.g.
+    // template-edit changing backendVersion without a type, or a template
+    // saved by an older version of this preset/create logic that pinned
+    // key+version but not type). If the Global Backend points at a
+    // different fork+version entirely, this can't help and falls through.
+    if (globalBackend?.backendKey === template.backendKey && globalBackend?.backendVersion === template.backendVersion) {
+      const globalTyped = backends.find((b: any) =>
+        b.backendKey === template.backendKey &&
+        b.name === template.backendVersion &&
+        (b.backendType ?? null) === (globalBackend.backendType ?? null)
+      )
+      if (globalTyped) return globalTyped
+    }
     const byKeyAndVersion = backends.find((b: any) => b.backendKey === template.backendKey && b.name === template.backendVersion)
     if (byKeyAndVersion) return byKeyAndVersion
     const byKey = backends.find((b: any) => b.backendKey === template.backendKey)
     if (byKey) return byKey
   }
-  const settings = await D().loadSettings()
-  const globalBackend = settings.globalBackend
   if (globalBackend?.backendKey) {
     if (globalBackend.backendType !== undefined) {
       const exact = backends.find((b: any) =>
@@ -136,6 +153,37 @@ async function resolveBackend(template: Template): Promise<any> {
     if (match) return match
   }
   return backends[0]
+}
+
+// Matches a caller-given backend identifier (id, backendKey, version name,
+// or displayName) against installed backends. More than one candidate can
+// share an identifier once multi-backend-type support shipped (e.g. two
+// installs both named "b10269-1.6.0", one vulkan and one rocm) -- when that
+// happens, an explicit `type` wins if given, else whichever candidate
+// matches the Global Backend's own type (same reasoning as resolveBackend's
+// ambiguous-pin fallback above), else just the first candidate as a last
+// resort matching the old, pre-multi-type behavior.
+function matchExplicitBackend(
+  backends: any[],
+  nameOrKeyOrId: string,
+  type: string | null | undefined,
+  globalBackend: { backendKey: string; backendVersion: string; backendType?: string | null } | null
+): any {
+  const candidates = backends.filter((b: any) =>
+    b.id === nameOrKeyOrId || b.backendKey === nameOrKeyOrId || b.name === nameOrKeyOrId || b.displayName === nameOrKeyOrId
+  )
+  if (candidates.length <= 1) return candidates[0] || null
+  if (type !== undefined) {
+    const exact = candidates.find((b: any) => (b.backendType ?? null) === (type ?? null))
+    if (exact) return exact
+  }
+  if (globalBackend) {
+    const globalMatch = candidates.find((b: any) =>
+      b.backendKey === globalBackend.backendKey && b.name === globalBackend.backendVersion && (b.backendType ?? null) === (globalBackend.backendType ?? null)
+    )
+    if (globalMatch) return globalMatch
+  }
+  return candidates[0]
 }
 
 // Converts template.args into the same CLI flag list ModelCard.tsx builds
@@ -412,7 +460,7 @@ export async function toolTemplateDuplicate(args: { template: string; copies: nu
   return { template: t.name, copiesCreated: created }
 }
 
-export async function toolTemplateCreate(args: { name: string; model: string; backend?: string }) {
+export async function toolTemplateCreate(args: { name: string; model: string; backend?: string; backendType?: string | null }) {
   const models = await D().listModels()
   const allModels = models.flatMap((g: any) => g.models.map((m: any) => ({ ...m, folder: g.folder })))
   const model = allModels.find((m: any) => m.name === args.model || m.path === args.model)
@@ -421,7 +469,8 @@ export async function toolTemplateCreate(args: { name: string; model: string; ba
   let explicitBackend: any = null
   if (args.backend) {
     const backends = await D().listBackends()
-    explicitBackend = backends.find((b: any) => b.backendKey === args.backend || b.name === args.backend || b.displayName === args.backend)
+    const settings = await D().loadSettings()
+    explicitBackend = matchExplicitBackend(backends, args.backend, args.backendType, settings.globalBackend)
     if (!explicitBackend) throw new ToolError(`No backend matching "${args.backend}". Use info-backends to list installed backends.`)
   }
   // Resolve the EFFECTIVE backend now (explicit arg, else the persisted
@@ -471,7 +520,7 @@ export async function toolTemplateCreate(args: { name: string; model: string; ba
   }
   tagAsMcpMade(template)
   const res = await D().saveTemplate(template)
-  return { name: template.name, id: res.id, port, backendKey: backend.backendKey, backendVersion: backend.name, resolvedVia: args.backend ? 'explicit' : 'global-default', tags: template.tags }
+  return { name: template.name, id: res.id, port, backendKey: backend.backendKey, backendVersion: backend.name, backendType: backend.backendType ?? null, resolvedVia: args.backend ? 'explicit' : 'global-default', tags: template.tags }
 }
 
 // Every changeable field EXCEPT model/backend of a currently-serving
@@ -483,22 +532,35 @@ export async function toolTemplateEdit(args: { templates: string[]; changes: Rec
     try {
       await assertEditAllowed(t)
       const running = D().isRunning(t.id)
-      const changingModelOrBackend = ('model' in args.changes || 'modelPath' in args.changes || 'backend' in args.changes || 'backendKey' in args.changes)
+      const changingModelOrBackend = (
+        'model' in args.changes || 'modelPath' in args.changes ||
+        'backend' in args.changes || 'backendKey' in args.changes ||
+        'backendVersion' in args.changes || 'backendType' in args.changes || 'type' in args.changes
+      )
       if (running.running && changingModelOrBackend) {
         throw new ToolError(`"${t.name}" is currently serving — refusing to change its model/backend (would corrupt the live session). Stop it first.`)
       }
       const patch: Record<string, any> = { ...t, updatedAt: new Date().toISOString() }
       let newArgs: Record<string, any> = { ...(t.args || {}) }
       const { labelToFlag, shortToFlag } = await getSchemaLookup(t)
+      // Whether this call explicitly set a type alongside a backend/version
+      // change -- if not, it gets auto-resolved once every change has been
+      // applied (see below), rather than unconditionally discarded.
+      let backendTypeExplicit = false
+      let backendKeyOrVersionChanged = false
       for (const [k, v] of Object.entries(args.changes)) {
         if (k === 'model' || k === 'modelPath') { patch.modelPath = v; continue }
-        // backendType isn't independently settable through this tool (there's
-        // no sensible free-text identity for it), so clear the old one
-        // whenever backend/backendVersion changes — carrying over a stale
-        // type here would make resolveBackend's exact-match check fail
-        // silently against the NEW backend it doesn't actually belong to.
-        if (k === 'backend' || k === 'backendKey') { patch.backendKey = v; patch.backendType = null; continue }
-        if (k === 'backendVersion') { patch.backendVersion = v; patch.backendType = null; continue }
+        if (k === 'backend' || k === 'backendKey') { patch.backendKey = v; backendKeyOrVersionChanged = true; continue }
+        if (k === 'backendVersion') { patch.backendVersion = v; backendKeyOrVersionChanged = true; continue }
+        // Lets a caller pin the EXACT variant (e.g. "vulkan" vs "rocm")
+        // alongside backend/backendVersion in the same call, straight from
+        // info-backends' own backendType field. An empty string or null
+        // clears it back to "no specific type" (ambiguous/legacy match).
+        if (k === 'backendType' || k === 'type') {
+          patch.backendType = (v === '' || v === null || v === undefined) ? null : String(v)
+          backendTypeExplicit = true
+          continue
+        }
         if (k === 'serverPort' || k === 'port') { patch.serverPort = Number(v); continue }
         if (k === 'name') { patch.name = String(v); continue }
         if (k === 'launchMode') continue  // vestigial field, no longer meaningful — Chat UI/API Only per-Template switch was removed; see settings.modelDefaults.autoOpenChatUI
@@ -527,6 +589,33 @@ export async function toolTemplateEdit(args: { templates: string[]; changes: Rec
         const byShort = byLabel ? undefined : shortToFlag.get(kLower.replace(/^-+/, ''))
         const flag = byLabel || byShort || (k.startsWith('--') || k.startsWith('__') ? k : `--${k}`)
         newArgs[flag] = v
+      }
+      if (backendKeyOrVersionChanged && !backendTypeExplicit) {
+        // backend/backendVersion changed but this call didn't also say
+        // which type -- carrying over the OLD type would be wrong (it
+        // belonged to whatever backend was pinned before), so resolve it
+        // fresh: if the new key+version unambiguously matches exactly one
+        // installed backend, adopt its type (no guessing needed); else, if
+        // the Global Backend happens to be this same fork+version, adopt
+        // ITS type (the template is very likely meant to just track
+        // "whatever's active"); otherwise there's genuine ambiguity (two+
+        // installed types share this key+version and neither signal picks
+        // one), so fall back to null -- ambiguous, but at least explicit
+        // rather than silently wrong, and resolveBackend's own fallback
+        // chain still has a shot at it via the Global Backend check.
+        const backends = await D().listBackends()
+        const settings = await D().loadSettings()
+        const candidates = backends.filter((b: any) => b.backendKey === patch.backendKey && b.name === patch.backendVersion)
+        if (candidates.length === 1) {
+          patch.backendType = candidates[0].backendType ?? null
+        } else {
+          const globalBackend = settings.globalBackend
+          const globalMatch = candidates.find((b: any) =>
+            globalBackend?.backendKey === patch.backendKey && globalBackend?.backendVersion === patch.backendVersion &&
+            (b.backendType ?? null) === (globalBackend.backendType ?? null)
+          )
+          patch.backendType = globalMatch ? (globalMatch.backendType ?? null) : null
+        }
       }
       patch.args = newArgs
       delete patch._file
@@ -607,7 +696,17 @@ export async function toolApplyParametersPreset(args: { preset: string | number;
   // Backend when the template doesn't pin one) rather than using t.backendKey
   // raw — same bug/fix as template-create: an unresolved backendKey here
   // silently produced generic q8_0 KV-quant defaults instead of the actual
-  // backend's own recommendation (e.g. TurboQuant).
+  // backend's own recommendation (e.g. TurboQuant). `backend` is used only
+  // to compute the baseline below -- it is NOT written back onto the
+  // template. The renderer's own Quick/FullAuto buttons never touch
+  // backendKey/backendVersion/backendType either (see handleQuickPreset in
+  // CmdParamsEditor.tsx); a Template left on "Default (Active)" must stay
+  // that way after a preset is applied. Persisting backend/backendVersion
+  // here previously did NOT also persist backendType, which pinned the
+  // template to a specific fork+version with an unset type -- ambiguous
+  // the moment more than one backend TYPE (e.g. vulkan and rocm) is
+  // installed for that same fork+version, since resolveBackend then had no
+  // way to tell them apart and could silently pick either one.
   const backend = await resolveBackend(t)
   const baseline = await buildQuickBaseline(meta, isMoe, gpuLayersMax, backend)
   // MERGE the baseline onto the existing args — matching
@@ -624,7 +723,7 @@ export async function toolApplyParametersPreset(args: { preset: string | number;
   if (existingCtx !== undefined && existingCtx !== '') mergedArgs['--ctx-size'] = existingCtx
   if (preset === 'quick') {
     mergedArgs['__lastPreset'] = 'quick'
-    const patch = { ...t, backendKey: backend.backendKey, backendVersion: backend.name, args: mergedArgs, updatedAt: new Date().toISOString() }
+    const patch = { ...t, args: mergedArgs, updatedAt: new Date().toISOString() }
     delete (patch as any)._file
     await D().saveTemplate(patch)
     return { template: t.name, preset: 'Quick', applied: true }
@@ -638,7 +737,7 @@ export async function toolApplyParametersPreset(args: { preset: string | number;
   mergedArgs['__ignoreCtxOverride'] = true
   mergedArgs['__autoCtxFill'] = 'auto'
   mergedArgs['__lastPreset'] = 'fullauto'
-  const patch = { ...t, backendKey: backend.backendKey, backendVersion: backend.name, args: mergedArgs, updatedAt: new Date().toISOString() }
+  const patch = { ...t, args: mergedArgs, updatedAt: new Date().toISOString() }
   delete (patch as any)._file
   await D().saveTemplate(patch)
   return { template: t.name, preset: 'FULL AUTO', applied: true }
@@ -1166,15 +1265,16 @@ export const TOOL_DEFS: ToolDef[] = [
     params: [
       { name: 'name', type: 'string', required: true, description: 'New template name' },
       { name: 'model', type: 'string', required: true, description: 'Model file name or path, from info-models' },
-      { name: 'backend', type: 'string', required: false, description: 'Backend key/version/display name, from info-backends. Falls back to the persisted Global Backend (Settings/Sidebar\'s "Set Active" backend) if omitted, then the newest installed llama.cpp build.' }
+      { name: 'backend', type: 'string', required: false, description: 'Backend key/version/display name, from info-backends. Falls back to the persisted Global Backend (Settings/Sidebar\'s "Set Active" backend) if omitted, then the newest installed llama.cpp build. If this matches more than one installed backend (the same fork+version can exist under several GPU-runtime types at once, e.g. a vulkan and a rocm build of the same release), pass backendType too to pick the exact one -- otherwise it prefers whichever matches the Global Backend\'s own type, then just the first match.' },
+      { name: 'backendType', type: 'string', required: false, description: 'Disambiguates `backend` when it matches more than one installed variant (e.g. "vulkan", "rocm", "cuda-12.4" -- see info-backends\' backendType field). Ignored if `backend` alone is already unambiguous.' }
     ]
   },
   {
     name: 'template-edit', handler: toolTemplateEdit,
-    description: 'Edit one or more Templates: model, backend, multimodal projector, speculative decoding, or any other parameter. Each parameter key accepts its display-parameters label ("Context Size"), its raw flag ("ctx-size"/"--ctx-size"), or its short flag ("-c"). Also accepts the three composite toggles from display-parameters-* as plain booleans: "N-gram Map (K4V)"/"ngram-map-k4v", "N-gram Modifier"/"ngram-mod" (each auto-applies/removes its own default sub-parameters), and "Automatic YaRN scaling control"/"yarn-auto-scale". Refuses to change model/backend of a currently-serving Template. If "Only allow Template edits via MCP for MCP-made Templates" is on, only "MCP-made"-tagged Templates can be edited.',
+    description: 'Edit one or more Templates: model, backend, multimodal projector, speculative decoding, or any other parameter. Each parameter key accepts its display-parameters label ("Context Size"), its raw flag ("ctx-size"/"--ctx-size"), or its short flag ("-c"). Also accepts the three composite toggles from display-parameters-* as plain booleans: "N-gram Map (K4V)"/"ngram-map-k4v", "N-gram Modifier"/"ngram-mod" (each auto-applies/removes its own default sub-parameters), and "Automatic YaRN scaling control"/"yarn-auto-scale". Changing "backend"/"backendKey" or "backendVersion" without also setting "backendType" in the same call auto-resolves the type (adopts the installed match\'s type if the new key+version is unambiguous, else the Global Backend\'s type if it happens to be that same fork+version, else clears it back to ambiguous) -- pass "backendType" explicitly (from info-backends) to pin an exact GPU-runtime variant when more than one is installed for that fork+version. Refuses to change model/backend/backendVersion/backendType of a currently-serving Template. If "Only allow Template edits via MCP for MCP-made Templates" is on, only "MCP-made"-tagged Templates can be edited.',
     params: [
       { name: 'templates', type: 'string[]', required: true, description: 'One or more Template names' },
-      { name: 'changes', type: 'object', required: true, description: 'Key/value map of parameters to change, e.g. {"ctx-size": 8192, "model": "..."}' }
+      { name: 'changes', type: 'object', required: true, description: 'Key/value map of parameters to change, e.g. {"ctx-size": 8192, "model": "...", "backendType": "vulkan"}. Set "backend"/"backendKey" to "" (empty string) to unpin and go back to following the Global Backend.' }
     ]
   },
   {
@@ -1217,7 +1317,7 @@ export const TOOL_DEFS: ToolDef[] = [
   },
   {
     name: 'benchmark', handler: toolBenchmark,
-    description: 'Benchmark a Template with 3 default prompts (or custom ones): frees the target\'s port (stopping whichever Template is actually occupying it — detected automatically, you do not need to know your own identity), starts the target fresh, sends each prompt to a fresh slot, reports time-to-first-token and tokens/sec per prompt, then restores whichever Template was actually running before the call. The run (results + the Template\'s launch parameters at the time) is saved into that Template\'s benchmark history — see display-benchmark. NEVER call this in the background / non-blocking / fire-and-forget (e.g. a client-level "run in background" option) — it stops and restarts servers, including possibly your own; running it without waiting for the result risks the connection being cut out from under you mid-call. Benchmarks are also more representative run one at a time, sequentially, rather than in parallel — that also better reflects a model\'s actual peak throughput unless you specifically intend to measure a multi-model-at-once setup.',
+    description: 'Benchmark a Template with 3 default prompts (or custom ones): frees the target\'s port (stopping whichever Template is actually occupying it — detected automatically, you do not need to know your own identity), starts the target fresh, sends each prompt to a fresh slot, reports time-to-first-token and tokens/sec per prompt, then restores whichever Template was actually running before the call. The run (results + the Template\'s launch parameters at the time) is saved into that Template\'s benchmark history — see display-benchmark. Benchmarks are more representative run one at a time, sequentially, rather than in parallel — that better reflects a model\'s actual peak throughput unless you specifically intend to measure a multi-model-at-once setup.',
     params: [
       { name: 'template', type: 'string', required: true, description: 'Template to benchmark' },
       { name: 'prompts', type: 'string[]', required: false, description: 'Custom prompts. Omit to use the default 3-prompt test.' }
