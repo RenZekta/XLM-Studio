@@ -4149,9 +4149,24 @@ export function registerIpcHandlers(): void {
   // GPU detection strategy (in priority order):
   //   1. nvidia-smi            → NVIDIA GPUs (free + total + name, accurate).
   //   2. systeminformation     → AMD / Intel GPUs (name + total VRAM via WMI/PCI).
-  //   3. Linux amdgpu sysfs    → accurate free VRAM for AMD on Linux.
+  //   3. Linux sysfs           → accurate free VRAM for discrete AMD/Intel.
+  //   4. Windows GPU Adapter Memory counters → live usage on any vendor.
   // The fallbacks below detect the real vendor + name and report a
   // best-effort free VRAM on non-NVIDIA hardware.
+  async function queryGpuAdapterCounterBytes(counter: string): Promise<number | null> {
+    const psCmd = 'powershell -NoProfile -NonInteractive -Command '
+      + `"(Get-Counter '\\GPU Adapter Memory(*)\\${counter}' -ErrorAction Stop).CounterSamples `
+      + '| Measure-Object -Property CookedValue -Sum | Select-Object -ExpandProperty Sum"'
+    const out = await new Promise<string | null>((resolve) => {
+      exec(psCmd, { timeout: 5000 }, (err, stdout) => {
+        if (err) return resolve(null)
+        resolve(stdout.trim())
+      })
+    })
+    const n = out ? Number(out) : NaN
+    return (!isNaN(n) && n >= 0) ? n : null
+  }
+
   async function getVramInfoImpl() {
     try {
       const isWin = process.platform === 'win32'
@@ -4212,6 +4227,10 @@ export function registerIpcHandlers(): void {
 
           let totalVRAMMB = Math.round(Number(best.vram) || 0)  // systeminformation reports vram in MB
           let freeVRAMMB = 0
+          // A live source can legitimately report zero free VRAM, which must
+          // not be confused with "no source available": the static estimate
+          // below would then invent headroom on a GPU that is genuinely full.
+          let liveVRAMMeasured = false
 
           // --- 3. Linux sysfs: accurate free VRAM for discrete AMD/Intel ---
           // mem_info_vram_total/mem_info_vram_used is a generic DRM/TTM
@@ -4235,6 +4254,7 @@ export function registerIpcHandlers(): void {
                   if (!isNaN(t) && t > 0) {
                     totalVRAMMB = Math.round(t / (1024 * 1024))
                     freeVRAMMB = Math.max(0, Math.round((t - (isNaN(u) ? 0 : u)) / (1024 * 1024)))
+                    liveVRAMMeasured = true
                     foundSys = true
                     break
                   }
@@ -4244,49 +4264,47 @@ export function registerIpcHandlers(): void {
             } catch (e) { console.log('[VRAM] sysfs read error:', String(e)) }
           }
 
-          // --- 4. Windows: live VRAM usage via the built-in "GPU Adapter
-          // Memory" performance counter (Windows 10+, vendor-agnostic —
+          // --- 4. Windows: live GPU usage via the built-in "GPU Adapter
+          // Memory" performance counters (Windows 10+, vendor-agnostic --
           // works for AMD/Intel same as NVIDIA, unlike nvidia-smi/amdgpu
-          // sysfs above). This is what actually makes "Use current memory
-          // state" reflect real usage on Windows instead of a static number.
-          // Prefers "Total Committed" (dedicated + shared-aperture VidMm
-          // commitment) over "Dedicated Usage" (dedicated aperture only) —
-          // WDDM lets a process commit GPU memory beyond physical VRAM,
-          // backed by shared system memory, so Dedicated Usage alone can
-          // under-count real GPU memory pressure the same way os.freemem()
-          // under-counted RAM pressure (see getSystemRamImpl below). Falls
-          // back to Dedicated Usage where Total Committed isn't published
-          // (older Windows builds/drivers).
-          if (isWin && freeVRAMMB === 0 && totalVRAMMB > 0) {
-            const queryGpuAdapterCounter = async (counter: string): Promise<number | null> => {
-              const psCmd = 'powershell -NoProfile -NonInteractive -Command '
-                + `"(Get-Counter '\\GPU Adapter Memory(*)\\${counter}' -ErrorAction Stop).CounterSamples `
-                + '| Measure-Object -Property CookedValue -Sum | Select-Object -ExpandProperty Sum"'
-              const out = await new Promise<string | null>((resolve) => {
-                exec(psCmd, { timeout: 5000 }, (err, stdout) => {
-                  if (err) return resolve(null)
-                  resolve(stdout.trim())
-                })
-              })
-              const n = out ? Number(out) : NaN
-              return (!isNaN(n) && n >= 0) ? n : null
-            }
+          // sysfs above). The two counters measure different pools and must
+          // not be conflated. "Dedicated Usage" is the physical dedicated
+          // VRAM in use, including driver-internal allocations: ROCm/Vulkan
+          // keep model weights resident inside the driver, outside the
+          // per-process WDDM commit path, so "Total Committed" alone misses
+          // most of what actually occupies the card. Commits beyond the
+          // dedicated aperture are shared memory backed by system RAM; that
+          // belongs to the RAM accounting in getSystemRamImpl, never to the
+          // VRAM pool.
+          if (isWin && !liveVRAMMeasured && totalVRAMMB > 0) {
             try {
-              const usedBytes = (await queryGpuAdapterCounter('Total Committed')) ?? (await queryGpuAdapterCounter('Dedicated Usage'))
-              if (usedBytes !== null) {
-                const usedMB = Math.round(usedBytes / (1024 * 1024))
-                freeVRAMMB = Math.max(0, totalVRAMMB - usedMB)
+              const dedicatedBytes = await queryGpuAdapterCounterBytes('Dedicated Usage')
+              if (dedicatedBytes !== null) {
+                liveVRAMMeasured = true
+                const dedicatedMB = Math.round(dedicatedBytes / (1024 * 1024))
+                freeVRAMMB = Math.max(0, totalVRAMMB - Math.min(dedicatedMB, totalVRAMMB))
+              } else {
+                // Dedicated Usage not published (older builds/drivers): the
+                // committed total clamped to the dedicated aperture is the
+                // closest dedicated-VRAM proxy available.
+                const committedBytes = await queryGpuAdapterCounterBytes('Total Committed')
+                if (committedBytes !== null) {
+                  liveVRAMMeasured = true
+                  const committedMB = Math.round(committedBytes / (1024 * 1024))
+                  freeVRAMMB = Math.max(0, totalVRAMMB - Math.min(committedMB, totalVRAMMB))
+                }
               }
             } catch { /* fall through to the static estimate below */ }
           }
 
           // Last-resort static estimate, only reached when no live source
-          // above (nvidia-smi, Linux amdgpu sysfs, or the Windows GPU
-          // Adapter Memory counter) was available at all — e.g. a VM without
-          // the counter, or a permissions issue running PowerShell. Keeps
-          // VRAM budgeting functional but does NOT reflect real usage, so it
-          // will look identical across polls regardless of what's loaded.
-          if (freeVRAMMB === 0 && totalVRAMMB > 0) {
+          // above (nvidia-smi, Linux sysfs, or the Windows GPU Adapter
+          // Memory counters) was available at all -- e.g. a VM without the
+          // counter, or a permissions issue running PowerShell. It does NOT
+          // reflect real usage, so it must not fire when a live source
+          // reported a genuinely full GPU: freeVRAMMB == 0 from a real
+          // measurement is not the same as "no measurement possible".
+          if (!liveVRAMMeasured && totalVRAMMB > 0) {
             freeVRAMMB = Math.round(totalVRAMMB * 0.85)
           }
 
@@ -4302,36 +4320,26 @@ export function registerIpcHandlers(): void {
   ipcMain.handle('get-vram-info', async () => getVramInfoImpl())
 
   // ----- System RAM info -----
-  // os.freemem() reports raw physical pages not currently touched by any
-  // process -- it says nothing about memory other processes have already
-  // committed/reserved (e.g. via malloc/VirtualAlloc) but haven't touched
-  // yet. That gap is real capacity risk, not slack: if those processes go
-  // on to touch what they already reserved, the system has to honor it,
-  // and a NEW large allocation (loading a model's weights) that assumed
-  // the gap was free can push total commitment past physical RAM, causing
-  // heavy paging or an outright freeze. Task Manager's own "Committed"
-  // figure (and Linux's Committed_AS) is exactly this: currently-promised
-  // memory system-wide, whether or not it's been touched yet. Available
-  // RAM for a new allocation is therefore total RAM minus that commit
-  // charge, not total minus "currently touched" -- os.freemem() answers a
-  // different, less useful question. See getVramInfoImpl's Windows
-  // "Total Committed" counter above for the identical reasoning applied
-  // to VRAM.
+  // Available RAM for a new model load is total physical RAM minus the
+  // system commit charge (Task Manager's "Committed", Linux's Committed_AS),
+  // not minus the pages currently touched: memory processes have promised
+  // but not touched still has to be honored when they touch it, so a load
+  // that treated that gap as free can page heavily or freeze before the gap
+  // is actually exhausted. GPU-adapter commits are charged against the same
+  // system limit but are GPU-side memory, not RAM a CPU allocation can use,
+  // so the Windows branch splits the charge by pool; a model resident on
+  // the GPU would otherwise read as "no RAM free" while physical RAM is
+  // nearly empty.
   async function getSystemRamImpl() {
     const os = await import('os')
     const total = os.totalmem()
     const totalRAMMB = Math.round(total / (1024 * 1024))
     if (process.platform === 'win32') {
-      // Win32_OperatingSystem.TotalVirtualMemorySize is the system commit
-      // LIMIT (physical RAM + pagefile, in KB); FreeVirtualMemory is how
-      // much of that limit is currently unused. Their difference is the
-      // system commit CHARGE -- what Task Manager's Performance tab calls
-      // "Committed". Subtracting that from physical RAM (not from the
-      // virtual/pagefile-inclusive limit) keeps this conservative: a large
-      // pagefile can leave plenty of *virtual* commit headroom while still
-      // guaranteeing heavy disk paging (i.e. a de facto freeze for a model
-      // load) well before that headroom is exhausted, so headroom that
-      // only exists on paper doesn't get reported as usable.
+      // TotalVirtualMemorySize is the commit LIMIT (physical RAM + pagefile,
+      // in KB); FreeVirtualMemory is the unused part of it. The charge is
+      // subtracted from physical RAM, not from the limit: pagefile-backed
+      // headroom only exists on paper and would guarantee heavy disk paging
+      // (a de facto freeze for a model load) long before it is exhausted.
       try {
         const psCmd = 'powershell -NoProfile -NonInteractive -Command '
           + '"$o = Get-CimInstance Win32_OperatingSystem; \'{0},{1},{2}\' -f $o.TotalVisibleMemorySize,$o.TotalVirtualMemorySize,$o.FreeVirtualMemory"'
@@ -4346,7 +4354,20 @@ export function registerIpcHandlers(): void {
           const [totalVisibleKB, totalVirtualKB, freeVirtualKB] = parts
           const commitChargeMB = (totalVirtualKB - freeVirtualKB) / 1024
           const totalVisibleMB = totalVisibleKB / 1024
-          return { totalRAMMB, freeRAMMB: Math.max(0, Math.round(totalVisibleMB - commitChargeMB)) }
+          // The charge includes GPU-adapter commits, but the part of them
+          // physically resident in dedicated VRAM is not RAM. The shared-
+          // aperture remainder (committed beyond dedicated usage) stays
+          // charged: it is RAM-backed GPU memory.
+          let gpuVramResidentMB = 0
+          try {
+            const committedBytes = await queryGpuAdapterCounterBytes('Total Committed')
+            const dedicatedBytes = await queryGpuAdapterCounterBytes('Dedicated Usage')
+            if (committedBytes !== null && dedicatedBytes !== null) {
+              gpuVramResidentMB = Math.min(committedBytes, dedicatedBytes) / (1024 * 1024)
+            }
+          } catch { /* counters unavailable: leave the charge intact */ }
+          const ramChargeMB = Math.max(0, commitChargeMB - gpuVramResidentMB)
+          return { totalRAMMB, freeRAMMB: Math.max(0, Math.round(totalVisibleMB - ramChargeMB)) }
         }
       } catch { /* fall through to os.freemem() below */ }
     } else if (process.platform === 'linux') {
