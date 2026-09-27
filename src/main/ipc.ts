@@ -4272,10 +4272,7 @@ export function registerIpcHandlers(): void {
           // VRAM in use, including driver-internal allocations: ROCm/Vulkan
           // keep model weights resident inside the driver, outside the
           // per-process WDDM commit path, so "Total Committed" alone misses
-          // most of what actually occupies the card. Commits beyond the
-          // dedicated aperture are shared memory backed by system RAM; that
-          // belongs to the RAM accounting in getSystemRamImpl, never to the
-          // VRAM pool.
+          // most of what actually occupies the card.
           if (isWin && !liveVRAMMeasured && totalVRAMMB > 0) {
             try {
               const dedicatedBytes = await queryGpuAdapterCounterBytes('Dedicated Usage')
@@ -4320,75 +4317,46 @@ export function registerIpcHandlers(): void {
   ipcMain.handle('get-vram-info', async () => getVramInfoImpl())
 
   // ----- System RAM info -----
-  // Available RAM for a new model load is total physical RAM minus the
-  // system commit charge (Task Manager's "Committed", Linux's Committed_AS),
-  // not minus the pages currently touched: memory processes have promised
-  // but not touched still has to be honored when they touch it, so a load
-  // that treated that gap as free can page heavily or freeze before the gap
-  // is actually exhausted. GPU-adapter commits are charged against the same
-  // system limit but are GPU-side memory, not RAM a CPU allocation can use,
-  // so the Windows branch splits the charge by pool; a model resident on
-  // the GPU would otherwise read as "no RAM free" while physical RAM is
-  // nearly empty.
+  // "Available" is what a new allocation can actually get without heavy
+  // paging: free pages plus the standby list and other cache that gets
+  // reclaimed on demand. System-wide commit charge (Task Manager's
+  // "Committed", Linux's Committed_AS) is not a substitute for this --
+  // on any real desktop with background apps and a pagefile, total commit
+  // routinely sits close to or above physical RAM as a matter of course,
+  // because most of that pagefile-backed headroom is never touched
+  // simultaneously. Reconstructing "available" by subtracting the full
+  // commit charge from physical RAM therefore overcounts memory pressure,
+  // and a single large new commitment (loading a big model, whether its
+  // weights land in process RAM or in the GPU driver's dedicated-VRAM
+  // commit) can push the reconstructed figure to zero while the system
+  // is nowhere near actually out of memory.
+  //
+  // This does mean a large allocation another process has reserved but not
+  // yet touched isn't held back from this figure -- if that process later
+  // touches it at the same time a model load is competing for RAM, both
+  // can still page. There is no live counter, on any platform, that
+  // reserves for a promise that has not been kept yet; Task Manager's own
+  // "Available" has the identical gap. Treating it as a point-in-time
+  // reading to re-poll right before a load, not a number to lock in ahead
+  // of time, is the only mitigation that does not also flag ordinary
+  // desktops (browsers and IDEs routinely commit far more address space
+  // than they ever touch at once) as perpetually low on memory.
   async function getSystemRamImpl() {
     const os = await import('os')
     const total = os.totalmem()
     const totalRAMMB = Math.round(total / (1024 * 1024))
-    if (process.platform === 'win32') {
-      // TotalVirtualMemorySize is the commit LIMIT (physical RAM + pagefile,
-      // in KB); FreeVirtualMemory is the unused part of it. The charge is
-      // subtracted from physical RAM, not from the limit: pagefile-backed
-      // headroom only exists on paper and would guarantee heavy disk paging
-      // (a de facto freeze for a model load) long before it is exhausted.
-      try {
-        const psCmd = 'powershell -NoProfile -NonInteractive -Command '
-          + '"$o = Get-CimInstance Win32_OperatingSystem; \'{0},{1},{2}\' -f $o.TotalVisibleMemorySize,$o.TotalVirtualMemorySize,$o.FreeVirtualMemory"'
-        const out = await new Promise<string | null>((resolve) => {
-          exec(psCmd, { timeout: 5000 }, (err, stdout) => {
-            if (err) return resolve(null)
-            resolve(stdout.trim())
-          })
-        })
-        const parts = (out || '').split(',').map(s => Number(s.trim()))
-        if (parts.length === 3 && parts.every(n => !isNaN(n) && n >= 0)) {
-          const [totalVisibleKB, totalVirtualKB, freeVirtualKB] = parts
-          const commitChargeMB = (totalVirtualKB - freeVirtualKB) / 1024
-          const totalVisibleMB = totalVisibleKB / 1024
-          // The charge includes GPU-adapter commits, but the part of them
-          // physically resident in dedicated VRAM is not RAM. The shared-
-          // aperture remainder (committed beyond dedicated usage) stays
-          // charged: it is RAM-backed GPU memory.
-          let gpuVramResidentMB = 0
-          try {
-            const committedBytes = await queryGpuAdapterCounterBytes('Total Committed')
-            const dedicatedBytes = await queryGpuAdapterCounterBytes('Dedicated Usage')
-            if (committedBytes !== null && dedicatedBytes !== null) {
-              gpuVramResidentMB = Math.min(committedBytes, dedicatedBytes) / (1024 * 1024)
-            }
-          } catch { /* counters unavailable: leave the charge intact */ }
-          const ramChargeMB = Math.max(0, commitChargeMB - gpuVramResidentMB)
-          return { totalRAMMB, freeRAMMB: Math.max(0, Math.round(totalVisibleMB - ramChargeMB)) }
-        }
-      } catch { /* fall through to os.freemem() below */ }
-    } else if (process.platform === 'linux') {
-      // Same reasoning via /proc/meminfo's own commit-charge fields:
-      // CommitLimit (RAM×overcommit_ratio + swap, depending on
-      // vm.overcommit_memory) and Committed_AS (currently promised,
-      // touched or not).
+    if (process.platform === 'linux') {
+      // MemAvailable is the kernel's own estimate of this same figure --
+      // free pages plus reclaimable page cache and slab, minus what the
+      // kernel reserves so reclaiming it wouldn't itself cause thrashing.
+      // It has been in /proc/meminfo since 3.14 specifically so tools
+      // don't have to approximate it from MemFree.
       try {
         const meminfo = readFileSync('/proc/meminfo', 'utf-8')
-        const grab = (label: string): number | null => {
-          const m = meminfo.match(new RegExp(`^${label}:\\s+(\\d+)\\s*kB`, 'm'))
-          return m ? Number(m[1]) : null
-        }
-        const commitLimitKB = grab('CommitLimit')
-        const committedAsKB = grab('Committed_AS')
-        if (commitLimitKB !== null && committedAsKB !== null) {
-          const freeCommitMB = (commitLimitKB - committedAsKB) / 1024
-          // Clamp to physical RAM: CommitLimit can exceed it (swap and/or
-          // overcommit_ratio > 100), but nothing can ever be MORE available
-          // than total physical memory.
-          return { totalRAMMB, freeRAMMB: Math.max(0, Math.min(totalRAMMB, Math.round(freeCommitMB))) }
+        const m = meminfo.match(/^MemAvailable:\s+(\d+)\s*kB/m)
+        if (m) {
+          const availableMB = Number(m[1]) / 1024
+          return { totalRAMMB, freeRAMMB: Math.max(0, Math.round(availableMB)) }
         }
       } catch { /* fall through to os.freemem() below */ }
     } else if (process.platform === 'darwin') {
@@ -4433,10 +4401,13 @@ export function registerIpcHandlers(): void {
         }
       } catch { /* fall through to os.freemem() below */ }
     }
-    // Either platform's query above failing (older Windows without CIM, a
-    // locked-down PowerShell policy, a /proc without Committed_AS, vm_stat
-    // missing/unparseable): fall back to the plain physical-free reading.
-    // Less accurate under real memory pressure, but always available.
+    // Windows falls straight through to here: os.freemem() there already
+    // reads GlobalMemoryStatusEx's ullAvailPhys, the free+standby+zero sum
+    // -- the same definition as \Memory\Available Bytes, so there is
+    // nothing a separate live query would add. Linux/macOS land here only
+    // if their query above failed (a /proc without MemAvailable, vm_stat
+    // missing/unparseable): less accurate under real memory pressure, but
+    // always available.
     const free = os.freemem()
     return { totalRAMMB, freeRAMMB: Math.round(free / (1024 * 1024)) }
   }
