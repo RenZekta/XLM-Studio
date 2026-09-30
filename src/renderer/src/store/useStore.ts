@@ -16,8 +16,8 @@ interface CardState {
 export interface ModelDownloadInfo {
   id: string; url: string; filename: string; destPath: string
   receivedBytes: number; totalBytes: number
-  phase: 'downloading' | 'paused' | 'done' | 'error' | 'cancelled'
-  percent: number; repoId?: string; speed?: number
+  phase: 'queued' | 'downloading' | 'paused' | 'done' | 'error' | 'cancelled'
+  percent: number; repoId?: string; speed?: number; error?: string; queuePosition?: number
 }
 
 interface AppStore {
@@ -42,7 +42,6 @@ interface AppStore {
   downloadProgress: Record<string, { percent: number; phase: string; queuePosition?: number }>
   templateSearch: string
   modelDownloads: Record<string, ModelDownloadInfo>
-  hfDownloads: { repoId: string; filename: string; percent: number; phase: 'downloading' | 'paused' | 'saving' | 'creating_template' | 'done' | 'error' | 'starting'; speed?: number }[]
   hubQuery: string
   hubResults: any[]
   hubSelectedModelId: string | null
@@ -103,8 +102,6 @@ interface AppStore {
   setTemplateSearch: (q: string) => void
   upsertModelDownload: (d: ModelDownloadInfo) => void
   removeModelDownload: (id: string) => void
-  setHfDownload: (d: { repoId: string; filename: string; percent: number; phase: 'downloading' | 'paused' | 'saving' | 'creating_template' | 'done' | 'error' | 'starting'; speed?: number }) => void
-  removeHfDownload: (filename: string) => void
   setHubQuery: (q: string) => void
   setHubResults: (r: any[]) => void
   setHubSelectedModelId: (id: string | null) => void
@@ -159,7 +156,7 @@ export const useStore = create<AppStore>((set) => ({
   commandsSchema: null, releaseInfo: null, paths: null,
   view: 'cards', showCreateModal: false, editingTemplate: null, prefillModelPath: null,
   updateDismissed: false, checkingUpdate: false, downloadProgress: {},
-  templateSearch: '', modelDownloads: {}, hfDownloads: [],
+  templateSearch: '', modelDownloads: {},
   hubQuery: '', hubResults: [], hubSelectedModelId: null, hubSort: 'downloads', hubDirection: -1,
   compactSidebarEnabled: localStorage.getItem('compactSidebar') === 'true',
 
@@ -219,11 +216,6 @@ export const useStore = create<AppStore>((set) => ({
   removeModelDownload: (id) => set((s) => {
     const next = { ...s.modelDownloads }; delete next[id]; return { modelDownloads: next }
   }),
-  setHfDownload: (d) => set((s) => {
-    const arr = s.hfDownloads.filter(x => x.filename !== d.filename)
-    return { hfDownloads: [...arr, d] }
-  }),
-  removeHfDownload: (filename) => set((s) => ({ hfDownloads: s.hfDownloads.filter(x => x.filename !== filename) })),
   setHubQuery: (q) => set({ hubQuery: q }),
   setHubResults: (r) => set({ hubResults: r }),
   setHubSelectedModelId: (id) => set({ hubSelectedModelId: id }),

@@ -10,7 +10,7 @@
 import { buildQuickEngineBaseline, SAMPLING_KEYS, seedSamplingArgsFromPreset } from '../shared/presetBaselines'
 import { COMMON_PARAM_FLAGS } from '../shared/commonParams'
 import { applyNgramModifierToggle, getNgramModifierState, NGRAM_MAP_K4V_FLAGS, NGRAM_MOD_FLAGS } from '../shared/specToggles'
-import type { Template } from '../shared/types'
+import type { Template, CheckpointMode } from '../shared/types'
 
 // Speculative-decoding tier table — mirrors src/main/ipc.ts's own
 // SPEC_TIER_DEFS/classifySidecarFilename (and CmdParamsEditor.tsx's
@@ -50,7 +50,7 @@ export interface ControlDeps {
   // that). Used by info-models so listing models stays cheap.
   getCachedMetadata: (modelPath: string) => any | null
   getCommands: (backendKey: string) => Promise<any>
-  runModel: (opts: { id: string; name: string; backendPath: string; exe: string; args: string[]; openBrowser: boolean; port: number; ignoreBaseUrlOverride?: boolean; skipCheckpoint?: boolean }) => Promise<{ success: boolean; pid?: number; error?: string; port?: number }>
+  runModel: (opts: { id: string; name: string; backendPath: string; exe: string; args: string[]; openBrowser: boolean; port: number; ignoreBaseUrlOverride?: boolean; skipCheckpoint?: boolean; checkpointMode?: CheckpointMode }) => Promise<{ success: boolean; pid?: number; error?: string; port?: number }>
   stopModel: (id: string, opts?: { skipCheckpoint?: boolean }) => Promise<{ success: boolean; error?: string }>
   isRunning: (templateId: string) => { running: boolean; port?: number }
   getOverridePort: () => Promise<number | null>

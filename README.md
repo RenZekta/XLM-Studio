@@ -35,7 +35,7 @@ Search Hugging Face directly within the application. Browse repositories, view f
 
 **Smart Download Manager**
 
-Pause, resume, or cancel large model downloads reliably. You can also paste direct GGUF links. When a download completes, XLM Studio automatically generates an execution template with recommended settings tailored to the model's architecture and your hardware. If you prefer to interact with CLI, I have a project to greatly improve the HF CLI experience and control over it: https://github.com/RenZekta/HF-CFD
+Pause, resume, or cancel large model downloads reliably. You can also paste direct GGUF links. If you prefer to interact with CLI, I have a project to greatly improve the HF CLI experience and control over it: https://github.com/RenZekta/HF-CFD
 
 
 **Automatic Metadata Extraction**
@@ -204,7 +204,7 @@ cd (X:\your\chosen\destination)\XLM-Studio && npm install && npm run build && np
 
 ### Phase 1: Core Foundation (Completed)
 - [x] **Integrated Model Hub**: Hugging Face search & download direct from the app.
-- [x] **Smart Download Manager**: Pause/resume/cancel, auto-template generation based on hardware & quant level.
+- [x] **Smart Download Manager**: Pause/resume/cancel, paste direct GGUF links. Downloads never create Templates on their own.
 - [x] **Template-Based Execution**: Run multiple models on different ports, reusable configuration templates.
 - [x] **Version and Backend Management**: Download and switch between different versions of `llama.cpp`-compatible binaries directly.
 - [x] **Visual Command Editor**: Graphical UI for configuring server parameters instead of terminal flags.

@@ -94,13 +94,7 @@ const api = {
   // ----- HuggingFace -----
   hfSearch: (query: string, sort?: string, direction?: number) => ipcRenderer.invoke('hf-search', query, sort, direction),
   hfGetFiles: (repoId: string) => ipcRenderer.invoke('hf-get-files', repoId),
-  hfDownloadModel: (opts: object) => ipcRenderer.invoke('hf-download-model', opts),
   hfOpenModelsDir: () => ipcRenderer.invoke('hf-open-models-dir'),
-  onHfDownloadProgress: (callback: (data: { percent: number; phase: string; filename: string; destPath: string }) => void) => {
-    ipcRenderer.removeAllListeners('hf-download-progress')
-    ipcRenderer.on('hf-download-progress', (_event, data) => callback(data))
-  },
-  removeHfDownloadListener: () => ipcRenderer.removeAllListeners('hf-download-progress'),
 
   // ----- Folders / paths -----
   openFolder: (path: string) => ipcRenderer.invoke('open-folder', path),
@@ -110,6 +104,7 @@ const api = {
   // ----- Chat windows -----
   openChatWindow: (port: number, name: string, ctxSize?: number) => ipcRenderer.invoke('open-chat-window', port, name, ctxSize),
   openDetachedChatWindow: (port: number, name: string) => ipcRenderer.invoke('open-detached-chat-window', port, name),
+  resetChatOrigin: (url: string) => ipcRenderer.invoke('reset-chat-origin', url),
   onAddChatTab: (cb: (data: { url: string; name: string }) => void) => {
     ipcRenderer.removeAllListeners('add-chat-tab')
     ipcRenderer.on('add-chat-tab', (_e, data) => cb(data))

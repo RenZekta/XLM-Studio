@@ -50,7 +50,7 @@ function quantLabel(filename: string): { label: string; color: string } {
 }
 export default function HuggingFaceView() {
   const {
-    hfDownloads, setHfDownload, removeHfDownload,
+    modelDownloads,
     hubQuery, hubResults, hubSelectedModelId,
     setHubQuery, setHubResults, setHubSelectedModelId,
     hubSort, hubDirection, setHubSort, setHubDirection
@@ -111,20 +111,23 @@ export default function HuggingFaceView() {
 
   async function handleDownload(file: HfFile) {
     if (!selectedModel) return
-    setHfDownload({ repoId: selectedModel.id, filename: file.name, percent: 0, phase: 'starting' })
-    const res = await window.api.hfDownloadModel({
-      repoId: selectedModel.id,
+    const res = await window.api.startModelDownload({
+      url: file.downloadUrl,
       filename: file.name,
-      downloadUrl: file.downloadUrl
+      repoId: selectedModel.id,
+      modelFolder: selectedModel.id.split('/').pop()
     })
-    if (!res.success) {
-      removeHfDownload(file.name)
-      alert(`Download failed: ${res.error}`)
-    }
+    if (!res.success) alert(`Download failed: ${res.error}`)
   }
 
-  const isDownloading = (filename: string) => hfDownloads.some(d => d.filename === filename)
-  const getProgress = (filename: string) => hfDownloads.find(d => d.filename === filename)
+  // Tasks are keyed by repoId+filename (see enqueueModelDownload in
+  // ipc.ts) so two repos shipping a same-named file can't collide.
+  const downloadIdFor = (filename: string) => `${selectedModel?.id || ''}::${filename}`
+  const getProgress = (filename: string) => modelDownloads[downloadIdFor(filename)]
+  const isDownloading = (filename: string) => {
+    const dl = getProgress(filename)
+    return !!dl && dl.phase !== 'done' && dl.phase !== 'cancelled'
+  }
   const popularQueries = ['llama', 'mistral', 'phi', 'qwen', 'gemma', 'deepseek', 'falcon']
   return (
     <div className="hub-container">
@@ -306,10 +309,10 @@ export default function HuggingFaceView() {
                           <div className="hub-progress-fill" style={{ width: `${dl?.percent || 0}%`, opacity: dl?.phase === 'paused' ? 0.45 : 1, transition: 'width 0.3s ease' }} />
                         </div>
                         <span className="hub-progress-label">
-                          {dl?.phase === 'saving'
-                            ? 'Saving...'
-                            : dl?.phase === 'creating_template'
-                            ? 'Creating template...'
+                          {dl?.phase === 'queued'
+                            ? `Queued${dl?.queuePosition ? ` (#${dl.queuePosition})` : ''}`
+                            : dl?.phase === 'error'
+                            ? (dl?.error || 'Failed')
                             : dl?.phase === 'paused'
                             ? `Paused • ${dl?.percent || 0}%`
                             : `${dl?.percent || 0}%${dl?.speed ? ` • ${formatSpeed(dl.speed)}` : ''}`
@@ -319,7 +322,7 @@ export default function HuggingFaceView() {
                           <button
                             className="btn btn-ghost btn-icon"
                             style={{ marginLeft: 4 }}
-                            onClick={() => window.api.resumeModelDownload(file.name)}
+                            onClick={() => window.api.resumeModelDownload(downloadIdFor(file.name))}
                             title="Resume"
                           >
                             <Play size={12} />
@@ -328,7 +331,7 @@ export default function HuggingFaceView() {
                           <button
                             className="btn btn-ghost btn-icon"
                             style={{ marginLeft: 4 }}
-                            onClick={() => window.api.pauseModelDownload(file.name)}
+                            onClick={() => window.api.pauseModelDownload(downloadIdFor(file.name))}
                             title="Pause"
                           >
                             <Pause size={12} />
@@ -353,31 +356,6 @@ export default function HuggingFaceView() {
               })}
             </div>
           )}
-        </div>
-      )}
-      {}
-      {hfDownloads.filter(d => d.phase !== 'done').length > 0 && (
-        <div className="hub-downloads-strip">
-          {hfDownloads.filter(d => d.phase !== 'done').map(dl => {
-            const isPaused = dl.phase === 'paused'
-            let statusText = `${dl.percent}%`
-            if (dl.phase === 'downloading') statusText = dl.speed ? `${dl.percent}% • ${formatSpeed(dl.speed)}` : `Downloading [${dl.percent}%]`
-            if (dl.phase === 'saving') statusText = 'Saving to /models...'
-            if (dl.phase === 'creating_template') statusText = 'Creating template...'
-            if (isPaused) statusText = `Paused • ${dl.percent}%`
-            return (
-              <div key={dl.filename} className="hub-dl-strip-item">
-                {isPaused
-                  ? <Pause size={12} style={{ color: 'var(--text-muted)', flexShrink: 0 }} />
-                  : <Loader2 size={12} className="spin" style={{ flexShrink: 0 }} />}
-                <span className="hub-dl-strip-name">{dl.filename}</span>
-                <div className="hub-dl-strip-bar">
-                  <div className="hub-dl-strip-fill" style={{ width: `${dl.percent}%`, opacity: isPaused ? 0.45 : 1, transition: 'width 0.3s ease' }} />
-                </div>
-                <span className="hub-dl-strip-pct">{statusText}</span>
-              </div>
-            )
-          })}
         </div>
       )}
     </div>

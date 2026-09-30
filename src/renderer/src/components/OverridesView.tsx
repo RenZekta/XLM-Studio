@@ -1,6 +1,6 @@
 import React, { useState } from 'react'
 import { useStore } from '../store/useStore'
-import { Link2, Database, Shield, Copy, Check, Server } from 'lucide-react'
+import { Link2, Database, Shield, Copy, Check, Server, Save } from 'lucide-react'
 import { formatWithSpaces, parseSpacedNumber, CONTEXT_POWER_OF_TWO_STEPS, snapToNearestPowerOfTwo, indexOnLadder } from '../utils/contextFormat'
 
 
@@ -110,7 +110,7 @@ function BaseUrlField({ port, onPortChange, onPortBlur }: {
 export default function OverridesView() {
   const {
     modelDefaults, setModelDefaults, baseUrlOverride, setBaseUrlOverride, cpuInfo,
-    vramInfo, systemRam
+    vramInfo, systemRam, kvCacheCheckpoints, setKvCacheCheckpoints
   } = useStore()
   // "Recommended CPU Threads override" — local text-input draft state so
   // the user can type any % while editing, snapping to a whole-core-accurate
@@ -212,6 +212,33 @@ export default function OverridesView() {
                 onBlur={async () => { try { await window.api?.setBaseUrlOverride?.(baseUrlOverride) } catch {} }}
               />
             )}
+          </div>
+        </div>
+      </div>
+
+      <div className="settings-section">
+        <div className="settings-section-title"><Save /> KV Cache Checkpoints</div>
+        <div className="settings-row" style={{ borderBottom: 'none', flexDirection: 'column', alignItems: 'flex-start', gap: 12 }}>
+          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', width: '100%' }}>
+            <div>
+              <div className="settings-row-label">Store KV Cache Checkpoints</div>
+              <div className="settings-row-sub">
+                Save each Template's context to disk on Stop and restore it on the next Start, so switching
+                back to a Template doesn't re-read the whole prompt from scratch. Never applied to Benchmarks,
+                to keep their measurements fresh. Storage mode, folders and cleanup are under Settings →
+                KV Cache Checkpoints.
+              </div>
+            </div>
+            <div className="toggle-wrap">
+              <label className="toggle">
+                <input type="checkbox" checked={kvCacheCheckpoints.enabled} onChange={async (e) => {
+                  const o = { ...kvCacheCheckpoints, enabled: e.target.checked }
+                  setKvCacheCheckpoints(o)
+                  try { await window.api.setKvCacheCheckpoints(o) } catch {}
+                }} />
+                <span className="toggle-track"></span><span className="toggle-thumb"></span>
+              </label>
+            </div>
           </div>
         </div>
       </div>

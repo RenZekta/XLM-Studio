@@ -1,5 +1,22 @@
 *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+/* Chromium's native <select> popup (used for every <select> in this app,
+   e.g. the Model Hub sort dropdown) doesn't pick up --surface/--text on its
+   own -- it defaults to the OS light popup regardless of the app's theme,
+   so a dark-themed page gets barely-legible light-on-light option text.
+   color-scheme tells Chromium which native palette to draw the popup's own
+   chrome (scrollbar, etc.) in; the explicit background/color below make
+   sure the option text itself follows the theme too, since Chromium (unlike
+   Firefox) honors plain color/background-color set directly on <option>. */
+select {
+  background-color: var(--surface);
+  color: var(--text);
+}
+select option {
+  background-color: var(--surface);
+  color: var(--text);
+}
 :root {
+  color-scheme: light;
   --bg: #f5f5f5;
   --surface: #ffffff;
   --surface-hover: #f9f9f9;
@@ -409,6 +426,16 @@ input[type="number"] {
   min-width: 160px; z-index: 200; overflow: hidden;
   animation: fadeIn 120ms ease;
 }
+.download-count-badge {
+  position: absolute; top: -4px; right: -4px;
+  display: inline-flex; align-items: center; justify-content: center;
+  min-width: 15px; height: 15px; padding: 0 3px;
+  border-radius: 99px; font-size: 9px; font-weight: 700;
+  background: var(--accent); color: var(--accent-fg); line-height: 1;
+  border: 1.5px solid var(--surface);
+}
+.download-count-badge.danger { background: var(--danger); color: #fff; }
+.downloads-menu-btn { position: relative; flex-shrink: 0; }
 .dropdown-item {
   display: flex; align-items: center; gap: 8px;
   padding: 8px 12px; font-size: 13px; font-weight: 500;
@@ -792,6 +819,7 @@ input[type="number"] {
    Default is "system"; explicit dark/light via [data-theme].
    ========================================================================== */
 :root[data-theme="dark"] {
+  color-scheme: dark;
   --bg: #0e0e10;
   --surface: #18181b;
   --surface-hover: #1f1f23;
@@ -810,6 +838,7 @@ input[type="number"] {
   --shadow-lg: 0 10px 32px rgba(0,0,0,.55), 0 4px 8px rgba(0,0,0,.4);
 }
 :root[data-theme="light"] {
+  color-scheme: light;
   --bg: #f5f5f5;
   --surface: #ffffff;
   --surface-hover: #f9f9f9;
@@ -827,6 +856,7 @@ input[type="number"] {
 /* "system" follows the OS via prefers-color-scheme. */
 @media (prefers-color-scheme: dark) {
   :root[data-theme="system"] {
+    color-scheme: dark;
     --bg: #0e0e10;
     --surface: #18181b;
     --surface-hover: #1f1f23;
@@ -871,6 +901,7 @@ input[type="number"] {
   white-space: nowrap;
 }
 .theme-segmented-btn:hover { color: var(--text); }
+.theme-segmented-btn:disabled { opacity: 0.45; cursor: not-allowed; }
 .theme-segmented-btn.active {
   background: var(--surface);
   color: var(--text);

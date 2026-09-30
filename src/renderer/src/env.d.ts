@@ -1,7 +1,7 @@
 import type {
   Template, BackendVersion, CommandsSchema, ReleaseInfo,
   ModelGroup, TrackedBackend, TrackedBackendRelease, ThemePref,
-  CpuInfo, SpeculationMode, KvCacheCheckpointSettings, RedundantCheckpoint
+  CpuInfo, SpeculationMode, KvCacheCheckpointSettings, RedundantCheckpoint, CheckpointMode
 } from '../../shared/types'
 
 interface ModelDownloadInfo {
@@ -11,10 +11,12 @@ interface ModelDownloadInfo {
   destPath: string
   receivedBytes: number
   totalBytes: number
-  phase: 'downloading' | 'paused' | 'done' | 'error' | 'cancelled'
+  phase: 'queued' | 'downloading' | 'paused' | 'done' | 'error' | 'cancelled'
   percent: number
   speed?: number
   repoId?: string
+  error?: string
+  queuePosition?: number
 }
 interface HfModelResult {
   id: string; author: string; name: string
@@ -82,7 +84,7 @@ interface LlamaCppApi {
   pickAnyFile: () => Promise<string | null>
 
   // Run model
-  runModel: (opts: { id: string; name: string; backendPath: string; exe: string; args: string[]; openBrowser: boolean; port: number; ignoreBaseUrlOverride?: boolean; skipCheckpoint?: boolean }) => Promise<{ success: boolean; pid?: number; error?: string; port?: number }>
+  runModel: (opts: { id: string; name: string; backendPath: string; exe: string; args: string[]; openBrowser: boolean; port: number; ignoreBaseUrlOverride?: boolean; skipCheckpoint?: boolean; checkpointMode?: CheckpointMode }) => Promise<{ success: boolean; pid?: number; error?: string; port?: number }>
   stopModel: (id: string, opts?: { skipCheckpoint?: boolean }) => Promise<{ success: boolean; error?: string; alreadyStopped?: boolean }>
   onModelError: (cb: (data: { id: string; error: string }) => void) => void
   onModelExited: (cb: (data: { id: string }) => void) => void
@@ -92,10 +94,7 @@ interface LlamaCppApi {
   // HuggingFace
   hfSearch: (query: string, sort?: string, direction?: number) => Promise<HfModelResult[] | { error: string }>
   hfGetFiles: (repoId: string) => Promise<HfFileResult[] | { error: string }>
-  hfDownloadModel: (opts: { repoId: string; filename: string; downloadUrl: string }) => Promise<{ success: boolean; error?: string }>
   hfOpenModelsDir: () => Promise<void>
-  onHfDownloadProgress: (callback: (data: { percent: number; phase: string; filename: string; destPath: string; speed?: number }) => void) => void
-  removeHfDownloadListener: () => void
 
   // Folders / paths
   openFolder: (path: string) => Promise<void>
@@ -105,6 +104,7 @@ interface LlamaCppApi {
   // Chat windows
   openChatWindow: (port: number, name: string, ctxSize?: number) => Promise<void>
   openDetachedChatWindow: (port: number, name: string) => Promise<void>
+  resetChatOrigin: (url: string) => Promise<{ success: boolean; error?: string }>
   onAddChatTab: (cb: (data: { url: string; name: string }) => void) => void
   notifyTabMoved: (url: string) => Promise<void>
   onTabMovedElsewhere: (cb: (data: { url: string }) => void) => void

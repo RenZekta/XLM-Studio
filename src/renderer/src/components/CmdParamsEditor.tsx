@@ -7,7 +7,7 @@ import {
   Image as ImageIcon, RotateCcw, Gauge, Sparkles, Layers, AlertTriangle,
   MessageSquare, Copy, Check, ChevronDown
 } from 'lucide-react'
-import type { CommandParam, SpecMethod } from '../../../shared/types'
+import type { CommandParam, SpecMethod, CheckpointMode } from '../../../shared/types'
 import HybridSlider from './HybridSlider'
 import SegmentedToggle from './SegmentedToggle'
 import SamplingPresets from './SamplingPresets'
@@ -2069,32 +2069,57 @@ export default function CmdParamsEditor({ templateId, args, onChange, modelPathF
 
   // ----- Automatic Checkpoint Saving block -----
   // Per-preset override for the global KV Cache Checkpoints setting
-  // (Settings → KV Cache Checkpoints). Off by default -- this preset follows
-  // whatever the global setting says. Turning it ON here skips both the
-  // save-on-stop and restore-on-start checkpoint calls for this preset only,
-  // regardless of the global toggle -- for presets where a stale/corrupt
-  // checkpoint is worse than no checkpoint (e.g. one hit repeatedly by a
-  // benchmark or agent loop), without having to turn checkpoints off
-  // globally for every other preset.
-  const disableAutoCheckpoint = args['__disableAutoCheckpoint'] === true
+  // (Overrides -> KV Cache Checkpoints). "Follow global" (default) does
+  // nothing extra -- this preset does whatever the global switch says.
+  // "Disabled" skips both the save-on-stop and restore-on-start checkpoint
+  // calls for this preset only, regardless of the global switch -- for
+  // presets where a stale/corrupt checkpoint is worse than no checkpoint
+  // (e.g. one hit repeatedly by a benchmark or agent loop). "Enabled" forces
+  // checkpointing ON for this preset even while the global switch is off --
+  // for a single template worth keeping warm without turning checkpoints on
+  // for every other one.
+  const checkpointMode = (args['__checkpointMode'] as CheckpointMode) || 'follow'
   const renderAutoCheckpointBlock = () => (
     <div className="spec-widget">
       <div className="mmproj-widget-title"><Gauge size={15} /> Automatic Checkpoint Saving</div>
       <div className="mmproj-widget-arg">Per-preset override control · --slot-save-path</div>
       <div className="mmproj-widget-row">
-        <span className="mmproj-widget-label">Disable Automatic Checkpoint Saving</span>
-        <div className="toggle-wrap">
-          <label className="toggle" style={disabled ? { opacity: 0.45, cursor: 'not-allowed' } : {}}>
-            <input type="checkbox" checked={disableAutoCheckpoint} onChange={(e) => {
-              commit({ ...args, '__disableAutoCheckpoint': e.target.checked })
-            }} disabled={disabled} />
-            <span className="toggle-track"></span><span className="toggle-thumb"></span>
-          </label>
+        <span className="mmproj-widget-label">Automatic Checkpoint Saving</span>
+        <div className="theme-segmented">
+          <button
+            type="button"
+            className={`theme-segmented-btn ${checkpointMode === 'follow' ? 'active' : ''}`}
+            onClick={() => commit({ ...args, '__checkpointMode': 'follow' })}
+            disabled={disabled}
+          >
+            Follow global
+          </button>
+          <button
+            type="button"
+            className={`theme-segmented-btn ${checkpointMode === 'disabled' ? 'active' : ''}`}
+            onClick={() => commit({ ...args, '__checkpointMode': 'disabled' })}
+            disabled={disabled}
+          >
+            Disabled
+          </button>
+          <button
+            type="button"
+            className={`theme-segmented-btn ${checkpointMode === 'enabled' ? 'active' : ''}`}
+            onClick={() => commit({ ...args, '__checkpointMode': 'enabled' })}
+            disabled={disabled}
+          >
+            Enabled
+          </button>
         </div>
       </div>
-      {disableAutoCheckpoint && (
+      {checkpointMode === 'disabled' && (
         <div style={{ fontSize: 11, color: 'var(--text-muted)', paddingLeft: 4 }}>
-          When ON, this preset never saves or restores a KV cache checkpoint, even while KV Cache Checkpoints is on globally in Settings.
+          This preset never saves or restores a KV cache checkpoint, even while KV Cache Checkpoints is on globally.
+        </div>
+      )}
+      {checkpointMode === 'enabled' && (
+        <div style={{ fontSize: 11, color: 'var(--text-muted)', paddingLeft: 4 }}>
+          This preset always saves and restores a KV cache checkpoint, even while KV Cache Checkpoints is off globally.
         </div>
       )}
     </div>

@@ -2,6 +2,7 @@ import React, { useState } from 'react'
 import { useStore } from '../store/useStore'
 import { Plus, Trash } from 'lucide-react'
 import { StarIcon as StarShape } from '../utils/format'
+import { useOverlayClose } from '../hooks/useOverlayClose'
 
 interface Props {
   onApply: (values: any) => void
@@ -15,6 +16,7 @@ export default function SamplingPresets({ onApply, disabled }: Props) {
   const { samplingPresets, setSamplingPresets } = useStore()
   const [showAddModal, setShowAddModal] = useState(false)
   const [newName, setNewName] = useState('')
+  const overlayClose = useOverlayClose(() => setShowAddModal(false))
   const starred = samplingPresets.find(p => p.isStarred) || samplingPresets[0]
   // Track the currently-selected preset (defaults to the starred one).
   const [selectedId, setSelectedId] = useState<string>(starred?.id || '')
@@ -103,7 +105,7 @@ export default function SamplingPresets({ onApply, disabled }: Props) {
         <Trash size={14} />
       </button>
       {showAddModal && (
-        <div className="modal-overlay" onClick={() => setShowAddModal(false)}>
+        <div className="modal-overlay" {...overlayClose}>
           <div className="modal" style={{ maxWidth: 360 }} onClick={e => e.stopPropagation()}>
             <div className="modal-header"><h2 className="modal-title">New Preset</h2></div>
             <div className="modal-body">

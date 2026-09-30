@@ -4,6 +4,7 @@ import { FolderOpen, ChevronDown, Terminal } from 'lucide-react'
 import type { Template } from '../../../shared/types'
 import CmdParamsEditor from './CmdParamsEditor'
 import { buildQuickEngineBaseline, seedSamplingArgsFromPreset } from '../../../shared/presetBaselines'
+import { useOverlayClose } from '../hooks/useOverlayClose'
 function parseCommand(cmd: string): {
   modelPath: string
   serverPort: number
@@ -39,6 +40,7 @@ function parseCommand(cmd: string): {
 }
 export default function CreateModal() {
   const { setShowCreateModal, editingTemplate, backends, activeBackend, addCard, updateCard, models, prefillModelPath, setPrefillModelPath, cards, baseUrlOverride, samplingPresets } = useStore()
+  const overlayClose = useOverlayClose(() => setShowCreateModal(false))
   const [name, setName] = useState('')
   const [description, setDescription] = useState('')
   const [backendVersion, setBackendVersion] = useState('')
@@ -227,7 +229,7 @@ export default function CreateModal() {
     }
   }
   return (
-    <div className="modal-overlay" onClick={() => setShowCreateModal(false)}>
+    <div className="modal-overlay" {...overlayClose}>
       <div className="modal modal-wide" onClick={e => e.stopPropagation()}>
         <div className="modal-header">
           <h2 className="modal-title">{editingTemplate ? 'Edit Template' : 'New Template'}</h2>

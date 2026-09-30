@@ -429,6 +429,12 @@ export interface BaseUrlOverride {
 // away from a Template and back doesn't re-read the whole prompt from
 // scratch. See --slot-save-path and the /slots/N?action=save|restore
 // endpoints, standard in llama.cpp since b3000.
+// A Template's per-preset override for the global KV Cache Checkpoints
+// switch (see KvCacheCheckpointSettings.enabled). 'follow' does whatever the
+// global switch says; 'disabled'/'enabled' pin this Template's checkpointing
+// off or on regardless of it.
+export type CheckpointMode = 'follow' | 'disabled' | 'enabled'
+
 export interface KvCacheCheckpointSettings {
   enabled: boolean
   // 'model': one checkpoint per model, shared across every Template that

@@ -1,4 +1,4 @@
-import { ipcMain, dialog, shell, BrowserWindow, nativeTheme } from 'electron'
+import { ipcMain, dialog, shell, BrowserWindow, nativeTheme, session } from 'electron'
 import {
   existsSync, readdirSync, readFileSync, writeFileSync, mkdirSync,
   unlinkSync, createWriteStream, statSync, rmdirSync, renameSync, promises as fsPromises,
@@ -14,7 +14,7 @@ import net from 'net'
 import type {
   ModelGroup, ModelEntry, MmprojFile, SpecDecodeSidecarFile, BackendVersion,
   CommandsSchema, TrackedBackend, TrackedBackendRelease,
-  ThemePref, ReleaseInfo, BaseUrlOverride, McpSettings, KvCacheCheckpointSettings
+  ThemePref, ReleaseInfo, BaseUrlOverride, McpSettings, KvCacheCheckpointSettings, CheckpointMode
 } from '../shared/types'
 import { MCP_TOOL_IDS } from '../shared/types'
 import { extractBackendTypeFromAssetName } from '../shared/backendType'
@@ -438,7 +438,7 @@ async function backendRoots(): Promise<{ dir: string; external: boolean }[]> {
   return roots
 }
 
-const runningProcesses = new Map<string, { proc: ChildProcess; port: number; modelPath?: string; templateName?: string; skipCheckpoint?: boolean }>
+const runningProcesses = new Map<string, { proc: ChildProcess; port: number; modelPath?: string; templateName?: string; checkpointsActive?: boolean }>
 let sharedChatWindow: BrowserWindow | null = null
 
 // Per-model flags so we only emit each "important" app-log event once per run.
@@ -1230,21 +1230,45 @@ function migrateCtxSizeDftArgs(args: Record<string, unknown>): { args: Record<st
 }
 
 // --------------------------------------------------------------------------
-// Download infrastructure (shared by model + backend downloads)
+// Model downloads: queued, retried, and resumable across app restarts.
+// Mirrors the reliability model of the author's CFD CLI tool (github.com/
+// RenZekta/CFD) -- a bounded automatic retry budget per item, then a real
+// error the user has to act on, plus enough left on disk to pick back up
+// from after an interruption -- adapted for a long-lived GUI process rather
+// than CFD's disposable per-folder worker window.
+//
+// This intentionally does NOT reuse CFD's own retry shape (1 initial
+// attempt + 3 retries, repeated over up to 3 "big cycles" = 10 attempts
+// total, requeued at the tail between cycles). That shape exists because
+// each CFD worker invocation is stateless and cycles the whole queue; a
+// single always-running Map entry with its own backoff timer is the
+// simpler, equally reliable equivalent here, so it just retries a fixed
+// small number of times with growing delays before surfacing an error.
 // --------------------------------------------------------------------------
-interface DownloadTask {
-  id: string
+interface ModelDownloadTask {
+  id: string                  // repoId+filename (or bare filename for a pasted direct URL) -- never just the filename alone, so two repos shipping a same-named file can't collide (see enqueueModelDownload)
   url: string
   filename: string
-  destPath: string
+  repoId?: string
+  destPath: string            // final path -- pause/cancel never touch this, only ever the .tmp (see cancelModelDownloadImpl)
   receivedBytes: number
   totalBytes: number
   speed: number
-  phase: 'downloading' | 'paused' | 'done' | 'error' | 'cancelled'
-  repoId?: string
+  phase: 'queued' | 'downloading' | 'paused' | 'done' | 'error' | 'cancelled'
+  error?: string
+  attempt: number             // automatic retries used against the current run; reset on a manual Resume
   cancelFn?: () => void
+  retryTimer?: NodeJS.Timeout
 }
-const downloadTasks = new Map<string, DownloadTask>()
+const modelDownloadTasks = new Map<string, ModelDownloadTask>()
+const modelDownloadQueue: string[] = []
+// CFD runs one download per folder but folders in parallel; this app
+// downloads everything into one shared model library, so the closest
+// equivalent is one shared cap across all of them rather than per-folder.
+const MAX_CONCURRENT_MODEL_DOWNLOADS = 3
+let activeModelDownloadCount = 0
+const MODEL_DL_MAX_RETRIES = 3
+const MODEL_DL_RETRY_DELAYS_MS = [5000, 15000, 30000]
 const broadcastTimes = new Map<string, number>()
 const BROADCAST_THROTTLE_MS = 200
 function canBroadcast(id: string): boolean {
@@ -1252,6 +1276,226 @@ function canBroadcast(id: string): boolean {
   const last = broadcastTimes.get(id) || 0
   if (now - last >= BROADCAST_THROTTLE_MS) { broadcastTimes.set(id, now); return true }
   return false
+}
+
+// The crash-recovery journal (this app's equivalent of CFD's .cfd.queue /
+// .cfd.current files): every not-yet-finished task's identity, rewritten
+// after every state change. Deliberately does NOT persist receivedBytes --
+// the .tmp file's actual on-disk size is always used to recover from,
+// since the journal write and the last bytes hitting disk are not atomic
+// with each other and the file is the one source of truth that can't lie.
+const MODEL_DOWNLOADS_JOURNAL = join(APP_ROOT, 'model-downloads.json')
+function saveDownloadJournal(): void {
+  try {
+    const entries = Array.from(modelDownloadTasks.values())
+      .filter(t => t.phase !== 'done' && t.phase !== 'cancelled')
+      .map(t => ({ id: t.id, url: t.url, filename: t.filename, repoId: t.repoId, destPath: t.destPath }))
+    writeFileSync(MODEL_DOWNLOADS_JOURNAL, JSON.stringify(entries))
+  } catch { /* best-effort -- worst case a future crash can't recover this one */ }
+}
+// Called once at startup (see registerIpcHandlers). Anything the journal
+// remembers whose .tmp is actually still on disk is surfaced as 'paused'
+// -- ready for the user to Resume or Cancel -- rather than left invisible
+// on disk the way an interrupted download used to be. An entry whose .tmp
+// is already gone (finished by hand outside the app, or genuinely never
+// got started) is silently dropped instead.
+function reconcileModelDownloadJournal(): void {
+  let entries: Array<{ id: string; url: string; filename: string; repoId?: string; destPath: string }> = []
+  try { entries = JSON.parse(readFileSync(MODEL_DOWNLOADS_JOURNAL, 'utf-8')) } catch { return }
+  for (const e of entries) {
+    if (modelDownloadTasks.has(e.id)) continue
+    let size = 0
+    try { size = statSync(e.destPath + '.tmp').size } catch { continue }
+    modelDownloadTasks.set(e.id, {
+      id: e.id, url: e.url, filename: e.filename, repoId: e.repoId, destPath: e.destPath,
+      receivedBytes: size, totalBytes: 0, speed: 0, phase: 'paused', attempt: 0
+    })
+  }
+  saveDownloadJournal()
+}
+
+function broadcastModelDownload(task: ModelDownloadTask, force = false): void {
+  if (!force && !canBroadcast(task.id)) return
+  const payload = {
+    id: task.id, filename: task.filename, repoId: task.repoId, destPath: task.destPath,
+    receivedBytes: task.receivedBytes, totalBytes: task.totalBytes, speed: task.speed,
+    phase: task.phase, error: task.error,
+    percent: task.totalBytes > 0 ? Math.round(task.receivedBytes / task.totalBytes * 100) : 0,
+    queuePosition: task.phase === 'queued' ? modelDownloadQueue.indexOf(task.id) + 1 : undefined
+  }
+  BrowserWindow.getAllWindows().forEach(win => {
+    if (!win.isDestroyed()) win.webContents.send('model-download-progress', payload)
+  })
+}
+// Frees this task's concurrency slot and lets the next queued item start.
+// Only ever called when a task LEAVES the "occupying a slot" state for
+// good this run (done, exhausted its retries, paused, or cancelled) --
+// NOT between automatic retries, which deliberately keep holding their
+// slot rather than let others start while this one is just backing off.
+function releaseModelDownloadSlot(): void {
+  activeModelDownloadCount = Math.max(0, activeModelDownloadCount - 1)
+  pumpModelDownloadQueue()
+}
+function pumpModelDownloadQueue(): void {
+  while (activeModelDownloadCount < MAX_CONCURRENT_MODEL_DOWNLOADS && modelDownloadQueue.length > 0) {
+    const id = modelDownloadQueue.shift()!
+    const task = modelDownloadTasks.get(id)
+    if (!task || task.phase !== 'queued') continue
+    activeModelDownloadCount++
+    beginModelDownloadAttempt(task, task.receivedBytes)
+  }
+  // Keep everyone still waiting told of their new position.
+  modelDownloadQueue.forEach(qid => {
+    const t = modelDownloadTasks.get(qid)
+    if (t) broadcastModelDownload(t, true)
+  })
+}
+function beginModelDownloadAttempt(task: ModelDownloadTask, startByte: number): void {
+  task.phase = 'downloading'
+  task.error = undefined
+  broadcastModelDownload(task, true)
+  const tmpPath = task.destPath + '.tmp'
+  task.cancelFn = startDownload(
+    task.url, tmpPath, startByte,
+    (received, total, speed) => { task.receivedBytes = received; task.totalBytes = total; task.speed = speed; broadcastModelDownload(task) },
+    () => {
+      task.cancelFn = undefined
+      try {
+        renameSync(tmpPath, task.destPath)
+      } catch (err) {
+        task.phase = 'error'; task.speed = 0
+        task.error = `Downloaded, but couldn't move the file into place: ${err instanceof Error ? err.message : String(err)}`
+        releaseModelDownloadSlot(); broadcastModelDownload(task, true); saveDownloadJournal()
+        return
+      }
+      task.phase = 'done'; task.speed = 0; task.attempt = 0
+      releaseModelDownloadSlot()
+      broadcastModelDownload(task, true)
+      saveDownloadJournal()
+      setTimeout(() => { modelDownloadTasks.delete(task.id); broadcastTimes.delete(task.id) }, 5000)
+    },
+    (err) => {
+      task.cancelFn = undefined
+      // A deliberate Pause/Cancel destroys the in-flight request itself,
+      // which surfaces here as a stream error -- must not be treated as a
+      // real failure to retry, since pauseModelDownloadImpl/
+      // cancelModelDownloadImpl already set the task's real terminal phase
+      // and released its slot before calling it.
+      if (task.phase !== 'downloading') return
+      task.attempt += 1
+      if (task.attempt <= MODEL_DL_MAX_RETRIES) {
+        const delay = MODEL_DL_RETRY_DELAYS_MS[task.attempt - 1] ?? MODEL_DL_RETRY_DELAYS_MS[MODEL_DL_RETRY_DELAYS_MS.length - 1]
+        task.error = `${err.message} — retrying (${task.attempt}/${MODEL_DL_MAX_RETRIES})`
+        task.speed = 0
+        broadcastModelDownload(task, true)
+        // A server that ignored the Range header needs a from-scratch
+        // restart, not another resume attempt at the same offset -- that
+        // would just hit the exact same rejection again.
+        const resumeFrom = err instanceof RangeNotSupportedError ? 0 : task.receivedBytes
+        if (resumeFrom === 0) task.receivedBytes = 0
+        task.retryTimer = setTimeout(() => {
+          task.retryTimer = undefined
+          if (task.phase === 'downloading') beginModelDownloadAttempt(task, resumeFrom)
+        }, delay)
+      } else {
+        task.phase = 'error'; task.error = err.message; task.speed = 0
+        releaseModelDownloadSlot()
+        broadcastModelDownload(task, true)
+        saveDownloadJournal()
+        console.error('Model download error:', err)
+      }
+    }
+  )
+  saveDownloadJournal()
+}
+async function enqueueModelDownload(opts: {
+  url: string; filename: string; repoId?: string; modelFolder?: string
+}): Promise<{ success: boolean; id?: string; error?: string }> {
+  const id = `${opts.repoId || ''}::${opts.filename}`
+  const existing = modelDownloadTasks.get(id)
+  if (existing && existing.phase !== 'done' && existing.phase !== 'error' && existing.phase !== 'cancelled') {
+    return { success: false, error: 'Already downloading' }
+  }
+  const sub = (opts.modelFolder || opts.repoId?.split('/').pop() || 'downloads').trim() || 'downloads'
+  const mainFolder = await resolveMainModelFolder()
+  const targetDir = join(mainFolder, sub)
+  if (!existsSync(targetDir)) mkdirSync(targetDir, { recursive: true })
+  const finalPath = join(targetDir, opts.filename)
+  const task: ModelDownloadTask = {
+    id, url: opts.url, filename: opts.filename, repoId: opts.repoId,
+    destPath: finalPath, receivedBytes: 0, totalBytes: 0, speed: 0,
+    phase: 'queued', attempt: 0
+  }
+  modelDownloadTasks.set(id, task)
+  modelDownloadQueue.push(id)
+  broadcastModelDownload(task, true)
+  pumpModelDownloadQueue()
+  return { success: true, id }
+}
+function pauseModelDownloadImpl(id: string): { success: boolean; error?: string } {
+  const task = modelDownloadTasks.get(id)
+  if (!task) return { success: false, error: 'Not found' }
+  if (task.phase === 'queued') {
+    const qi = modelDownloadQueue.indexOf(id)
+    if (qi !== -1) modelDownloadQueue.splice(qi, 1)
+    task.phase = 'paused'
+    broadcastModelDownload(task, true)
+    saveDownloadJournal()
+    return { success: true }
+  }
+  if (task.phase !== 'downloading') return { success: false, error: 'Not downloading' }
+  if (task.retryTimer) { clearTimeout(task.retryTimer); task.retryTimer = undefined }
+  task.phase = 'paused'
+  task.speed = 0
+  broadcastTimes.delete(id)
+  task.cancelFn?.()
+  releaseModelDownloadSlot()
+  broadcastModelDownload(task, true)
+  saveDownloadJournal()
+  return { success: true }
+}
+function resumeModelDownloadImpl(id: string): { success: boolean; error?: string } {
+  const task = modelDownloadTasks.get(id)
+  if (!task || task.phase !== 'paused') return { success: false, error: 'Not paused' }
+  try { task.receivedBytes = statSync(task.destPath + '.tmp').size } catch { task.receivedBytes = 0 }
+  task.attempt = 0
+  task.error = undefined
+  task.phase = 'queued'
+  modelDownloadQueue.push(id)
+  broadcastModelDownload(task, true)
+  pumpModelDownloadQueue()
+  return { success: true }
+}
+function cancelModelDownloadImpl(id: string): { success: boolean; error?: string } {
+  const task = modelDownloadTasks.get(id)
+  if (!task) return { success: false, error: 'Not found' }
+  if (task.retryTimer) { clearTimeout(task.retryTimer); task.retryTimer = undefined }
+  const wasActive = task.phase === 'downloading'
+  if (task.phase === 'queued') {
+    const qi = modelDownloadQueue.indexOf(id)
+    if (qi !== -1) modelDownloadQueue.splice(qi, 1)
+  }
+  task.phase = 'cancelled'
+  task.cancelFn?.()
+  // Only the .tmp is ever this function's to delete -- the final path is
+  // never written to by an in-flight download (only the atomic rename on
+  // success touches it), so a same-named file that already existed before
+  // this download started (e.g. cancelling a re-download of a model
+  // already on disk) is never at risk from a Cancel.
+  try { unlinkSync(task.destPath + '.tmp') } catch {}
+  broadcastModelDownload(task, true)
+  if (wasActive) releaseModelDownloadSlot()
+  modelDownloadTasks.delete(id)
+  saveDownloadJournal()
+  return { success: true }
+}
+function listModelDownloadsImpl() {
+  return Array.from(modelDownloadTasks.values()).map(t => ({
+    id: t.id, url: t.url, filename: t.filename, repoId: t.repoId, destPath: t.destPath,
+    receivedBytes: t.receivedBytes, totalBytes: t.totalBytes, speed: t.speed, phase: t.phase, error: t.error,
+    percent: t.totalBytes > 0 ? Math.round(t.receivedBytes / t.totalBytes * 100) : 0,
+    queuePosition: t.phase === 'queued' ? modelDownloadQueue.indexOf(t.id) + 1 : undefined
+  }))
 }
 function fetchJson(url: string): Promise<unknown> {
   return new Promise((resolve, reject) => {
@@ -1322,17 +1566,26 @@ function checkpointFileName(modelPath: string, mode: 'model' | 'model-template',
   return `${modelBase}-${sanitizeCheckpointNamePart(templateName)}.bin`
 }
 
+// A Template's own 'disabled'/'enabled' pins checkpointing off or on for it
+// regardless of the global switch; 'follow' (or unset) defers to the global
+// switch entirely.
+function resolveCheckpointEnabled(globalEnabled: boolean, checkpointMode: CheckpointMode | undefined): boolean {
+  if (checkpointMode === 'disabled') return false
+  if (checkpointMode === 'enabled') return true
+  return globalEnabled
+}
+
 // Save the currently running slot's KV cache to disk and record its token
 // count in the index. Never throws -- a failed save (backend without
 // --slot-save-path support, disk full, server already gone) is logged and
 // otherwise ignored, since it must never block Stop.
 async function saveSlotCheckpoint(opts: {
-  port: number; modelPath: string; templateId: string; templateName: string
+  port: number; modelPath: string; templateId: string; templateName: string; enabled: boolean
 }): Promise<void> {
   try {
+    if (!opts.enabled || !opts.modelPath) return
     const settings = await loadSettings()
-    const cfg = settings.kvCacheCheckpoints
-    if (!cfg?.enabled || !opts.modelPath) return
+    const cfg = settings.kvCacheCheckpoints || DEFAULT_KV_CACHE_CHECKPOINTS
     const dir = await resolveCheckpointFolder()
     const filename = checkpointFileName(opts.modelPath, cfg.mode, opts.templateName)
     const filePath = join(dir, filename)
@@ -1387,12 +1640,12 @@ function findCheckpointForTemplate(dir: string, modelPath: string, mode: 'model'
 // corrupt llama-server's buffer). ctxSize of 0 means native/unbounded, so
 // the guard never applies. Never throws.
 async function restoreSlotCheckpoint(opts: {
-  port: number; modelPath: string; templateId: string; templateName: string; ctxSize: number
+  port: number; modelPath: string; templateId: string; templateName: string; ctxSize: number; enabled: boolean
 }): Promise<void> {
   try {
+    if (!opts.enabled || !opts.modelPath) return
     const settings = await loadSettings()
-    const cfg = settings.kvCacheCheckpoints
-    if (!cfg?.enabled || !opts.modelPath) return
+    const cfg = settings.kvCacheCheckpoints || DEFAULT_KV_CACHE_CHECKPOINTS
     const dir = await resolveCheckpointFolder()
     const filePath = findCheckpointForTemplate(dir, opts.modelPath, cfg.mode, opts.templateName)
     if (!filePath) return
@@ -1423,13 +1676,13 @@ async function restoreSlotCheckpoint(opts: {
 // restore never delays the Start response itself; capped so a Template that
 // never becomes ready (crashes, hangs on load) doesn't poll forever.
 function restoreCheckpointWhenReady(opts: {
-  templateId: string; port: number; modelPath: string; templateName: string; ctxSize: number
+  templateId: string; port: number; modelPath: string; templateName: string; ctxSize: number; enabled: boolean
 }): void {
   const startedAt = Date.now()
   const timeoutMs = 10 * 60 * 1000
   const poll = () => {
     if (serverReadyFlags.get(opts.templateId)) {
-      restoreSlotCheckpoint({ port: opts.port, modelPath: opts.modelPath, templateId: opts.templateId, templateName: opts.templateName, ctxSize: opts.ctxSize })
+      restoreSlotCheckpoint({ port: opts.port, modelPath: opts.modelPath, templateId: opts.templateId, templateName: opts.templateName, ctxSize: opts.ctxSize, enabled: opts.enabled })
       return
     }
     if (!runningProcesses.has(opts.templateId) || Date.now() - startedAt > timeoutMs) return
@@ -1511,6 +1764,13 @@ function computeRedundantCheckpoints(mode: 'model' | 'model-template', templates
   return redundant
 }
 
+// Thrown by startDownload when a Range request (startByte > 0) gets back a
+// 200 instead of a 206 -- see the comment at that check. Callers that want
+// to fall back to a from-scratch download on this specific failure (rather
+// than just retrying the same broken resume) can check for this type.
+class RangeNotSupportedError extends Error {
+  constructor() { super('Server did not honor Range request (got 200, expected 206)') }
+}
 function startDownload(
   url: string,
   destPath: string,
@@ -1535,6 +1795,17 @@ function startDownload(
       if (res.statusCode === 301 || res.statusCode === 302) {
         return attempt(res.headers.location!)
       }
+      // A Range request that gets back 200 instead of 206 means the server
+      // ignored the Range header and is sending the file from byte 0 --
+      // appending that onto the partial file already on disk would
+      // interleave two copies into one corrupt blob. Must fail loudly
+      // instead: the caller can restart from 0, but silently "succeeding"
+      // here is strictly worse than an explicit, retryable error.
+      if (startByte > 0 && res.statusCode === 200) {
+        res.destroy()
+        if (!destroyed) onError(new RangeNotSupportedError())
+        return
+      }
       if (res.statusCode !== 200 && res.statusCode !== 206) {
         if (!destroyed) onError(new Error(`HTTP ${res.statusCode}`))
         return
@@ -1558,7 +1829,20 @@ function startDownload(
       })
       res.on('end', () => {
         if (destroyed) return
-        file.end(() => { if (!destroyed) onDone() })
+        file.end(() => {
+          if (destroyed) return
+          // Belt-and-suspenders: a Content-Length-declared response that
+          // ends with fewer bytes than promised should already surface as a
+          // stream error from Node's http parser rather than a clean 'end',
+          // but verifying here means a corrupt/truncated file is never
+          // silently accepted as done just because a future Node version
+          // (or an unusual proxy in between) is looser about it.
+          if (totalBytes > 0 && receivedBytes !== totalBytes) {
+            onError(new Error(`Incomplete download: got ${receivedBytes} of ${totalBytes} bytes`))
+            return
+          }
+          onDone()
+        })
       })
       res.on('error', (err) => { if (!destroyed) { file.destroy(); onError(err) } })
     }).on('error', (err) => { if (!destroyed) { file.destroy(); onError(err) } })
@@ -2036,136 +2320,20 @@ export function registerIpcHandlers(): void {
   })
 
   // ----- Model downloads (route to main folder, LM-Studio style) -----
+  // Recover any download the journal remembers as interrupted before the
+  // handlers below can be invoked, so listModelDownloadsImpl's very first
+  // call already reflects it.
+  reconcileModelDownloadJournal()
   ipcMain.handle('start-model-download', async (_event, opts: {
     url: string
     filename: string
     repoId?: string
     modelFolder?: string
-  }) => {
-    const id = opts.filename
-    if (downloadTasks.has(id)) {
-      const t = downloadTasks.get(id)!
-      if (t.phase === 'downloading') return { success: false, error: 'Already downloading' }
-    }
-    // Determine destination subfolder: explicit override > repo page name > "downloads".
-    const sub = (opts.modelFolder || opts.repoId?.split('/').pop() || 'downloads').trim() || 'downloads'
-    const mainFolder = await resolveMainModelFolder()
-    const targetDir = join(mainFolder, sub)
-    if (!existsSync(targetDir)) mkdirSync(targetDir, { recursive: true })
-    const finalPath = join(targetDir, opts.filename)
-    const tmpPath = finalPath + '.tmp'
-    const task: DownloadTask = {
-      id, url: opts.url, filename: opts.filename,
-      destPath: finalPath, receivedBytes: 0, totalBytes: 0, speed: 0,
-      phase: 'downloading', repoId: opts.repoId
-    }
-    const broadcastProgress = (t: DownloadTask, force = false) => {
-      if (!force && !canBroadcast(t.id)) return
-      const payload = {
-        id: t.id, filename: t.filename,
-        percent: t.totalBytes > 0 ? Math.round((t.receivedBytes / t.totalBytes) * 100) : 0,
-        receivedBytes: t.receivedBytes, totalBytes: t.totalBytes,
-        speed: t.speed, phase: t.phase, destPath: t.destPath,
-        repoId: t.repoId
-      }
-      BrowserWindow.getAllWindows().forEach(win => {
-        if (!win.isDestroyed()) win.webContents.send('model-download-progress', payload)
-      })
-    }
-    task.cancelFn = startDownload(
-      opts.url, tmpPath, 0,
-      (received, total, speed) => { task.receivedBytes = received; task.totalBytes = total; task.speed = speed; broadcastProgress(task) },
-      () => {
-        try { renameSync(tmpPath, finalPath) } catch {}
-        task.phase = 'done'; task.speed = 0; broadcastProgress(task, true)
-        setTimeout(() => { downloadTasks.delete(id); broadcastTimes.delete(id) }, 5000)
-      },
-      (err) => { task.phase = 'error'; task.speed = 0; broadcastProgress(task, true); console.error('Download error:', err) }
-    )
-    downloadTasks.set(id, task)
-    broadcastProgress(task, true)
-    return { success: true, id }
-  })
-  ipcMain.handle('pause-model-download', (_e, id: string) => {
-    const task = downloadTasks.get(id)
-    if (!task || task.phase !== 'downloading') return { success: false, error: 'Not downloading' }
-    task.cancelFn?.()
-    task.phase = 'paused'
-    task.speed = 0
-    broadcastTimes.delete(id)
-    const payload = {
-      id, filename: task.filename, phase: 'paused', speed: 0,
-      percent: task.totalBytes > 0 ? Math.round((task.receivedBytes / task.totalBytes) * 100) : 0,
-      receivedBytes: task.receivedBytes, totalBytes: task.totalBytes,
-      destPath: task.destPath, repoId: task.repoId
-    }
-    BrowserWindow.getAllWindows().forEach(win => {
-      if (!win.isDestroyed()) {
-        win.webContents.send('model-download-progress', payload)
-        if (task.repoId) win.webContents.send('hf-download-progress', payload)
-      }
-    })
-    return { success: true }
-  })
-  ipcMain.handle('resume-model-download', (_e, id: string) => {
-    const task = downloadTasks.get(id)
-    if (!task || task.phase !== 'paused') return { success: false, error: 'Not paused' }
-    task.phase = 'downloading'
-    const tmpPath = task.destPath + '.tmp'
-    try { task.receivedBytes = statSync(tmpPath).size } catch {}
-    const broadcastProgress = (t: DownloadTask, force = false) => {
-      if (!force && !canBroadcast(t.id)) return
-      const payload = {
-        id: t.id, filename: t.filename, phase: t.phase, speed: t.speed,
-        percent: t.totalBytes > 0 ? Math.round((t.receivedBytes / t.totalBytes) * 100) : 0,
-        receivedBytes: t.receivedBytes, totalBytes: t.totalBytes, destPath: t.destPath,
-        repoId: t.repoId
-      }
-      BrowserWindow.getAllWindows().forEach(win => {
-        if (!win.isDestroyed()) {
-          win.webContents.send('model-download-progress', payload)
-          if (t.repoId) win.webContents.send('hf-download-progress', payload)
-        }
-      })
-    }
-    const startByte = task.receivedBytes
-    task.cancelFn = startDownload(
-      task.url, tmpPath, startByte,
-      (received, total, speed) => { task.receivedBytes = received; task.totalBytes = total; task.speed = speed; broadcastProgress(task) },
-      () => {
-        try { renameSync(tmpPath, task.destPath) } catch {}
-        task.phase = 'done'; task.speed = 0; broadcastProgress(task, true)
-        setTimeout(() => { downloadTasks.delete(id); broadcastTimes.delete(id) }, 5000)
-      },
-      (err) => { task.phase = 'error'; task.speed = 0; broadcastProgress(task, true); console.error('Resume error:', err) }
-    )
-    broadcastProgress(task, true)
-    return { success: true }
-  })
-  ipcMain.handle('cancel-model-download', (_e, id: string) => {
-    const task = downloadTasks.get(id)
-    if (!task) return { success: false, error: 'Not found' }
-    task.cancelFn?.()
-    task.phase = 'cancelled'
-    try { unlinkSync(task.destPath + '.tmp') } catch {}
-    try { unlinkSync(task.destPath) } catch {}
-    const payload = { id, filename: task.filename, phase: 'cancelled', percent: 0, receivedBytes: 0, totalBytes: 0, speed: 0 }
-    BrowserWindow.getAllWindows().forEach(win => {
-      if (!win.isDestroyed()) {
-        win.webContents.send('model-download-progress', payload)
-        if (task.repoId) win.webContents.send('hf-download-progress', payload)
-      }
-    })
-    downloadTasks.delete(id)
-    return { success: true }
-  })
-  ipcMain.handle('list-model-downloads', () => {
-    return Array.from(downloadTasks.values()).map(t => ({
-      id: t.id, url: t.url, filename: t.filename, destPath: t.destPath,
-      receivedBytes: t.receivedBytes, totalBytes: t.totalBytes, phase: t.phase,
-      percent: t.totalBytes > 0 ? Math.round((t.receivedBytes / t.totalBytes) * 100) : 0
-    }))
-  })
+  }) => enqueueModelDownload(opts))
+  ipcMain.handle('pause-model-download', (_e, id: string) => pauseModelDownloadImpl(id))
+  ipcMain.handle('resume-model-download', (_e, id: string) => resumeModelDownloadImpl(id))
+  ipcMain.handle('cancel-model-download', (_e, id: string) => cancelModelDownloadImpl(id))
+  ipcMain.handle('list-model-downloads', () => listModelDownloadsImpl())
 
   // ----- Backends: smart fork-aware listing -----
   async function listBackendsImpl(): Promise<BackendVersion[]> {
@@ -2639,7 +2807,7 @@ export function registerIpcHandlers(): void {
   })
 
   // ----- Run model -----
-  async function runModelImpl(opts: { id: string; name: string; backendPath: string; exe: string; args: string[]; openBrowser: boolean; port: number; ignoreBaseUrlOverride?: boolean; skipCheckpoint?: boolean }) {
+  async function runModelImpl(opts: { id: string; name: string; backendPath: string; exe: string; args: string[]; openBrowser: boolean; port: number; ignoreBaseUrlOverride?: boolean; skipCheckpoint?: boolean; checkpointMode?: CheckpointMode }) {
     if (runningProcesses.has(opts.id)) return { success: false, error: 'Already running' }
     // If base URL override is enabled, use the override port, ignoring
     // the template's original Server Port completely. A template with its
@@ -2703,15 +2871,20 @@ export function registerIpcHandlers(): void {
     // args. Doesn't change behavior other than exposing the /metrics
     // endpoint — safe to always add.
     if (!finalArgs.includes('--metrics')) finalArgs.push('--metrics')
-    // Force-enable --slot-save-path when KV Cache Checkpoints is on, the same
+    // Force-enable --slot-save-path when checkpointing is active, the same
     // unconditional way as --metrics above, so the /slots save/restore
     // endpoints exist regardless of the template's own args. Skipped for
     // benchmark-driven starts (skipCheckpoint) so a benchmark's fresh-slot
-    // measurement is never contaminated by a leftover checkpoint.
+    // measurement is never contaminated by a leftover checkpoint; opts.
+    // checkpointMode ('disabled'/'enabled') pins this Template's own
+    // checkpointing regardless of the global switch, 'follow' (or unset)
+    // defers to it. The resolved value is what actually got --slot-save-path
+    // on the command line for THIS run, so it (not a fresh re-read of
+    // settings later) is what Stop and the restore-on-ready poll must use.
     let kvCheckpointsEnabled = false
     if (!opts.skipCheckpoint) {
       const kvSettings = await loadSettings()
-      kvCheckpointsEnabled = !!kvSettings.kvCacheCheckpoints?.enabled
+      kvCheckpointsEnabled = resolveCheckpointEnabled(!!kvSettings.kvCacheCheckpoints?.enabled, opts.checkpointMode)
       if (kvCheckpointsEnabled && !finalArgs.includes('--slot-save-path')) {
         finalArgs.push('--slot-save-path', await resolveCheckpointFolder())
       }
@@ -2862,7 +3035,7 @@ export function registerIpcHandlers(): void {
         proc, port: finalPort,
         modelPath: extractArgValue(finalArgs, '--model', '-m') || undefined,
         templateName: opts.name,
-        skipCheckpoint: opts.skipCheckpoint
+        checkpointsActive: kvCheckpointsEnabled
       })
       // Begin polling this instance's /metrics endpoint.
       startTracking(opts.id, finalPort, opts.name)
@@ -2876,7 +3049,7 @@ export function registerIpcHandlers(): void {
         if (modelPathForCheckpoint) {
           restoreCheckpointWhenReady({
             templateId: opts.id, port: finalPort, modelPath: modelPathForCheckpoint,
-            templateName: opts.name, ctxSize
+            templateName: opts.name, ctxSize, enabled: kvCheckpointsEnabled
           })
         }
       }
@@ -2942,7 +3115,7 @@ export function registerIpcHandlers(): void {
       return { success: false, error: String(err) }
     }
   }
-  ipcMain.handle('run-model', async (_e, opts: { id: string; name: string; backendPath: string; exe: string; args: string[]; openBrowser: boolean; port: number }) => runModelImpl(opts))
+  ipcMain.handle('run-model', async (_e, opts: { id: string; name: string; backendPath: string; exe: string; args: string[]; openBrowser: boolean; port: number; ignoreBaseUrlOverride?: boolean; skipCheckpoint?: boolean; checkpointMode?: CheckpointMode }) => runModelImpl(opts))
 
   // When base URL override is enabled, ALL port values are overridden.
   // The app ignores the template's original Server Port completely and uses
@@ -3027,6 +3200,45 @@ export function registerIpcHandlers(): void {
   }
 
   ipcMain.handle('open-chat-window', (_e, port: number, name: string, ctxSize?: number) => openChatWindow(port, name, ctxSize))
+  // The bundled llama.cpp webui is a PWA (vite-plugin-pwa, "prompt for
+  // update" mode): every navigation to its origin makes the browser
+  // byte-compare the currently served service-worker script against
+  // whatever it last had registered for that exact origin, and pops the
+  // "a new version is available" toast the instant they differ. Since
+  // Templates are commonly pinned to a fixed port and different backend
+  // versions get run on that same port over time (a different llama.cpp
+  // build genuinely does ship different webui bytes), a *stale* SW
+  // registration left over from an earlier template/session on that port
+  // makes the toast fire on the very first load of a brand new chat tab --
+  // before the user has done anything this session for it to be reacting
+  // to. That's the false positive being reported. The SW's own live check
+  // (a page that's been open and mounted noticing a real change installed
+  // underneath it while it's still running) is the legitimate case and
+  // is untouched by this: it happens entirely inside the iframe's own JS
+  // after it's loaded, not via anything cleared here.
+  // The fix is to clear just that origin's service-worker registration and
+  // its precache (Cache Storage) right before a genuinely first-time
+  // navigation for it in this window, so the fresh load registers cleanly
+  // against whatever is actually running now instead of comparing against
+  // a leftover record. This is deliberately scoped to those two storage
+  // types only: conversations live in IndexedDB (Dexie, per the webui's
+  // own docs), which this never touches, so no chat history is at risk.
+  // Called from the renderer (ChatWindow.tsx) at the one point it knows
+  // for certain a tab's iframe is about to mount for the first time --
+  // switching back to an already-open tab never calls this, since no new
+  // navigation happens there for the clear to protect.
+  ipcMain.handle('reset-chat-origin', async (_e, url: string) => {
+    try {
+      const parsed = new URL(url)
+      await session.defaultSession.clearStorageData({
+        origin: `${parsed.protocol}//${parsed.host}`,
+        storages: ['serviceworkers', 'cachestorage']
+      })
+      return { success: true }
+    } catch (err) {
+      return { success: false, error: err instanceof Error ? err.message : String(err) }
+    }
+  })
   ipcMain.handle('open-detached-chat-window', async (_e, port: number, name: string) => {
     const chatUrl = await resolveChatUrl(port)
     const templateName = name || `Port ${port}`
@@ -3083,13 +3295,17 @@ export function registerIpcHandlers(): void {
     modelLoadingFlags.delete(id)
     // Save the KV cache checkpoint before killing the process -- once the
     // process is gone the slot (and everything in it) is gone with it.
-    // Skipped when this Start never got --slot-save-path in the first place
-    // (entry.skipCheckpoint, or checkpoints were off at launch time) or when
-    // this particular Stop call opts out (benchmark's internal stop/restart
-    // cycle, see toolBenchmark).
-    if (!opts?.skipCheckpoint && !entry.skipCheckpoint && entry.modelPath) {
+    // entry.checkpointsActive is the resolved value from launch time (global
+    // switch and this Template's own override already folded together, see
+    // runModelImpl) -- it's false whenever this Start never got
+    // --slot-save-path in the first place, so saveSlotCheckpoint would have
+    // nothing to save against. opts.skipCheckpoint additionally lets this
+    // particular Stop call opt out even when checkpointing was active
+    // (benchmark's internal stop/restart cycle, see toolBenchmark).
+    if (!opts?.skipCheckpoint && entry.modelPath) {
       await saveSlotCheckpoint({
-        port, modelPath: entry.modelPath, templateId: id, templateName: entry.templateName || id
+        port, modelPath: entry.modelPath, templateId: id, templateName: entry.templateName || id,
+        enabled: !!entry.checkpointsActive
       })
     }
     // Kill the whole process tree (children included) and wait for the process
@@ -3411,46 +3627,6 @@ export function registerIpcHandlers(): void {
         downloadUrl: `https://huggingface.co/${repoId}/resolve/main/${f.path}`
       }))
     } catch (err) { return { error: String(err) } }
-  })
-  ipcMain.handle('hf-download-model', async (_event, opts: { repoId: string; filename: string; downloadUrl: string }) => {
-    const id = opts.filename
-    if (downloadTasks.has(id)) {
-      const existing = downloadTasks.get(id)!
-      if (existing.phase === 'downloading') return { success: false, error: 'Already downloading' }
-    }
-    // Route to the main (starred) model folder, under a subfolder named after the repo page.
-    const sub = (opts.repoId.split('/').pop() || 'downloads').trim() || 'downloads'
-    const mainFolder = await resolveMainModelFolder()
-    const destDir = join(mainFolder, sub)
-    if (!existsSync(destDir)) mkdirSync(destDir, { recursive: true })
-    const finalPath = join(destDir, opts.filename)
-    const tmpPath = finalPath + '.tmp'
-    const task: DownloadTask = { id, url: opts.downloadUrl, filename: opts.filename, destPath: finalPath, receivedBytes: 0, totalBytes: 0, speed: 0, phase: 'downloading', repoId: opts.repoId }
-    const broadcast = (force = false) => {
-      if (!force && !canBroadcast(task.id)) return
-      const percent = task.totalBytes > 0 ? Math.round(task.receivedBytes / task.totalBytes * 100) : 0
-      const payload = {
-        id: task.id, filename: task.filename, phase: task.phase,
-        percent, speed: task.speed, destPath: task.destPath,
-        receivedBytes: task.receivedBytes, totalBytes: task.totalBytes,
-        repoId: task.repoId
-      }
-      BrowserWindow.getAllWindows().forEach(win => {
-        if (!win.isDestroyed()) win.webContents.send('hf-download-progress', payload)
-      })
-    }
-    task.cancelFn = startDownload(
-      opts.downloadUrl, tmpPath, 0,
-      (r, t, speed) => { task.receivedBytes = r; task.totalBytes = t; task.speed = speed; broadcast() },
-      () => {
-        try { renameSync(tmpPath, finalPath) } catch {}
-        task.phase = 'done'; task.speed = 0; broadcast(true)
-        setTimeout(() => { downloadTasks.delete(id); broadcastTimes.delete(id) }, 10000)
-      },
-      (err) => { task.phase = 'error'; task.speed = 0; broadcast(true); console.error('HF download error:', err) }
-    )
-    downloadTasks.set(id, task)
-    return { success: true }
   })
   ipcMain.handle('hf-open-models-dir', async () => shell.openPath(await resolveMainModelFolder()))
 

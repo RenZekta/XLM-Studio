@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react'
+import React, { useState, useEffect, useRef } from 'react'
 import { ExternalLink, Copy, RefreshCw, X, SquareArrowUpRight, Lock, Pin } from 'lucide-react'
 
 // Allow the Electron-specific `-webkit-app-region` CSS property in inline styles.
@@ -26,7 +26,11 @@ export default function ChatWindow({ url }: { url: string }) {
   // Manage tabs: { url, name, ctxSize }
   const [tabs, setTabs] = useState<Tab[]>([{ url, name: initialName, ctxSize: initialCtx }])
   const [activeTab, setActiveTab] = useState<string>(url)
-  const [loadedTabs, setLoadedTabs] = useState<Set<string>>(new Set([url]))
+  // Deliberately NOT pre-seeded with `url`: the very first tab must go
+  // through the same reset-then-mount effect below as any other new tab,
+  // or the most common case (a freshly created chat window's only tab)
+  // would skip the origin reset entirely.
+  const [loadedTabs, setLoadedTabs] = useState<Set<string>>(new Set())
   
   // Custom pinned tabs: list of URLs
   const [pinnedTabs, setPinnedTabs] = useState<string[]>([])
@@ -40,15 +44,27 @@ export default function ChatWindow({ url }: { url: string }) {
   const [copied, setCopied] = useState(false)
   const [reloadKey, setReloadKey] = useState(0)
 
-  // Add activeTab to loadedTabs set if not already present
+  // Add activeTab to loadedTabs set if not already present -- this is the
+  // single point where a tab's iframe is about to mount for the first time
+  // in this window's session (every later switch back to it just toggles
+  // `display`, no new navigation). See the 'reset-chat-origin' handler in
+  // ipc.ts for why it needs to happen here, before the mount, rather than
+  // being left to the webui's own PWA machinery.
+  const resettingOrigins = useRef<Set<string>>(new Set())
   useEffect(() => {
-    if (!loadedTabs.has(activeTab)) {
+    if (loadedTabs.has(activeTab) || resettingOrigins.current.has(activeTab)) return
+    let cancelled = false
+    resettingOrigins.current.add(activeTab)
+    window.api.resetChatOrigin(activeTab).catch(() => {}).finally(() => {
+      resettingOrigins.current.delete(activeTab)
+      if (cancelled) return
       setLoadedTabs(prev => {
         const next = new Set(prev)
         next.add(activeTab)
         return next
       })
-    }
+    })
+    return () => { cancelled = true }
   }, [activeTab, loadedTabs])
 
   // Listen for new tab events and tab movements

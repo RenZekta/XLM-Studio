@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react'
 import { useStore } from '../store/useStore'
-import { Terminal, Trash, Pause, Play, Download } from 'lucide-react'
+import { Terminal, Trash, Pause, Play, Upload } from 'lucide-react'
 
 interface LogEntry {
   id: string
@@ -111,7 +111,7 @@ export default function LogsView() {
             {paused ? <Play size={15} /> : <Pause size={15} />}
           </button>
           <button className="btn btn-ghost btn-icon" onClick={handleExport} title="Export logs" disabled={logs.length === 0}>
-            <Download size={15} />
+            <Upload size={15} />
           </button>
           <button className="btn btn-ghost btn-icon text-danger" onClick={handleClear} title="Clear logs" disabled={logs.length === 0}>
             <Trash size={15} />

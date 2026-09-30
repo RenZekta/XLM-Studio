@@ -1,102 +1,97 @@
-import React, { useState, useEffect } from 'react'
+import React, { useState } from 'react'
 import { useStore } from '../store/useStore'
-import { X, Download, Loader2 } from 'lucide-react'
-import { pickDefaultAsset, setLastAssetType } from '../utils/backendAssetPref'
+import { X, Download, Loader2, RefreshCw } from 'lucide-react'
+
+// Mirrors Settings -> Backends Tracker's own "Update (N)" action for the
+// llama-cpp tracked backend: every already-installed build that's now
+// outdated gets updated in one click, no per-click asset-type choice (that
+// choice was already made whenever each build was originally installed --
+// see the Tracker, which is also where a *new* type gets added). The old
+// version of this banner offered a single-type picker + Download button,
+// which is the older single-type-per-backend model this app has since
+// moved away from.
 export default function UpdateBanner() {
-  const { releaseInfo, updateDismissed, setUpdateDismissed, downloadProgress, setDownloadProgress, setBackends } = useStore()
-  const [downloading, setDownloading] = useState(false)
-  const [selectedAssetUrl, setSelectedAssetUrl] = useState('')
-  // The download-progress map is shared with the Settings backend tracker
-  // (keyed by `trackedId::assetName`, since a single backend can have
-  // several of its own variants queued at once) -- this banner only ever
-  // has the one download it itself just kicked off in flight.
-  const progressKey = `llama-cpp::${selectedAssetUrl ? (releaseInfo?.assets.find(a => a.downloadUrl === selectedAssetUrl)?.name || '') : ''}`
-  const myDownloadProgress = downloading ? (downloadProgress[progressKey] || null) : null
-  const isQueued = myDownloadProgress?.phase === 'queued'
-  useEffect(() => {
-    if (releaseInfo?.assets.length && !selectedAssetUrl) {
-      setSelectedAssetUrl(pickDefaultAsset('llama-cpp', releaseInfo.assets))
-    }
-  }, [releaseInfo, selectedAssetUrl])
+  const {
+    releaseInfo, updateDismissed, setUpdateDismissed, downloadProgress, setDownloadProgress,
+    setBackends, setTrackerResult, setReleaseInfo
+  } = useStore()
+  const [updating, setUpdating] = useState(false)
+
+  // .status is populated here despite the ReleaseInfo type not declaring it
+  // -- see App.tsx's onBackendsCheckedSilent, which builds releaseInfo from
+  // the llama-cpp TrackedBackendRelease result (status included) with just
+  // trackedId/folderName stripped off.
+  const outdatedAssets = (releaseInfo?.assets || []).filter(a => (a as { status?: string }).status === 'outdated')
   const notifPref = localStorage.getItem('hexllama_update_notify') || 'banner'
-  if (!releaseInfo || releaseInfo.error || updateDismissed || releaseInfo.isNewer === false || notifPref === 'manual') return null
-  const handleDownload = async () => {
-    if (!releaseInfo.assets.length) return
-    const asset = releaseInfo.assets.find(a => a.downloadUrl === selectedAssetUrl) || releaseInfo.assets[0]
-    setDownloading(true)
-    // Queues behind any other backend already downloading (e.g. from
-    // Settings) instead of failing -- resolves once this one actually runs.
-    const res = await window.api.downloadRelease({
-      url: asset.downloadUrl,
-      version: `${releaseInfo.tagName}-${asset.name.replace('.zip', '')}`,
-      assetName: asset.name,
-      backendKey: 'llama.cpp',
-      trackedId: 'llama-cpp'
-    })
-    setDownloading(false)
-    setDownloadProgress(`llama-cpp::${asset.name}`, null)
-    if (res.success) {
-      alert(`Successfully downloaded and extracted ${asset.name}`)
-      setUpdateDismissed(true)
-      const backendsData = await window.api.listBackends()
-      setBackends(backendsData)
-    } else if (res.error !== 'Cancelled') {
-      alert(`Download failed: ${res.error}`)
+  if (!releaseInfo || releaseInfo.error || updateDismissed || releaseInfo.isNewer === false || notifPref === 'manual' || outdatedAssets.length === 0) return null
+
+  // Keyed the same way the Tracker keys its own progress map, so this
+  // banner and the Tracker never disagree about the same download's state.
+  const busyAssets = outdatedAssets.map(a => ({ asset: a, progress: downloadProgress[`llama-cpp::${a.name}`] }))
+  const anyBusy = updating || busyAssets.some(b => b.progress)
+
+  async function handleUpdate() {
+    setUpdating(true)
+    await Promise.all(outdatedAssets.map(async asset => {
+      const res = await window.api.downloadRelease({
+        url: asset.downloadUrl,
+        version: releaseInfo!.tagName,
+        assetName: asset.name,
+        backendKey: 'llama.cpp',
+        trackedId: 'llama-cpp'
+      })
+      setDownloadProgress(`llama-cpp::${asset.name}`, null)
+      return res
+    }))
+    setUpdating(false)
+    const backendsData = await window.api.listBackends()
+    setBackends(backendsData)
+    const updated = await window.api.checkTrackedBackend('llama-cpp')
+    if (!('error' in updated)) {
+      setTrackerResult(updated)
+      const { trackedId, folderName, ...rest } = updated
+      setReleaseInfo(rest as typeof releaseInfo)
     }
+    setUpdateDismissed(true)
   }
+
+  function handleCancel() {
+    outdatedAssets.forEach(a => {
+      window.api.cancelBackendDownload('llama-cpp', a.name)
+      setDownloadProgress(`llama-cpp::${a.name}`, null)
+    })
+    setUpdating(false)
+  }
+
+  const busyLabel = busyAssets.find(b => b.progress)?.progress
+  const busyText = !busyLabel ? 'Updating…'
+    : busyLabel.phase === 'queued' ? `Queued (#${busyLabel.queuePosition || 1})`
+    : busyLabel.phase === 'extracting' ? 'Extracting...'
+    : `Downloading... ${busyLabel.percent || 0}%`
+
   return (
     <div className="update-banner">
-      {myDownloadProgress || downloading ? <Loader2 size={14} className="spin" /> : <Download size={14} />}
+      {anyBusy ? <Loader2 size={14} className="spin" /> : <Download size={14} />}
       <span>
         <strong>{releaseInfo.name || releaseInfo.tagName}</strong> is available —{' '}
         <button onClick={() => window.api.openExternal(releaseInfo.url)}>
           View release
         </button>
-        {releaseInfo.assets.length > 0 && (
-          <>
-            {' '}·{' '}
-            {downloading || myDownloadProgress ? (
-              <span style={{ opacity: 0.8 }}>
-                {isQueued
-                  ? `Queued (#${myDownloadProgress?.queuePosition || 1})`
-                  : myDownloadProgress?.phase === 'extracting' ? 'Extracting...' : `Downloading... ${myDownloadProgress?.percent || 0}%`}
-              </span>
-            ) : (
-              <>
-                <select 
-                  style={{ background: 'transparent', color: 'inherit', border: 'none', outline: 'none', borderBottom: '1px solid rgba(255,255,255,0.2)', marginRight: '8px', maxWidth: '200px' }}
-                  value={selectedAssetUrl} 
-                  onChange={(e) => {
-                    setSelectedAssetUrl(e.target.value)
-                    const asset = releaseInfo.assets.find(a => a.downloadUrl === e.target.value)
-                    if (asset) setLastAssetType('llama-cpp', asset.name)
-                  }}
-                >
-                  {releaseInfo.assets.map(a => (
-                    <option style={{ color: 'black' }} key={a.downloadUrl} value={a.downloadUrl}>
-                      {a.name}
-                    </option>
-                  ))}
-                </select>
-                <button onClick={handleDownload}>
-                  Download
-                </button>
-              </>
-            )}
-          </>
+        {' '}·{' '}
+        {anyBusy ? (
+          <span style={{ opacity: 0.8 }}>{busyText}</span>
+        ) : (
+          <button
+            onClick={handleUpdate}
+            title={`Update ${outdatedAssets.length} installed build${outdatedAssets.length === 1 ? '' : 's'}`}
+          >
+            <RefreshCw size={12} style={{ verticalAlign: -2, marginRight: 4 }} />
+            Update ({outdatedAssets.length})
+          </button>
         )}
       </span>
-      {myDownloadProgress || downloading ? (
-        <button 
-          className="dismiss text-danger" 
-          onClick={() => {
-            const asset = releaseInfo.assets.find(a => a.downloadUrl === selectedAssetUrl)
-            window.api.cancelBackendDownload('llama-cpp', asset?.name)
-            setDownloading(false)
-            if (asset) setDownloadProgress(`llama-cpp::${asset.name}`, null)
-          }} 
-          title="Cancel Download"
-        >
+      {anyBusy ? (
+        <button className="dismiss text-danger" onClick={handleCancel} title="Cancel Download">
           Cancel
         </button>
       ) : (

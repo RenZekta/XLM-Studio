@@ -4,6 +4,7 @@ import { LayoutGrid, Settings, FolderOpen, HardDrive, Search, Database, Terminal
 import { StarIcon as StarShape } from '../utils/format'
 import type { BackendVersion } from '../../../shared/types'
 import { backendTypeGroupLabel } from '../../../shared/backendType'
+import DownloadsMenu from './DownloadsMenu'
 
 export default function Sidebar() {
   const { view, setView, backends, activeBackend, setActiveBackend, setCommandsSchema, paths, compactSidebarEnabled,
@@ -158,6 +159,15 @@ export default function Sidebar() {
           text-align: center;
           line-height: 1;
         }
+        .nav-item-row { display: flex; align-items: center; gap: 4px; width: 100%; }
+        /* Collapsed compact rail is 60px wide with 8px padding each side --
+           44px of content, exactly one nav-item square and no room for a
+           second button beside it without overflowing (the rail also clips
+           overflow-x, so it would just vanish rather than wrap). Hidden
+           here and revealed once the rail expands on hover, same as every
+           nav-item's own text label already does. */
+        .sidebar-compact .nav-item-row .downloads-menu-btn { display: none; }
+        .sidebar-compact:hover .nav-item-row .downloads-menu-btn { display: inline-flex; }
         .sidebar-compact .folder-triggers-container {
           display: flex;
           flex-direction: column;
@@ -185,13 +195,17 @@ export default function Sidebar() {
         <Database size={16} />
         <span className="nav-item-text">Models</span>
       </button>
-      <button
-        className={`nav-item ${view === 'hub' ? 'active' : ''}`}
-        onClick={() => setView('hub')}
-      >
-        <Search size={16} />
-        <span className="nav-item-text">Model Hub</span>
-      </button>
+      <div className="nav-item-row">
+        <button
+          className={`nav-item ${view === 'hub' ? 'active' : ''}`}
+          onClick={() => setView('hub')}
+          style={{ flex: 1, minWidth: 0 }}
+        >
+          <Search size={16} />
+          <span className="nav-item-text">Model Hub</span>
+        </button>
+        <DownloadsMenu />
+      </div>
       <button
         className={`nav-item ${view === 'logs' ? 'active' : ''}`}
         onClick={() => setView('logs')}

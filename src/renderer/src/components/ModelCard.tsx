@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useRef, useMemo } from 'react'
 import { useStore } from '../store/useStore'
 import { Play, Square, Settings, ChevronDown, MoreVertical, Copy, Trash, Download, Globe, AlertCircle, Gauge, Loader2, Star } from 'lucide-react'
-import type { CardState, Template } from '../../../shared/types'
+import type { CardState, Template, CheckpointMode } from '../../../shared/types'
 import CmdParamsEditor from './CmdParamsEditor'
 import { effectiveTemplatePort, starColorForPort } from '../utils/templatePort'
 interface Props {
@@ -107,9 +107,7 @@ export default function ModelCard({ card, dragHandleProps }: Props) {
       // the main process kills the tree and waits for the port to be released.
       // This is what makes rapid Stop→Start reliable (no more "port in use").
       setCardStatus(card.template.id, 'stopping')
-      const res = await window.api.stopModel(card.template.id, {
-        skipCheckpoint: card.template.args?.['__disableAutoCheckpoint'] === true
-      })
+      const res = await window.api.stopModel(card.template.id)
       if (res.success) setCardStatus(card.template.id, 'idle')
       else { setCardStatus(card.template.id, 'running'); alert(`Failed to stop: ${res.error}`) }
       return
@@ -254,7 +252,7 @@ export default function ModelCard({ card, dragHandleProps }: Props) {
       openBrowser,
       port: card.template.serverPort || 8080,
       ignoreBaseUrlOverride: card.template.args?.['__ignoreBaseUrlOverride'] === true,
-      skipCheckpoint: card.template.args?.['__disableAutoCheckpoint'] === true
+      checkpointMode: (card.template.args?.['__checkpointMode'] as CheckpointMode) || 'follow'
     })
     if (res.success) setCardStatus(card.template.id, 'running', res.pid, res.port)
     else { alert(`Failed to run: ${res.error}`); setCardStatus(card.template.id, 'error') }

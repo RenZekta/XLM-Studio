@@ -14,7 +14,6 @@ import CreateModal from './components/CreateModal'
 import UpdateBanner from './components/UpdateBanner'
 import ChatWindow from './components/ChatWindow'
 import MetadataExtractionToast from './components/MetadataExtractionToast'
-import { buildDefaultTemplate } from './utils/defaultTemplate'
 import { phrases } from './utils/phrases'
 import { useTheme } from './hooks/useTheme'
 import type { Template } from '../../shared/types'
@@ -46,7 +45,6 @@ export default function App() {
     view, showCreateModal, activeBackend,
     setBackends, setModels, setActiveBackend, setCommandsSchema,
     setCards, setPaths, setReleaseInfo, setCheckingUpdate,
-    setHfDownload, removeHfDownload,
     upsertModelDownload, removeModelDownload,
     setExternalModelFolders, setExternalBackendFolders,
     setMainModelFolder, setMainBackendFolder,
@@ -275,68 +273,12 @@ export default function App() {
   }, [])
 
   useEffect(() => {
-    window.api.onHfDownloadProgress(async (data) => {
-      upsertModelDownload({
-        id: (data as any).id || data.filename,
-        url: '',
-        filename: data.filename,
-        destPath: data.destPath,
-        receivedBytes: (data as any).receivedBytes ?? 0,
-        totalBytes: (data as any).totalBytes ?? 0,
-        speed: (data as any).speed ?? 0,
-        percent: data.percent,
-        phase: data.phase as any,
-        repoId: (data as any).repoId
-      })
-
-      if (data.phase === 'done') {
-        setHfDownload({ repoId: '', filename: data.filename, percent: 100, phase: 'saving' })
-        const models = await window.api.listModels()
-        useStore.getState().setModels(models)
-        setHfDownload({ repoId: '', filename: data.filename, percent: 100, phase: 'creating_template' })
-        const { cards, activeBackend: backend, addCard: add } = useStore.getState()
-        const template = buildDefaultTemplate(
-          data.filename,
-          data.destPath,
-          cards.map(c => c.template),
-          backend?.name || '',
-          backend?.backendKey || ''
-        )
-        const res = await window.api.saveTemplate(template)
-        if (res.success) add({ ...template, id: res.id })
-        setHfDownload({ repoId: '', filename: data.filename, percent: 100, phase: 'done' })
-        setTimeout(() => removeHfDownload(data.filename), 2500)
-      } else {
-        setHfDownload({
-          repoId: '',
-          filename: data.filename,
-          percent: data.percent,
-          phase: data.phase as any,
-          speed: (data as any).speed
-        })
-      }
-    })
-    return () => window.api.removeHfDownloadListener()
-  }, [])
-
-  useEffect(() => {
     window.api.onModelDownloadProgress(async (data: any) => {
-      if (data.repoId) return
       upsertModelDownload(data)
       if (data.phase === 'done') {
         const models = await window.api.listModels()
         useStore.getState().setModels(models)
-        const { cards, activeBackend: backend, addCard: add } = useStore.getState()
-        const template = buildDefaultTemplate(
-          data.filename,
-          data.destPath,
-          cards.map(c => c.template),
-          backend?.name || '',
-          backend?.backendKey || ''
-        )
-        const res = await window.api.saveTemplate(template)
-        if (res.success) add({ ...template, id: res.id })
-        setTimeout(() => removeModelDownload(data.id), 4000)
+        setTimeout(() => removeModelDownload(data.id), 5000)
       }
     })
     window.api.listModelDownloads().then(list => {
