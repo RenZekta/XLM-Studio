@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useRef, useMemo } from 'react'
 import { useStore } from '../store/useStore'
-import { Play, Square, Settings, ChevronDown, MoreVertical, Copy, Trash, Download, Globe, AlertCircle, Gauge, Loader2, Star } from 'lucide-react'
+import { Play, Square, Settings, ChevronDown, MoreVertical, Copy, Trash, Upload, Globe, AlertCircle, Gauge, Loader2, Star } from 'lucide-react'
 import type { CardState, Template, CheckpointMode } from '../../../shared/types'
 import CmdParamsEditor from './CmdParamsEditor'
 import { effectiveTemplatePort, starColorForPort } from '../utils/templatePort'
@@ -363,7 +363,7 @@ export default function ModelCard({ card, dragHandleProps }: Props) {
                   {isMainTemplate ? 'Unstar Main Template' : `Star as Main Template (port ${myEffectivePort})`}
                 </button>
                 <button className="dropdown-item" onClick={handleDuplicate}><Copy size={14} /> Duplicate</button>
-                <button className="dropdown-item" onClick={handleExport}><Download size={14} /> Export</button>
+                <button className="dropdown-item" onClick={handleExport}><Upload size={14} /> Export</button>
                 <div className="dropdown-divider" />
                 <button className="dropdown-item danger" onClick={handleDelete}><Trash size={14} /> Delete</button>
               </div>

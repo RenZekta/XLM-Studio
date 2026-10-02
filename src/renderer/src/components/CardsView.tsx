@@ -1,7 +1,7 @@
 import React, { useEffect, useRef, useState } from 'react'
 import { useStore } from '../store/useStore'
 import ModelCard from './ModelCard'
-import { Plus, Upload, Search } from 'lucide-react'
+import { Plus, Download, Search } from 'lucide-react'
 import type { CardState, Template } from '../../../shared/types'
 const TEMPLATE_SEARCH_KEY = 'hexllama_template_search'
 export default function CardsView() {
@@ -120,7 +120,7 @@ export default function CardsView() {
         </div>
         <div className="page-actions">
           <button className="btn btn-secondary" onClick={handleImport}>
-            <Upload size={15} />
+            <Download size={15} />
             Import
           </button>
           <button className="btn btn-primary" onClick={() => setShowCreateModal(true)}>
