@@ -1,10 +1,10 @@
 import React, { useState, useEffect, useRef } from 'react'
 import { useStore } from '../store/useStore'
-import { Plus, Trash, ChevronDown, ChevronRight, Save, RotateCcw, Pencil, Check, X, Loader2, Box, Cpu, Zap, Database, Sliders, Wind, Server, FileText, GitBranch, Star, Settings } from 'lucide-react'
+import { Plus, Trash, ChevronDown, ChevronRight, Save, RotateCcw, Pencil, Check, X, Loader2, Box, Cpu, Zap, Database, Sliders, Wind, Server, FileText, GitBranch, Star, Settings, Repeat } from 'lucide-react'
 import type { CommandsSchema, CommandCategory, CommandParam } from '../../../shared/types'
 
 const iconMap: Record<string, React.ElementType> = {
-  Box, Cpu, Zap, Database, Sliders, Wind, Server, FileText, GitBranch, Star, Settings
+  Box, Cpu, Zap, Database, Sliders, Wind, Server, FileText, GitBranch, Star, Settings, Repeat
 }
 
 const PARAM_TYPES = ['boolean', 'number', 'string', 'select', 'text']

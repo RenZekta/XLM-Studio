@@ -5,7 +5,7 @@ import {
   Box, Cpu, Zap, Database, Sliders, Wind, Server, FileText, GitBranch,
   Search, Star, Lock, Clipboard, FolderOpen, Eye, CheckCircle2, XCircle,
   Image as ImageIcon, RotateCcw, Gauge, Sparkles, Layers, AlertTriangle,
-  MessageSquare, Copy, Check, ChevronDown
+  MessageSquare, Copy, Check, ChevronDown, Repeat
 } from 'lucide-react'
 import type { CommandParam, SpecMethod, CheckpointMode } from '../../../shared/types'
 import HybridSlider from './HybridSlider'
@@ -16,13 +16,15 @@ import { formatWithSpaces, CONTEXT_POWER_OF_TWO_STEPS, snapToNearestPowerOfTwo }
 import { buildQuickEngineBaseline, computeRecommendedThreads, defaultKvQuantFor, defaultKvQuantVFor, SAMPLING_KEYS } from '../../../shared/presetBaselines'
 import { COMMON_PARAM_FLAGS as COMMON_VISIBLE } from '../../../shared/commonParams'
 import { applyNgramModifierToggle } from '../../../shared/specToggles'
+import { FORK_ONLY_ARGS } from '../../../shared/backendForks'
+import { markTemplateSavePending, markTemplateSaveDone } from '../utils/templateSync'
 import { detectBackendRuntimeType, defaultVramOverheadForBackend, DEFAULT_RAM_OVERHEAD_MB, type BackendRuntimeType } from '../../../shared/backendOverhead'
 
 const iconMap: Record<string, React.ReactNode> = {
   Box: <Box size={14} />, Cpu: <Cpu size={14} />, Zap: <Zap size={14} />,
   Database: <Database size={14} />, Sliders: <Sliders size={14} />, Wind: <Wind size={14} />,
   Server: <Server size={14} />, FileText: <FileText size={14} />, GitBranch: <GitBranch size={14} />,
-  Star: <Star size={14} />
+  Star: <Star size={14} />, Repeat: <Repeat size={14} />
 }
 const FEATURED_ARGS = ['--ctx-size', '--gpu-layers', '--threads', '--batch-size', '--flash-attn']
 const HYBRID_PARAMS = ['--threads', '--gpu-layers', '--temperature', '--top-p', '--top-k', '--min-p', '--ctx-size', '--n-cpu-moe']
@@ -161,7 +163,7 @@ function NgramModifierBlock({ title, flagPrefix, enabled, onToggle, disabled, fi
 
 export default function CmdParamsEditor({ templateId, args, onChange, modelPathFallback, serverPortFallback, disabled: disabledProp, backendKey: backendKeyProp, backendVersionName: backendVersionProp, backendType: backendTypeProp, headerPortalTarget }: Props) {
   const {
-    commandsSchema, updateCard, cards, models, cpuInfo,
+    commandsSchema: activeCommandsSchema, updateCard, cards, models, cpuInfo,
     detectedSpeculation, setDetectedSpeculation, markSpeculationApplied,
     ggufMetadata, setGgufMetadata, activeBackend, backends,
     paramViewMode, setParamViewMode,
@@ -214,6 +216,25 @@ export default function CmdParamsEditor({ templateId, args, onChange, modelPathF
     return b || activeBackend
   }, [effectiveBackendKey, effectiveBackendVersionName, effectiveBackendType, backends, activeBackend])
 
+  // The store's schema belongs to the sidebar's active backend. A Template
+  // pinned to another fork needs that fork's own schema, or its fork-only
+  // params are hidden and its KV cache types look invalid. Until the pinned
+  // fork's schema arrives nothing is shown rather than the wrong one.
+  const schemaBackendKey = effectiveBackend?.backendKey
+  const needsOwnSchema = !!schemaBackendKey && schemaBackendKey !== activeBackend?.backendKey
+  const [ownSchema, setOwnSchema] = useState<{ key: string; schema: typeof activeCommandsSchema } | null>(null)
+  useEffect(() => {
+    if (!needsOwnSchema || !schemaBackendKey) return
+    let cancelled = false
+    window.api.getCommands(schemaBackendKey).then(schema => {
+      if (!cancelled) setOwnSchema({ key: schemaBackendKey, schema })
+    })
+    return () => { cancelled = true }
+  }, [needsOwnSchema, schemaBackendKey])
+  const commandsSchema = !needsOwnSchema
+    ? activeCommandsSchema
+    : (ownSchema && ownSchema.key === schemaBackendKey ? ownSchema.schema : null)
+
   // Keep a ref mirroring the latest `args` prop. Async
   // callbacks (e.g. the speculation/MTP file-scan below) close over `args` as
   // of the render in which the effect fired. If the scan takes a while and the
@@ -236,9 +257,14 @@ export default function CmdParamsEditor({ templateId, args, onChange, modelPathF
     return () => {
       if (saveTimeoutRef.current) {
         clearTimeout(saveTimeoutRef.current)
+        saveTimeoutRef.current = null
         if (templateId) {
           const latestCard = useStore.getState().cards.find(c => c.template.id === templateId)
-          if (latestCard) window.api?.saveTemplate?.(latestCard.template).catch(() => {})
+          if (latestCard) {
+            Promise.resolve(window.api?.saveTemplate?.(latestCard.template))
+              .catch(() => {})
+              .finally(() => markTemplateSaveDone(templateId))
+          } else markTemplateSaveDone(templateId)
         }
       }
     }
@@ -621,12 +647,19 @@ export default function CmdParamsEditor({ templateId, args, onChange, modelPathF
       // in-memory store, so this also flushes the change to the template's
       // JSON file on disk, debounced (400ms) so rapid consecutive edits
       // (typing in a number field, dragging a slider) settle to one write.
+      // The template counts as having an unsaved edit from here until its
+      // save settles (see templateSync.ts); a restarted timer is the same edit.
       if (saveTimeoutRef.current) clearTimeout(saveTimeoutRef.current)
+      else markTemplateSavePending(templateId)
       const idToSave = templateId
       const silent = !!opts?.silent
       saveTimeoutRef.current = setTimeout(() => {
+        saveTimeoutRef.current = null
         const latestCard = useStore.getState().cards.find(c => c.template.id === idToSave)
-        if (latestCard) window.api?.saveTemplate?.(latestCard.template, silent ? { silentSync: true } : undefined).catch(() => {})
+        if (!latestCard) { markTemplateSaveDone(idToSave); return }
+        Promise.resolve(window.api?.saveTemplate?.(latestCard.template, silent ? { silentSync: true } : undefined))
+          .catch(() => {})
+          .finally(() => markTemplateSaveDone(idToSave))
       }, 400)
     }
   }
@@ -977,7 +1010,7 @@ export default function CmdParamsEditor({ templateId, args, onChange, modelPathF
     const kUnset = curK === undefined || curK === ''
     const kInvalid = !kUnset && !!kOptions && !kOptions.includes(String(curK))
     const kOnPriorDefault = !kUnset && String(curK) === String(prevDefaultK)
-    if (kUnset || kInvalid || kOnPriorDefault) {
+    if ((kUnset || kInvalid || kOnPriorDefault) && curK !== defaultKvQuantK) {
       newArgs['--cache-type-k'] = defaultKvQuantK
       changed = true
     }
@@ -985,13 +1018,30 @@ export default function CmdParamsEditor({ templateId, args, onChange, modelPathF
     const vUnset = curV === undefined || curV === ''
     const vInvalid = !vUnset && !!vOptions && !vOptions.includes(String(curV))
     const vOnPriorDefault = !vUnset && String(curV) === String(prevDefaultV)
-    if (vUnset || vInvalid || vOnPriorDefault) {
+    if ((vUnset || vInvalid || vOnPriorDefault) && curV !== defaultKvQuantV) {
       newArgs['--cache-type-v'] = defaultKvQuantV
       changed = true
     }
     if (changed) commit(newArgs, { silent: true })
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [disabled, defaultKvQuantK, defaultKvQuantV, commandsSchema, effectiveBackend?.backendKey])
+
+  // Drops fork-only args the effective backend's schema doesn't define.
+  // llama-server rejects unknown arguments, and the launch path passes any
+  // stored key through even when the schema lacks it, so a Template moved off
+  // a fork would otherwise fail to start on a stale --kv-tail-tokens.
+  useEffect(() => {
+    if (disabled || !commandsSchema) return
+    const known = new Set<string>()
+    for (const cat of commandsSchema.categories) for (const cmd of cat.commands) known.add(cmd.arg)
+    const curArgs = argsRef.current
+    const stale = Object.keys(curArgs).filter(k => FORK_ONLY_ARGS.has(k) && !known.has(k))
+    if (stale.length === 0) return
+    const newArgs = { ...curArgs }
+    for (const k of stale) delete newArgs[k]
+    commit(newArgs, { silent: true })
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [disabled, commandsSchema])
 
   // '__vramOverheadMB' backfill: same "was this riding the old default, or
   // a deliberate override" reasoning as the KV-quant backfill above, but
@@ -1622,6 +1672,9 @@ export default function CmdParamsEditor({ templateId, args, onChange, modelPathF
             <select className="cmd-select" value={val} onChange={(e) => handleUpdate(cmd.arg, e.target.value)} disabled={disabled}>
               {!cmd.requireValue && <option value="">{cmd.emptyLabel || 'Default'}</option>}
               {cmd.options?.map(opt => <option key={opt} value={opt}>{opt}</option>)}
+              {/* A stored value outside the option list must still display as
+                  itself; otherwise the browser shows the first option instead. */}
+              {val !== '' && cmd.options && !cmd.options.includes(String(val)) && <option value={String(val)}>{String(val)}</option>}
             </select>
           )}
         </div>

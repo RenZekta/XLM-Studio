@@ -262,7 +262,7 @@ export interface CardState {
 
 // Tracked backend repository (a fork of llama.cpp to watch for releases).
 export interface TrackedBackend {
-  id: string              // stable slug, e.g. "llama-cpp" or "atomic-llama-cpp-turboquant"
+  id: string              // stable slug, e.g. "llama-cpp" or "beellama-cpp"
   repo: string            // "owner/repo"
   name: string            // display name e.g. "llama.cpp"
   folderName: string      // subfolder name under BACKEND_DIR for this backend
@@ -270,6 +270,9 @@ export interface TrackedBackend {
   // Optional default options injected into the commands.json for select params,
   // keyed by the param arg name (e.g. "--cache-type-k").
   defaultOptions?: Record<string, string[]>
+  // Parameters only this fork's llama-server accepts. Merged into the base
+  // schema by category name (a missing category is appended).
+  extraCommands?: CommandCategory[]
 }
 
 // Result of checking a single tracked backend for updates.

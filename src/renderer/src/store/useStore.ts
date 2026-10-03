@@ -5,6 +5,8 @@ import type {
   KvCacheCheckpointSettings
 } from '../../../shared/types'
 
+let backendSwitchSeq = 0
+
 interface CardState {
   template: Template
   status: RunningStatus
@@ -90,6 +92,7 @@ interface AppStore {
   setShowCreateModal: (show: boolean, template?: Template | null) => void
   setPrefillModelPath: (path: string | null) => void
   setActiveBackend: (b: BackendVersion) => void
+  switchBackend: (b: BackendVersion) => Promise<void>
   setCommandsSchema: (s: CommandsSchema) => void
   setBackends: (b: BackendVersion[]) => void
   setModels: (m: ModelGroup[]) => void
@@ -194,6 +197,19 @@ export const useStore = create<AppStore>((set) => ({
   setShowCreateModal: (show, template = null) => set({ showCreateModal: show, editingTemplate: template }),
   setPrefillModelPath: (path) => set({ prefillModelPath: path }),
   setActiveBackend: (b) => set({ activeBackend: b }),
+  // The active backend and the commands schema describe the same thing and
+  // must change in one update: the KV cache defaults and option lists are
+  // derived from the pair, so a window where only one has changed shows (and
+  // briefly applies) values that don't belong to either backend. The schema
+  // is fetched first; a response that arrives after a newer switch started is
+  // dropped so rapid clicks can't leave the older backend's schema behind.
+  switchBackend: async (b) => {
+    const seq = ++backendSwitchSeq
+    let schema: CommandsSchema | null = null
+    try { schema = await window.api.getCommands(b.backendKey) } catch {}
+    if (seq !== backendSwitchSeq) return
+    set(schema ? { activeBackend: b, commandsSchema: schema } : { activeBackend: b })
+  },
   setCommandsSchema: (s) => set({ commandsSchema: s }),
   setBackends: (b) => set({ backends: b }),
   setModels: (m) => set({ models: m }),

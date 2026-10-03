@@ -7,7 +7,7 @@ import { backendTypeGroupLabel } from '../../../shared/backendType'
 import DownloadsMenu from './DownloadsMenu'
 
 export default function Sidebar() {
-  const { view, setView, backends, activeBackend, setActiveBackend, setCommandsSchema, paths, compactSidebarEnabled,
+  const { view, setView, backends, activeBackend, switchBackend: storeSwitchBackend, paths, compactSidebarEnabled,
           mainModelFolder, mainBackendFolder } = useStore()
 
   // Distinct, detected-only backend-type groups (see backendTypeGroupLabel)
@@ -56,10 +56,8 @@ export default function Sidebar() {
   // version tag (see ModelCard's targetBackend resolution for the same
   // concern on the run-model path).
   async function switchBackend(b: BackendVersion) {
-    setActiveBackend(b)
     window.api.setGlobalBackend({ backendKey: b.backendKey, backendVersion: b.name, backendType: b.backendType ?? null }).catch(() => {})
-    const cmds = await window.api.getCommands(b.backendKey)
-    if (cmds) setCommandsSchema(cmds)
+    await storeSwitchBackend(b)
   }
 
   // Resolve which folders the bottom buttons should open.
