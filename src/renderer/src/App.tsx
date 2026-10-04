@@ -1,5 +1,6 @@
 import React, { useEffect, useRef } from 'react'
 import { useStore } from './store/useStore'
+import { reconcileTemplatesFromDisk, templateReadToken } from './utils/templateSync'
 import Titlebar from './components/Titlebar'
 import Sidebar from './components/Sidebar'
 import CardsView from './components/CardsView'
@@ -42,8 +43,8 @@ export default function App() {
   }, [])
 
   const {
-    view, showCreateModal, activeBackend,
-    setBackends, setModels, setActiveBackend, setCommandsSchema,
+    view, showCreateModal,
+    setBackends, setModels, switchBackend, setCommandsSchema,
     setCards, setPaths, setReleaseInfo, setCheckingUpdate,
     upsertModelDownload, removeModelDownload,
     setExternalModelFolders, setExternalBackendFolders,
@@ -121,7 +122,6 @@ export default function App() {
               if (match) initialBackend = match
             }
           } catch {}
-          setActiveBackend(initialBackend)
           // Keep settings.globalBackend in sync even when nothing was
           // persisted yet (fresh install, or the persisted backend is gone)
           // — otherwise the MCP layer's own backend resolution never learns
@@ -131,8 +131,7 @@ export default function App() {
           // (see Sidebar.tsx/SettingsView.tsx's switchBackend for the other
           // half of this sync).
           window.api.setGlobalBackend({ backendKey: initialBackend.backendKey, backendVersion: initialBackend.name, backendType: initialBackend.backendType ?? null }).catch(() => {})
-          const cmds = await window.api.getCommands(initialBackend.backendKey)
-          if (cmds) setCommandsSchema(cmds)
+          await switchBackend(initialBackend)
         } else {
           const cmds = await window.api.getCommands('')
           if (cmds) setCommandsSchema(cmds)
@@ -187,17 +186,8 @@ export default function App() {
     try {
       window.api?.onTemplatesChanged?.(async () => {
         try {
-          const templates = await window.api.listTemplates() as Template[]
-          const { cards: currentCards, addCard: add, updateCard: update, removeCard: remove } = useStore.getState()
-          const onDiskIds = new Set(templates.map(t => t.id))
-          for (const c of currentCards) {
-            if (!onDiskIds.has(c.template.id)) remove(c.template.id)
-          }
-          const cardIds = new Set(useStore.getState().cards.map(c => c.template.id))
-          for (const t of templates) {
-            if (cardIds.has(t.id)) update(t.id, t)
-            else add(t)
-          }
+          const readToken = templateReadToken()
+          reconcileTemplatesFromDisk(await window.api.listTemplates() as Template[], readToken)
         } catch {}
       })
     } catch {}
@@ -286,13 +276,6 @@ export default function App() {
     })
     return () => window.api.removeModelDownloadListener()
   }, [])
-
-  useEffect(() => {
-    if (!activeBackend) return
-    window.api.getCommands(activeBackend.backendKey).then((cmds) => {
-      if (cmds) setCommandsSchema(cmds)
-    })
-  }, [activeBackend, setCommandsSchema])
 
   useEffect(() => {
     window.api.onDownloadProgress((data) => {

@@ -15,6 +15,7 @@
 // CmdParamsEditor's own effects fill these in once that data exists).
 
 import { detectBackendRuntimeType, defaultVramOverheadForBackend, DEFAULT_RAM_OVERHEAD_MB } from './backendOverhead'
+import { TURBOQUANT_BACKEND_KEY, isBeeLlamaBackendKey } from './backendForks'
 
 export interface CpuInfoLike {
   physicalCores?: number
@@ -39,7 +40,8 @@ export function defaultKvQuantFor(backendKey: string | undefined | null): string
   // See the identical note in CmdParamsEditor.tsx —
   // turbo3 was silently getting K upgraded to q8_0 by llama.cpp's own
   // asymmetry safety fallback; turbo4 avoids that and is the better default.
-  return backendKey === 'atomic-llama-cpp-turboquant' ? 'turbo4' : 'q8_0'
+  if (backendKey === TURBOQUANT_BACKEND_KEY) return 'turbo4'
+  return isBeeLlamaBackendKey(backendKey) ? 'kvarn4' : 'q8_0'
 }
 
 // K and V are allowed to (and, for the atomic/TurboQuant backend, should)
@@ -48,8 +50,14 @@ export function defaultKvQuantFor(backendKey: string | undefined | null): string
 // the K cache safely above llama.cpp's asymmetry-fallback threshold (see the
 // note above) while turbo3 on V gets the extra context/VRAM headroom
 // TurboQuant is there for. Other backends keep a single q8_0 for both.
+//
+// BeeLlama follows the same pattern with its KVarN types: K=kvarn4 / V=kvarn3.
+// KVarN needs flash attention (the Quick baseline enables it) and is only
+// supported on some architectures; others fail closed at launch, in which case
+// a standard type can be picked from the dropdown.
 export function defaultKvQuantVFor(backendKey: string | undefined | null): string {
-  return backendKey === 'atomic-llama-cpp-turboquant' ? 'turbo3' : 'q8_0'
+  if (backendKey === TURBOQUANT_BACKEND_KEY) return 'turbo3'
+  return isBeeLlamaBackendKey(backendKey) ? 'kvarn3' : 'q8_0'
 }
 
 // The engine-only baseline (no sampling, no ctx-size/gpu-layers — see notes

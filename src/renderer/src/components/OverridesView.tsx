@@ -462,13 +462,35 @@ export default function OverridesView() {
             <div>
               <div className="settings-row-label">Enable Multimodal Projector automatically in new Template if mmproj was detected</div>
               <div className="settings-row-sub">
-                Save memory when you don't need vision capabilities.
+                Automatically manages your mmproj sidecars
               </div>
             </div>
             <div className="toggle-wrap">
               <label className="toggle">
                 <input type="checkbox" checked={modelDefaults.autoEnableMmproj !== false} onChange={async (e) => {
                   const d = { ...modelDefaults, autoEnableMmproj: e.target.checked }
+                  setModelDefaults(d); try { await window.api?.setModelDefaults?.(d) } catch {}
+                }} />
+                <span className="toggle-track"></span><span className="toggle-thumb"></span>
+              </label>
+            </div>
+          </div>
+          {/* "Global offload mmproj to RAM" -- ON by default. Keeps the
+              multimodal projector in RAM (--no-mmproj-offload) so faster
+              GPU memory stays free for the model. Each Template can follow
+              this or pin its own choice (Multimodal Projector -> Offload
+              mmproj to RAM). */}
+          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', width: '100%', marginTop: 8 }}>
+            <div>
+              <div className="settings-row-label">Global offload mmproj to RAM</div>
+              <div className="settings-row-sub">
+                Preserve faster memory for the model
+              </div>
+            </div>
+            <div className="toggle-wrap">
+              <label className="toggle">
+                <input type="checkbox" checked={modelDefaults.mmprojOffloadToRam !== false} onChange={async (e) => {
+                  const d = { ...modelDefaults, mmprojOffloadToRam: e.target.checked }
                   setModelDefaults(d); try { await window.api?.setModelDefaults?.(d) } catch {}
                 }} />
                 <span className="toggle-track"></span><span className="toggle-thumb"></span>

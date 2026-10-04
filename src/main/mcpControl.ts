@@ -11,6 +11,8 @@ import { buildQuickEngineBaseline, SAMPLING_KEYS, seedSamplingArgsFromPreset } f
 import { COMMON_PARAM_FLAGS } from '../shared/commonParams'
 import { applyNgramModifierToggle, getNgramModifierState, NGRAM_MAP_K4V_FLAGS, NGRAM_MOD_FLAGS } from '../shared/specToggles'
 import type { Template, CheckpointMode } from '../shared/types'
+import { applyMmprojOffloadFlag, MMPROJ_OFFLOAD_MODE_KEY, getMmprojOffloadMode, resolveMmprojOffloadToRam } from '../shared/mmprojOffload'
+import { applySpecDraftKvDefaults } from '../shared/specDraftKv'
 
 // Speculative-decoding tier table — mirrors src/main/ipc.ts's own
 // SPEC_TIER_DEFS/classifySidecarFilename (and CmdParamsEditor.tsx's
@@ -259,6 +261,9 @@ async function buildLaunchArgs(template: Template): Promise<{ args: string[]; ct
     if (value !== true) flags.push(String(value))
   }
   if (template.modelPath) flags.push('--model', template.modelPath)
+  // Same resolution as ModelCard.tsx's handleRunToggle: the Template's own
+  // "Offload mmproj to RAM" pin, else the global Overrides switch.
+  applyMmprojOffloadFlag(flags, raw, md.mmprojOffloadToRam)
   // Base URL Override — port substitution, "Serve on local network"
   // (--host 0.0.0.0), and API key, mirroring runModelImpl's own application
   // of these in ipc.ts EXACTLY (including the ignoreBaseUrlOverride escape
@@ -594,6 +599,21 @@ export async function toolTemplateEdit(args: { templates: string[]; changes: Rec
         if (kLower === 'n-gram map (k4v)' || kLower === 'ngram-map-k4v') { newArgs = applyNgramModifierToggle(newArgs, 'map-k4v', !!v); continue }
         if (kLower === 'n-gram modifier' || kLower === 'ngram-mod') { newArgs = applyNgramModifierToggle(newArgs, 'mod', !!v); continue }
         if (kLower === 'automatic yarn scaling control' || kLower === 'yarn-auto-scale') { newArgs['__yarnAutoScale'] = !!v; continue }
+        // "Offload mmproj to RAM" per-Template mode, same Follow global /
+        // Disabled / Enabled choice as the UI. Accepts the mode name, or a
+        // plain boolean (true = Enabled, false = Disabled); null/"follow"/
+        // empty goes back to following the global Overrides switch.
+        if (kLower === 'offload mmproj to ram' || kLower === 'mmproj-offload' || kLower === 'mmproj-offload-mode') {
+          const raw = typeof v === 'string' ? v.trim().toLowerCase() : v
+          let mode: 'follow' | 'disabled' | 'enabled'
+          if (raw === true || raw === 'enabled' || raw === 'on' || raw === 'true') mode = 'enabled'
+          else if (raw === false || raw === 'disabled' || raw === 'off' || raw === 'false') mode = 'disabled'
+          else if (raw === null || raw === undefined || raw === '' || raw === 'follow' || raw === 'global') mode = 'follow'
+          else throw new ToolError(`Invalid value for "${k}": use "follow", "enabled" (offload mmproj to RAM, --no-mmproj-offload), "disabled" (offload to GPU), or true/false.`)
+          if (mode === 'follow') delete newArgs[MMPROJ_OFFLOAD_MODE_KEY]
+          else newArgs[MMPROJ_OFFLOAD_MODE_KEY] = mode
+          continue
+        }
         if (kLower === 'multimodal projector' || kLower === 'mmproj') {
           const on = !!v
           newArgs['__mmproj_manual'] = true
@@ -732,6 +752,13 @@ export async function toolTemplateEdit(args: { templates: string[]; changes: Rec
           patch.backendType = globalMatch ? (globalMatch.backendType ?? null) : null
         }
       }
+      // Draft model KV cache types exist only while a primary speculative
+      // method is on: seed them from the backend's KV defaults when it is
+      // (unset values only), drop them when it isn't -- the same invariant
+      // the editor keeps, so an edit made here never leaves them stale.
+      let kvBackendKey: string | undefined
+      try { kvBackendKey = (await resolveBackend({ ...t, ...patch } as Template))?.backendKey } catch { /* no backend installed: generic defaults */ }
+      newArgs = applySpecDraftKvDefaults(newArgs, kvBackendKey)
       patch.args = newArgs
       delete patch._file
       await D().saveTemplate(patch)
@@ -789,6 +816,7 @@ export async function toolApplyParametersPreset(args: { preset: string | number;
     const preserved: Record<string, any> = {}
     const curArgs = t.args || {}
     if (curArgs['--mmproj'] !== undefined) preserved['--mmproj'] = curArgs['--mmproj']
+    if (curArgs[MMPROJ_OFFLOAD_MODE_KEY] !== undefined) preserved[MMPROJ_OFFLOAD_MODE_KEY] = curArgs[MMPROJ_OFFLOAD_MODE_KEY]
     for (const k of SAMPLING_KEYS) {
       if (curArgs[k] !== undefined) preserved[k] = curArgs[k]
     }
@@ -830,12 +858,15 @@ export async function toolApplyParametersPreset(args: { preset: string | number;
   // wholesale. This preserves sampling values, --mmproj, and anything else
   // Quick/FullAuto don't touch — replacing args entirely (the previous
   // behavior here) silently wiped all of that on every preset application.
-  const mergedArgs: Record<string, any> = { ...(t.args || {}), ...baseline }
+  let mergedArgs: Record<string, any> = { ...(t.args || {}), ...baseline }
   // --ctx-size specifically uses setIfAbsent semantics in the real Quick
   // button (only filled in if not already set) — restore an existing value
   // baseline would otherwise have overwritten.
   const existingCtx = (t.args || {})['--ctx-size']
   if (existingCtx !== undefined && existingCtx !== '') mergedArgs['--ctx-size'] = existingCtx
+  // Presets reset to the baseline, which includes the draft KV cache types
+  // (same as handleQuickPreset/handleFullAutoPreset in the editor).
+  mergedArgs = applySpecDraftKvDefaults(mergedArgs, backend?.backendKey, { force: true })
   if (preset === 'quick') {
     mergedArgs['__lastPreset'] = 'quick'
     const patch = { ...t, args: mergedArgs, updatedAt: new Date().toISOString() }
@@ -892,6 +923,9 @@ async function getSchemaLookup(t: Template): Promise<{ flagToParam: Map<string, 
         // flag (with or without its leading "-") the same way the UI's own
         // Parameters list shows it ("-lm, --load-mode").
         if (cmd.short) shortToFlag.set(cmd.short.toLowerCase().replace(/^-+/, ''), cmd.arg)
+        // Alternate long spellings (e.g. "--cache-type-k-draft") resolve the
+        // same way as short flags.
+        for (const alias of cmd.aliases || []) shortToFlag.set(alias.toLowerCase().replace(/^-+/, ''), cmd.arg)
       }
     }
   } catch {}
@@ -978,6 +1012,9 @@ async function paramsView(t: Template, view: 'common' | 'full') {
   const detectedMmproj = await findDetectedMmproj(t)
   const currentSpecTier = getCurrentSpecTier(args)
   const detectedSpec = await findDetectedSpeculation(t)
+  const globalMmprojToRam = (await D().loadSettings()).modelDefaults?.mmprojOffloadToRam !== false
+  const mmprojOffloadMode = getMmprojOffloadMode(args)
+  const mmprojOffloadToRam = resolveMmprojOffloadToRam(mmprojOffloadMode, globalMmprojToRam)
   const toggles = [
     {
       label: 'N-gram Map (K4V)', key: 'ngram-map-k4v', enabled: mapK4vOn,
@@ -998,10 +1035,16 @@ async function paramsView(t: Template, view: 'common' | 'full') {
       note: 'Usually managed automatically: the app turns this ON with the model\'s own auto-detected mmproj file (the "detected" field here, from info-models) whenever one exists, and leaves it off otherwise -- shouldn\'t normally need to be set directly. Toggle via template-edit\'s "mmproj"/"Multimodal Projector" key; pass "mmprojPath" alongside it to point at a specific file instead of the auto-detected one.'
     },
     {
+      label: 'Offload mmproj to RAM', key: 'mmproj-offload',
+      mode: mmprojOffloadMode, options: ['follow', 'disabled', 'enabled'],
+      effectiveToRam: mmprojOffloadToRam,
+      note: 'Per-Template choice for where the multimodal projector lives. "enabled" keeps it in RAM (--no-mmproj-offload) to preserve VRAM for the model; "disabled" offloads it to the GPU (llama-server default, no flag); "follow" uses the global Overrides switch (currently ' + (globalMmprojToRam ? 'on' : 'off') + '). Only matters while Multimodal Projector is on. Set with template-edit (mode name or true/false).'
+    },
+    {
       label: 'Speculative Decoding', key: 'spec-decode', enabled: currentSpecTier.tier > 0,
       method: currentSpecTier.method, methodLabel: currentSpecTier.label,
       subParameters: currentSpecTier.tier > 0
-        ? Object.fromEntries(['--spec-type', '--spec-draft-model', '--spec-draft-n-max', '--spec-draft-n-min', '--spec-draft-p-min'].filter(f => args[f] !== undefined).map(f => [f, args[f]]))
+        ? Object.fromEntries(['--spec-type', '--spec-draft-model', '--spec-draft-n-max', '--spec-draft-n-min', '--spec-draft-p-min', '--spec-draft-type-k', '--spec-draft-type-v'].filter(f => args[f] !== undefined).map(f => [f, args[f]]))
         : undefined,
       detected: detectedSpec,
       note: 'Usually managed automatically: the app activates the highest-tier method in "detected" here the first time a Template with this model is opened, and leaves it off otherwise -- shouldn\'t normally need to be set directly. Each detected entry\'s defaultParams are what activating it applies to --spec-draft-n-max/min/p-min. Toggle via template-edit\'s "spec-decode"/"Speculative Decoding" key: a detected entry\'s "method" (e.g. "eagle3") activates that tier with its own defaults and sidecar path (if any); "off"/false disables it; true activates the single highest-tier detected method. Pass "specDraftModel" alongside it to point at a specific sidecar file instead of the detected one.'
@@ -1456,7 +1499,7 @@ export const TOOL_DEFS: ToolDef[] = [
   },
   {
     name: 'template-edit', handler: toolTemplateEdit,
-    description: 'Edit one or more Templates: model, backend, multimodal projector, speculative decoding, or any other parameter. Each parameter key accepts its display-parameters label ("Context Size"), its raw flag ("ctx-size"/"--ctx-size"), or its short flag ("-c"). Also accepts the five composite toggles from display-parameters-* as plain booleans: "N-gram Map (K4V)"/"ngram-map-k4v", "N-gram Modifier"/"ngram-mod" (each auto-applies/removes its own default sub-parameters), "Automatic YaRN scaling control"/"yarn-auto-scale", "Multimodal Projector"/"mmproj" (turning it on auto-fills the model\'s own detected mmproj file -- see display-parameters\' "detected" field -- unless "mmprojPath" is also given in the same call to point at a specific file instead; turning it off clears "--mmproj"), and "Speculative Decoding"/"spec-decode" (accepts true/false, OR one of the method names from display-parameters\' "detected" list, e.g. "eagle3" -- activates that method with ITS OWN default draft parameters and detected sidecar file, same as picking it in the UI; "true" alone activates the single highest-tier detected method; "false"/"off" disables it; "specDraftModel" alongside it points at a specific sidecar file instead of the detected one). Changing "backend"/"backendKey" or "backendVersion" without also setting "backendType" in the same call auto-resolves the type (adopts the installed match\'s type if the new key+version is unambiguous, else the Global Backend\'s type if it happens to be that same fork+version, else clears it back to ambiguous) -- pass "backendType" explicitly (from info-backends) to pin an exact GPU-runtime variant when more than one is installed for that fork+version. Refuses to change model/backend/backendVersion/backendType of a currently-serving Template. If "Only allow Template edits via MCP for MCP-made Templates" is on, only "MCP-made"-tagged Templates can be edited.',
+    description: 'Edit one or more Templates: model, backend, multimodal projector, speculative decoding, or any other parameter. Each parameter key accepts its display-parameters label ("Context Size"), its raw flag ("ctx-size"/"--ctx-size"), or its short flag ("-c"). Also accepts the six composite toggles from display-parameters-* (booleans, except where noted): "N-gram Map (K4V)"/"ngram-map-k4v", "N-gram Modifier"/"ngram-mod" (each auto-applies/removes its own default sub-parameters), "Automatic YaRN scaling control"/"yarn-auto-scale", "Multimodal Projector"/"mmproj" (turning it on auto-fills the model\'s own detected mmproj file -- see display-parameters\' "detected" field -- unless "mmprojPath" is also given in the same call to point at a specific file instead; turning it off clears "--mmproj"), "Offload mmproj to RAM"/"mmproj-offload" (a mode: "follow" the global Overrides switch, "enabled" = keep the projector in RAM via --no-mmproj-offload, "disabled" = offload it to the GPU; true/false also accepted), and "Speculative Decoding"/"spec-decode" (accepts true/false, OR one of the method names from display-parameters\' "detected" list, e.g. "eagle3" -- activates that method with ITS OWN default draft parameters and detected sidecar file, same as picking it in the UI; "true" alone activates the single highest-tier detected method; "false"/"off" disables it; "specDraftModel" alongside it points at a specific sidecar file instead of the detected one). While a method is on, the draft model KV cache types "--spec-draft-type-k"/"--spec-draft-type-v" (aliases "-ctkd"/"-ctvd") are auto-filled with the backend\'s KV cache defaults and removed when it is off; set them directly with those flags. Changing "backend"/"backendKey" or "backendVersion" without also setting "backendType" in the same call auto-resolves the type (adopts the installed match\'s type if the new key+version is unambiguous, else the Global Backend\'s type if it happens to be that same fork+version, else clears it back to ambiguous) -- pass "backendType" explicitly (from info-backends) to pin an exact GPU-runtime variant when more than one is installed for that fork+version. Refuses to change model/backend/backendVersion/backendType of a currently-serving Template. If "Only allow Template edits via MCP for MCP-made Templates" is on, only "MCP-made"-tagged Templates can be edited.',
     params: [
       { name: 'templates', type: 'string[]', required: true, description: 'One or more Template names' },
       { name: 'changes', type: 'object', required: true, description: 'Key/value map of parameters to change, e.g. {"ctx-size": 8192, "model": "...", "backendType": "vulkan"}. Set "backend"/"backendKey" to "" (empty string) to unpin and go back to following the Global Backend.' }
@@ -1482,12 +1525,12 @@ export const TOOL_DEFS: ToolDef[] = [
   },
   {
     name: 'display-parameters-common', handler: toolDisplayParametersCommon,
-    description: 'Show a Template\'s parameters the same way the app\'s interface shows them (label + raw flag + stored value + type), filtered to the curated "Common Parameters" set (ctx-size, threads, gpu-layers, batch/ubatch size, parallel, flash-attn, sampling, KV cache type/offload, load-mode, keep, seed) — only those actually set on the Template. Also includes a "toggles" array (N-gram Map (K4V), N-gram Modifier, Automatic YaRN scaling control, Multimodal Projector, Speculative Decoding) showing each toggle\'s on/off state and any active sub-parameters — pass a toggle\'s label straight to template-edit to flip it with defaults auto-applied. These are the Template\'s stored values, not the resolved launch command — use display-preview for that. Try this before display-parameters-full — reach for -full only if the parameter you need isn\'t in this curated set, since it returns everything unfiltered and costs more context.',
+    description: 'Show a Template\'s parameters the same way the app\'s interface shows them (label + raw flag + stored value + type), filtered to the curated "Common Parameters" set (ctx-size, threads, gpu-layers, batch/ubatch size, parallel, flash-attn, sampling, KV cache type/offload, load-mode, keep, seed) — only those actually set on the Template. Also includes a "toggles" array (N-gram Map (K4V), N-gram Modifier, Automatic YaRN scaling control, Multimodal Projector, Offload mmproj to RAM, Speculative Decoding) showing each toggle\'s on/off state and any active sub-parameters — pass a toggle\'s label straight to template-edit to flip it with defaults auto-applied. These are the Template\'s stored values, not the resolved launch command — use display-preview for that. Try this before display-parameters-full — reach for -full only if the parameter you need isn\'t in this curated set, since it returns everything unfiltered and costs more context.',
     params: [{ name: 'template', type: 'string', required: true, description: 'Template name' }]
   },
   {
     name: 'display-parameters-full', handler: toolDisplayParametersFull,
-    description: 'Show every parameter actually set on a Template, unfiltered, the same way the app\'s interface shows them (label + raw flag + stored value + type). Also includes the same "toggles" array as display-parameters-common (N-gram Map (K4V), N-gram Modifier, Automatic YaRN scaling control, Multimodal Projector, Speculative Decoding). These are the Template\'s stored values, not the resolved launch command — use display-preview for that. Costs more context than display-parameters-common\'s curated subset — use that first and only fall back to this if the parameter you\'re after wasn\'t in it.',
+    description: 'Show every parameter actually set on a Template, unfiltered, the same way the app\'s interface shows them (label + raw flag + stored value + type). Also includes the same "toggles" array as display-parameters-common (N-gram Map (K4V), N-gram Modifier, Automatic YaRN scaling control, Multimodal Projector, Offload mmproj to RAM, Speculative Decoding). These are the Template\'s stored values, not the resolved launch command — use display-preview for that. Costs more context than display-parameters-common\'s curated subset — use that first and only fall back to this if the parameter you\'re after wasn\'t in it.',
     params: [{ name: 'template', type: 'string', required: true, description: 'Template name' }]
   },
   {

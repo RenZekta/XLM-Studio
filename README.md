@@ -153,6 +153,8 @@ Every template shows a live preview of the exact `llama-server` command that wil
 
 Running cutting-edge models sometimes requires different builds of llama.cpp (or compatible with extra feature forks, e.g. TurboQuant-enabled builds). XLM Studio lets you maintain and seamlessly switch between multiple backend binaries, and can check upstream repositories for new releases and download/extract them straight from the settings panel.
 
+[atomic-llama-cpp-turboquant](https://github.com/AtomicBot-ai/atomic-llama-cpp-turboquant) and [BeeLlama.cpp](https://github.com/Anbeeld/beellama.cpp) are built in. Their fork-only parameters (KVarN and extra low-bit KV cache types, KV precision tail, DFlash depth controller, reasoning loop guard) appear only for templates running on that fork, and are dropped automatically if a template moves to a backend that doesn't support them.
+
 <img width="2553" height="1388" alt="image" src="https://github.com/user-attachments/assets/128c738d-de86-4906-8752-f5a7f255820d" />
 
 
@@ -213,6 +215,9 @@ cd (X:\your\chosen\destination)\XLM-Studio && npm install && npm run build && np
 - [x] **VRAM/RAM Budget Calculator**: Architecture-aware KV-cache and weight-memory estimation (MLA, GQA, sliding-window, hybrid SSM/attention), with live Dense/MoE-specific recommendations.
 - [x] **Speculative Decoding — 5-tier system**: Auto-detects and prioritizes the best available method per model — Native MTP, Draft Model, EAGLE3, DSpark2, and DFlash2 — plus stackable n-gram modifiers (`ngram-map-k4v`, `ngram-mod`), each combinable with any primary method.
 - [x] **TurboQuant Support**: KV-cache quantization support tuned for TurboQuant-enabled backends.
+- [x] **BeeLlama Support**: KVarN (`kvarn2`-`kvarn8`) and `q2_0`-`q6_1` KV cache types, SWA overrides, `--kv-tail-tokens` precision tail, adaptive DFlash depth controller and reasoning loop guard parameters, with matching KV-cache memory estimates.
+- [x] **mmproj RAM Offload**: per-Template Follow global / Disabled / Enabled control (and a global Overrides switch, on by default) for `--no-mmproj-offload`; nothing is emitted when the projector stays on the GPU.
+- [x] **Draft Model KV Cache Types**: `--spec-draft-type-k/-v` dropdowns in Speculative Decoding, offering the same types as the target KV cache and defaulting to each fork's own KV default.
 - [x] **Unified KV Cache**: `--kv-unified` on by default, so `--parallel` sequences share a single KV buffer instead of splitting the context window between them.
 - [x] **Three-Way Presets**: Quick / FULL AUTO / Clear, with preset-relative diff highlighting that never touches sampling parameters.
 - [x] **YaRN Context Scaling**: Automatic RoPE/YaRN scaling to extend usable context past a model's native window.

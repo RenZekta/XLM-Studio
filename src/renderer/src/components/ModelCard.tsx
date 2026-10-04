@@ -2,6 +2,7 @@ import React, { useState, useEffect, useRef, useMemo } from 'react'
 import { useStore } from '../store/useStore'
 import { Play, Square, Settings, ChevronDown, MoreVertical, Copy, Trash, Upload, Globe, AlertCircle, Gauge, Loader2, Star } from 'lucide-react'
 import type { CardState, Template, CheckpointMode } from '../../../shared/types'
+import { applyMmprojOffloadFlag } from '../../../shared/mmprojOffload'
 import CmdParamsEditor from './CmdParamsEditor'
 import { effectiveTemplatePort, starColorForPort } from '../utils/templatePort'
 interface Props {
@@ -186,6 +187,10 @@ export default function ModelCard({ card, dragHandleProps }: Props) {
         else if (v !== false && v !== null && v !== '') args.push(k, String(v))
       }
     }
+    // "Offload mmproj to RAM": the Template's own pin or the global Overrides
+    // switch decides whether --no-mmproj-offload is passed. GPU offload is
+    // llama-server's default, so "off" adds nothing.
+    applyMmprojOffloadFlag(args, tArgs, useStore.getState().modelDefaults?.mmprojOffloadToRam)
     if (!args.includes('--port') && card.template.serverPort) {
       args.push('--port', String(card.template.serverPort))
     }

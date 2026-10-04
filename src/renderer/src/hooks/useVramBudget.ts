@@ -69,6 +69,12 @@ export interface VramBudget {
 //   q5_0  = 22 bytes / 32 values = 0.6875
 //   q5_1  = 24 bytes / 32 values = 0.75
 //   iq4_nl = 18 bytes / 32 values = 0.5625
+// BeeLlama's extra legacy-style types use the same 32-value blocks (fp16
+// scale, plus an fp16 min for the _1 variants): q6_0 = 26/32, q6_1 = 28/32,
+// q3_0 = 14/32, q3_1 = 16/32, q2_0 = 10/32, q2_1 = 12/32 bytes per value.
+// BeeLlama KVarN: its published sizes vs bf16 (kvarn6 41.4%, kvarn5 35.2%,
+// kvarn4 28.9%) fit (width + 0.625) bits per value, which is extrapolated to
+// kvarn2/3/8. The optional precision tail (--kv-tail-tokens) is not counted.
 // TurboQuant (fork-only KV types): 128 values + 1 fp16/fp32 stored norm.
 //   turbo2 = (128*2/8 + 2) / 128 = 34/128  ≈ 0.2656  (fp16 norm)
 //   turbo3 = (128*3/8 + 2) / 128 = 50/128  ≈ 0.3906  (fp16 norm) — conservative
@@ -83,6 +89,18 @@ const KV_BPE: Record<string, number> = {
   q5_0: 22 / 32,        // 0.6875
   q5_1: 24 / 32,        // 0.75
   iq4_nl: 18 / 32,      // 0.5625
+  q6_0: 26 / 32,        // 0.8125
+  q6_1: 28 / 32,        // 0.875
+  q3_0: 14 / 32,        // 0.4375
+  q3_1: 16 / 32,        // 0.5
+  q2_0: 10 / 32,        // 0.3125
+  q2_1: 12 / 32,        // 0.375
+  kvarn2: 2.625 / 8,
+  kvarn3: 3.625 / 8,
+  kvarn4: 4.625 / 8,
+  kvarn5: 5.625 / 8,
+  kvarn6: 6.625 / 8,
+  kvarn8: 8.625 / 8,
   // TurboQuant KV-cache types (require a TurboQuant fork + flash attention).
   // Conservative figures (fp32 norm) so we never underestimate RAM.
   turbo2: 34 / 128,     // ≈ 0.2656

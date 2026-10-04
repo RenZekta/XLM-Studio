@@ -1658,6 +1658,13 @@ input[type="number"] {
 /* Feature 15: Toggle switches accent color changed to blue (was white) */
 .toggle input:checked ~ .toggle-track { background: #3b82f6; }
 
+/* Native sliders, checkboxes and radios take Chromium's default accent, which
+   is a pale blue under a dark color-scheme (and reads as a permanently
+   "filled" slider). Tie them to the same blue as the toggle switches. */
+input[type="range"],
+input[type="checkbox"],
+input[type="radio"] { accent-color: #3b82f6; }
+
 /* ==========================================================================
    FEATURE 14: VRAM INFO BANNER
    ========================================================================== */

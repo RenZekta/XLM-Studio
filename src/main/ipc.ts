@@ -18,6 +18,7 @@ import type {
 } from '../shared/types'
 import { MCP_TOOL_IDS } from '../shared/types'
 import { extractBackendTypeFromAssetName } from '../shared/backendType'
+import { BEELLAMA_BACKEND_KEY, BEELLAMA_KV_TYPES, BEELLAMA_EXTRA_COMMANDS } from '../shared/backendForks'
 import { initPerfMonitor, registerPerfHandlers, startTracking, stopTracking, stopAllTracking } from './perfMonitor'
 import { initMcpLayer, registerMcpHandlers } from './mcpServer'
 import { toolTemplateAction } from './mcpControl'
@@ -110,6 +111,8 @@ loadCheckpointIndex()
 // --------------------------------------------------------------------------
 // Tracked backends — built-in defaults
 // --------------------------------------------------------------------------
+const TURBOQUANT_KV_TYPES = ['f32', 'f16', 'bf16', 'q8_0', 'q4_0', 'q4_1', 'iq4_nl', 'q5_0', 'q5_1', 'turbo2', 'turbo3', 'turbo4']
+
 const DEFAULT_TRACKED: TrackedBackend[] = [
   {
     id: 'llama-cpp',
@@ -126,9 +129,29 @@ const DEFAULT_TRACKED: TrackedBackend[] = [
     isDefault: true,
     // TurboQuant fork exposes additional KV cache quantization types.
     defaultOptions: {
-      '--cache-type-k': ['f32', 'f16', 'bf16', 'q8_0', 'q4_0', 'q4_1', 'iq4_nl', 'q5_0', 'q5_1', 'turbo2', 'turbo3', 'turbo4'],
-      '--cache-type-v': ['f32', 'f16', 'bf16', 'q8_0', 'q4_0', 'q4_1', 'iq4_nl', 'q5_0', 'q5_1', 'turbo2', 'turbo3', 'turbo4']
+      '--cache-type-k': TURBOQUANT_KV_TYPES,
+      '--cache-type-v': TURBOQUANT_KV_TYPES,
+      // The draft model's KV cache offers the same types as the target's.
+      '--spec-draft-type-k': TURBOQUANT_KV_TYPES,
+      '--spec-draft-type-v': TURBOQUANT_KV_TYPES
     }
+  },
+  {
+    id: 'beellama-cpp',
+    repo: 'Anbeeld/beellama.cpp',
+    name: 'beellama.cpp',
+    folderName: BEELLAMA_BACKEND_KEY,
+    isDefault: true,
+    // KVarN and the extra low-bit ladder for the KV cache, plus fork-only
+    // flags (precision tail, DFlash depth controller, reasoning loop guard).
+    defaultOptions: {
+      '--cache-type-k': BEELLAMA_KV_TYPES,
+      '--cache-type-v': BEELLAMA_KV_TYPES,
+      // v0.4.5+ also accepts the KVarN and low-bit types for the draft cache.
+      '--spec-draft-type-k': BEELLAMA_KV_TYPES,
+      '--spec-draft-type-v': BEELLAMA_KV_TYPES
+    },
+    extraCommands: BEELLAMA_EXTRA_COMMANDS
   }
 ]
 
@@ -184,7 +207,7 @@ interface AppSettings {
   mainBackendFolder: string | null
   theme: ThemePref
   trackedBackends: TrackedBackend[]
-  modelDefaults?: { autoFitEnabled: boolean; autoFitContextLength: number; guardrailMode: string; customMaxSizeGB: number; useCurrentMemState?: boolean; moeOffloadStrategy?: 'offload' | 'max'; autoFitUse2xIncrements?: boolean; autoFitYarnAutoScale?: boolean; autoEnableMmproj?: boolean; cpuThreadsOverrideEnabled?: boolean; cpuThreadsOverridePercent?: number; parallelOverrideEnabled?: boolean; parallelInferenceMode?: 'unified' | 'separate'; parallelOverrideValue?: number; parallelOverrideValueDense?: number; parallelOverrideValueMoe?: number; perfMaxSessions?: number; autoOpenChatUI?: boolean }
+  modelDefaults?: { autoFitEnabled: boolean; autoFitContextLength: number; guardrailMode: string; customMaxSizeGB: number; useCurrentMemState?: boolean; moeOffloadStrategy?: 'offload' | 'max'; autoFitUse2xIncrements?: boolean; autoFitYarnAutoScale?: boolean; autoEnableMmproj?: boolean; mmprojOffloadToRam?: boolean; cpuThreadsOverrideEnabled?: boolean; cpuThreadsOverridePercent?: number; parallelOverrideEnabled?: boolean; parallelInferenceMode?: 'unified' | 'separate'; parallelOverrideValue?: number; parallelOverrideValueDense?: number; parallelOverrideValueMoe?: number; perfMaxSessions?: number; autoOpenChatUI?: boolean }
   baseUrlOverride?: BaseUrlOverride
   samplingPresets?: any[]
   starredPresetId?: string
@@ -272,7 +295,7 @@ const DEFAULT_SETTINGS: AppSettings = {
   mainBackendFolder: null,
   theme: 'system',
   trackedBackends: DEFAULT_TRACKED,
-  modelDefaults: { autoFitEnabled: true, autoFitContextLength: 60000, guardrailMode: 'strict', customMaxSizeGB: 0, useCurrentMemState: false, moeOffloadStrategy: 'max' /* default: MAX GPU layers + force MoE experts to CPU */, autoFitUse2xIncrements: false, autoFitYarnAutoScale: false, autoEnableMmproj: true, cpuThreadsOverrideEnabled: false, cpuThreadsOverridePercent: 100, parallelOverrideEnabled: false, parallelInferenceMode: 'unified', parallelOverrideValue: 4, parallelOverrideValueDense: 4, parallelOverrideValueMoe: 4, perfMaxSessions: 20, autoOpenChatUI: false },
+  modelDefaults: { autoFitEnabled: true, autoFitContextLength: 60000, guardrailMode: 'strict', customMaxSizeGB: 0, useCurrentMemState: false, moeOffloadStrategy: 'max' /* default: MAX GPU layers + force MoE experts to CPU */, autoFitUse2xIncrements: false, autoFitYarnAutoScale: false, autoEnableMmproj: true, mmprojOffloadToRam: true, cpuThreadsOverrideEnabled: false, cpuThreadsOverridePercent: 100, parallelOverrideEnabled: false, parallelInferenceMode: 'unified', parallelOverrideValue: 4, parallelOverrideValueDense: 4, parallelOverrideValueMoe: 4, perfMaxSessions: 20, autoOpenChatUI: false },
   baseUrlOverride: { ...DEFAULT_BASE_URL_OVERRIDE },
   samplingPresets: [],
   starredPresetId: 'lm-studio',
@@ -320,9 +343,19 @@ async function loadSettings(): Promise<AppSettings> {
     const tracked = Array.isArray(data.trackedBackends) && data.trackedBackends.length > 0
       ? data.trackedBackends
       : DEFAULT_TRACKED
-    // Ensure the two built-in tracked backends always exist (even if user removed others).
+    // Built-in entries always exist and always carry their current schema
+    // overrides (stored copies from older versions would otherwise go stale).
+    // A custom entry for the same repo (added by hand before it became
+    // built-in) is promoted in place, keeping its folder so installed
+    // binaries and pinned templates still resolve.
     for (const def of DEFAULT_TRACKED) {
-      if (!tracked.find((t: TrackedBackend) => t.id === def.id)) tracked.push(def)
+      const sameRepo = (t: TrackedBackend) => t.repo.toLowerCase() === def.repo.toLowerCase()
+      const idx = tracked.findIndex((t: TrackedBackend) => t.id === def.id || sameRepo(t))
+      if (idx === -1) { tracked.push(def); continue }
+      const existing: TrackedBackend = tracked[idx]
+      tracked[idx] = existing.id === def.id
+        ? { ...existing, ...def }
+        : { ...def, id: existing.id, folderName: existing.folderName }
     }
     const dedupedTracked = dedupeTrackedBackendFolders(tracked)
     return {
@@ -351,6 +384,9 @@ async function loadSettings(): Promise<AppSettings> {
         // Settings toggle: "Enable Multimodal Projector automatically in
         // new Template if mmproj was detected" — ON by default.
         autoEnableMmproj: data.modelDefaults?.autoEnableMmproj ?? true,
+        // Overrides: "Global offload mmproj to RAM" -- keeps the multimodal
+        // projector out of VRAM (--no-mmproj-offload). ON by default.
+        mmprojOffloadToRam: data.modelDefaults?.mmprojOffloadToRam ?? true,
         // "Recommended CPU Threads override" — off by default (uses the
         // built-in 75%-of-physical-cores default), value 100% when enabled.
         cpuThreadsOverrideEnabled: data.modelDefaults?.cpuThreadsOverrideEnabled ?? false,
@@ -1152,12 +1188,20 @@ function loadDefaultCommandsSchema(): CommandsSchema | null {
 function buildTrackedCommandsSchema(tracked: TrackedBackend): CommandsSchema | null {
   const base = loadDefaultCommandsSchema()
   if (!base) return null
-  if (!tracked.defaultOptions) return base
-  for (const cat of base.categories) {
-    for (const cmd of cat.commands) {
-      const opts = tracked.defaultOptions[cmd.arg]
-      if (opts) cmd.options = opts
+  if (tracked.defaultOptions) {
+    for (const cat of base.categories) {
+      for (const cmd of cat.commands) {
+        const opts = tracked.defaultOptions[cmd.arg]
+        if (opts) cmd.options = opts
+      }
     }
+  }
+  for (const extra of tracked.extraCommands || []) {
+    const cat = base.categories.find(c => c.name === extra.name)
+    const known = new Set(cat ? cat.commands.map(c => c.arg) : [])
+    const added = extra.commands.filter(c => !known.has(c.arg)).map(c => ({ ...c }))
+    if (cat) cat.commands.push(...added)
+    else base.categories.push({ name: extra.name, icon: extra.icon, commands: added })
   }
   return base
 }
@@ -1978,13 +2022,22 @@ function moveDirRecursive(src: string, dst: string): void {
 // base b10269, fork semver 1.6.0). The base build number is NOT sufficient
 // to order these: two fork releases can share the same upstream base while
 // one is strictly newer, so the fork semver (when present) is compared as
-// a tiebreaker after the base build number.
+// a tiebreaker after the base build number. Forks with plain semver tags
+// (e.g. "v0.4.0") have no build number at all; those compare by semver alone.
 function parseBackendVersion(name: string): { build: number; fork: number[] } {
-  const buildMatch = name.match(/(\d{3,6})/)
+  // A digit run touching a dot belongs to a semver, not to a build number.
+  const buildMatch = name.match(/(?<![\d.])(\d{3,6})(?![\d.])/)
   const build = buildMatch ? parseInt(buildMatch[1], 10) : 0
-  const forkMatch = name.match(/-(\d+(?:\.\d+)+)/)
+  const forkMatch = name.match(/(\d+(?:\.\d+)+)/)
   const fork = forkMatch ? forkMatch[1].split('.').map(n => parseInt(n, 10)) : []
   return { build, fork }
+}
+
+// Forks that only publish semver tags (e.g. BeeLlama's "v0.4.0") have no
+// build number, so a version is comparable when either part was parsed.
+function isComparableBackendVersion(name: string): boolean {
+  const v = parseBackendVersion(name)
+  return v.build > 0 || v.fork.length > 0
 }
 
 // Returns negative if a < b, 0 if equal, positive if a > b.
@@ -2013,13 +2066,12 @@ function compareBackendVersions(a: string, b: string): number {
 // Scoped to the SAME type deliberately -- different GPU-runtime variants of
 // a fork have no meaningful version ordering relative to each other, only
 // within themselves. The newly downloaded version is always kept. Versions
-// without a parseable build number are left untouched (safety). This runs
+// without a parseable build number or semver are left untouched (safety). This runs
 // across ALL backend roots that contain the same fork+type folder, so an
 // update also cleans up copies in external backend folders.
 async function cleanupOldBackendVersions(backendKey: string, backendType: string, newVersion: string): Promise<{ deleted: string[] }> {
   const deleted: string[] = []
-  const newNum = parseBackendVersion(newVersion).build
-  if (!newNum) return { deleted } // can't compare — skip
+  if (!isComparableBackendVersion(newVersion)) return { deleted } // not comparable, leave everything in place
   const roots = await backendRoots()
   for (const root of roots) {
     const typeDir = join(root.dir, backendKey, backendType)
@@ -2031,8 +2083,7 @@ async function cleanupOldBackendVersions(backendKey: string, backendType: string
       if (e.name === newVersion) continue
       // Skip staging folders.
       if (e.name.startsWith('.staging-')) continue
-      const verNum = parseBackendVersion(e.name).build
-      if (verNum && compareBackendVersions(e.name, newVersion) < 0) {
+      if (isComparableBackendVersion(e.name) && compareBackendVersions(e.name, newVersion) < 0) {
         const oldDir = join(typeDir, e.name)
         try {
           rmrf(oldDir)
@@ -2346,8 +2397,7 @@ export function registerIpcHandlers(): void {
     // Sort: by backendKey then version desc (numeric prefix if present).
     all.sort((a, b) => {
       if (a.backendKey !== b.backendKey) return a.backendKey.localeCompare(b.backendKey)
-      const n = (s: string) => parseInt((s.match(/(\d{3,6})/) || ['0', '0'])[1], 10)
-      return n(b.version) - n(a.version)
+      return compareBackendVersions(b.version, a.version)
     })
     return all
   }
@@ -2521,7 +2571,7 @@ export function registerIpcHandlers(): void {
     else if (/^[^/\s]+\/[^/\s]+$/.test(trimmed)) repo = trimmed
     else return { success: false, error: 'Unrecognised GitHub link. Use https://github.com/owner/repo or owner/repo.' }
     const s = await loadSettings()
-    if (s.trackedBackends.find(t => t.repo === repo)) return { success: false, error: 'Already tracked' }
+    if (s.trackedBackends.find(t => t.repo.toLowerCase() === repo.toLowerCase())) return { success: false, error: 'Already tracked' }
     const taken = new Set(s.trackedBackends.map(t => t.folderName.toLowerCase()))
     const folderName = backendFolderNameFor(repo, taken)
     const displayName = repo.split('/').pop() || repo
@@ -4618,6 +4668,7 @@ export function registerIpcHandlers(): void {
       autoFitUse2xIncrements: !!defaults.autoFitUse2xIncrements,
       autoFitYarnAutoScale: !!defaults.autoFitYarnAutoScale,
       autoEnableMmproj: defaults.autoEnableMmproj !== undefined ? !!defaults.autoEnableMmproj : true,
+      mmprojOffloadToRam: defaults.mmprojOffloadToRam !== undefined ? !!defaults.mmprojOffloadToRam : true,
       cpuThreadsOverrideEnabled: !!defaults.cpuThreadsOverrideEnabled,
       // Clamp 0-100, and snap to a whole-core-equivalent isn't possible here
       // (this handler doesn't know physicalCores) — the renderer already

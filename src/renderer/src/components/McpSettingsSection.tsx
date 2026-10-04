@@ -1,5 +1,5 @@
 import React, { useEffect, useState } from 'react'
-import { Boxes, Loader2 } from 'lucide-react'
+import { Boxes, Loader2, ChevronDown, Wrench } from 'lucide-react'
 import { MCP_TOOL_IDS, type McpSettings, type McpToolId } from '../../../shared/types'
 
 const TOOL_LABELS: Record<McpToolId, string> = {
@@ -28,6 +28,7 @@ export default function McpSettingsSection() {
   const [saving, setSaving] = useState(false)
   const [skillBusy, setSkillBusy] = useState(false)
   const [skillMsg, setSkillMsg] = useState<string | null>(null)
+  const [toolsOpen, setToolsOpen] = useState(false)
 
   useEffect(() => {
     window.api.getMcpSettings().then(setMcp).catch(() => {})
@@ -135,17 +136,38 @@ export default function McpSettingsSection() {
             </p>
           </div>
 
-          <div className="settings-row" style={{ flexDirection: 'column', alignItems: 'flex-start', gap: 6 }}>
-            <span className="mmproj-widget-label" style={{ marginBottom: 4 }}>Tools</span>
-            {MCP_TOOL_IDS.map(id => (
-              <div className="mmproj-widget-row" style={{ width: '100%' }} key={id}>
-                <span style={{ fontSize: 12.5, fontFamily: 'var(--font-mono, monospace)' }}>{TOOL_LABELS[id]}</span>
-                <label className="toggle">
-                  <input type="checkbox" checked={mcp.tools[id] !== false} onChange={() => toggleTool(id)} />
-                  <span className="toggle-track"></span><span className="toggle-thumb"></span>
-                </label>
+          {/* The tool list is long, so it lives in a collapsible window
+              (closed by default) with an at-a-glance enabled count. */}
+          <div className="collapsible-section" style={{ width: '100%' }}>
+            <button
+              type="button"
+              className="collapsible-toggle"
+              onClick={() => setToolsOpen(o => !o)}
+              aria-expanded={toolsOpen}
+            >
+              <Wrench size={14} />
+              <span>Tools</span>
+              <span style={{ fontSize: 12, color: 'var(--text-muted)', fontWeight: 400 }}>
+                {MCP_TOOL_IDS.filter(id => mcp.tools[id] !== false).length} of {MCP_TOOL_IDS.length} enabled
+              </span>
+              <ChevronDown
+                size={14}
+                style={{ marginLeft: 'auto', transform: toolsOpen ? 'rotate(180deg)' : 'none', transition: 'transform 180ms' }}
+              />
+            </button>
+            {toolsOpen && (
+              <div className="collapsible-body" style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+                {MCP_TOOL_IDS.map(id => (
+                  <div className="mmproj-widget-row" style={{ width: '100%' }} key={id}>
+                    <span style={{ fontSize: 12.5, fontFamily: 'var(--font-mono, monospace)' }}>{TOOL_LABELS[id]}</span>
+                    <label className="toggle">
+                      <input type="checkbox" checked={mcp.tools[id] !== false} onChange={() => toggleTool(id)} />
+                      <span className="toggle-track"></span><span className="toggle-thumb"></span>
+                    </label>
+                  </div>
+                ))}
               </div>
-            ))}
+            )}
           </div>
         </>
       )}

@@ -6,5 +6,7 @@ export const COMMON_PARAM_FLAGS = new Set([
   '--ctx-size', '--threads', '--gpu-layers', '--batch-size', '--ubatch-size',
   '--parallel', '--flash-attn', '--temperature', '--top-p', '--min-p', '--top-k',
   '--load-mode', '--cache-type-k', '--cache-type-v', '--kv-offload',
-  '--kv-unified', '--keep', '--seed'
+  '--kv-unified', '--keep', '--seed',
+  // BeeLlama only; absent from other backends' schemas, so never shown there.
+  '--kv-tail-tokens'
 ])

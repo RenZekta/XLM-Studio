@@ -22,7 +22,7 @@ function getNotifPref(): 'banner' | 'manual' {
 
 export default function SettingsView() {
   const {
-    backends, activeBackend, setActiveBackend, setCommandsSchema, setBackends,
+    backends, activeBackend, switchBackend, setBackends,
     releaseInfo, downloadProgress, setDownloadProgress, setReleaseInfo,
     setModels, compactSidebarEnabled, setCompactSidebarEnabled,
     theme, systemTheme,
@@ -93,10 +93,8 @@ export default function SettingsView() {
   async function handleSwitchBackend(backendId: string) {
     const b = backends.find(x => x.id === backendId || x.name === backendId)
     if (!b) return
-    setActiveBackend(b)
     window.api.setGlobalBackend({ backendKey: b.backendKey, backendVersion: b.name, backendType: b.backendType ?? null }).catch(() => {})
-    const cmds = await window.api.getCommands(b.backendKey)
-    if (cmds) setCommandsSchema(cmds)
+    await switchBackend(b)
   }
 
   async function handleDeleteBackend(backendId: string) {

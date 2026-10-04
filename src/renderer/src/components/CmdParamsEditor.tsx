@@ -5,7 +5,7 @@ import {
   Box, Cpu, Zap, Database, Sliders, Wind, Server, FileText, GitBranch,
   Search, Star, Lock, Clipboard, FolderOpen, Eye, CheckCircle2, XCircle,
   Image as ImageIcon, RotateCcw, Gauge, Sparkles, Layers, AlertTriangle,
-  MessageSquare, Copy, Check, ChevronDown
+  MessageSquare, Copy, Check, ChevronDown, Repeat
 } from 'lucide-react'
 import type { CommandParam, SpecMethod, CheckpointMode } from '../../../shared/types'
 import HybridSlider from './HybridSlider'
@@ -16,20 +16,27 @@ import { formatWithSpaces, CONTEXT_POWER_OF_TWO_STEPS, snapToNearestPowerOfTwo }
 import { buildQuickEngineBaseline, computeRecommendedThreads, defaultKvQuantFor, defaultKvQuantVFor, SAMPLING_KEYS } from '../../../shared/presetBaselines'
 import { COMMON_PARAM_FLAGS as COMMON_VISIBLE } from '../../../shared/commonParams'
 import { applyNgramModifierToggle } from '../../../shared/specToggles'
+import { FORK_ONLY_ARGS } from '../../../shared/backendForks'
+import { markTemplateSavePending, markTemplateSaveDone } from '../utils/templateSync'
+import { MMPROJ_OFFLOAD_MODE_KEY, getMmprojOffloadMode, resolveMmprojOffloadToRam } from '../../../shared/mmprojOffload'
+import { SPEC_DRAFT_K_ARG, SPEC_DRAFT_V_ARG, isSpecDraftActive, resolveKvBackfill, applySpecDraftKvDefaults } from '../../../shared/specDraftKv'
+import type { MmprojOffloadMode } from '../../../shared/types'
 import { detectBackendRuntimeType, defaultVramOverheadForBackend, DEFAULT_RAM_OVERHEAD_MB, type BackendRuntimeType } from '../../../shared/backendOverhead'
 
 const iconMap: Record<string, React.ReactNode> = {
   Box: <Box size={14} />, Cpu: <Cpu size={14} />, Zap: <Zap size={14} />,
   Database: <Database size={14} />, Sliders: <Sliders size={14} />, Wind: <Wind size={14} />,
   Server: <Server size={14} />, FileText: <FileText size={14} />, GitBranch: <GitBranch size={14} />,
-  Star: <Star size={14} />
+  Star: <Star size={14} />, Repeat: <Repeat size={14} />
 }
 const FEATURED_ARGS = ['--ctx-size', '--gpu-layers', '--threads', '--batch-size', '--flash-attn']
 const HYBRID_PARAMS = ['--threads', '--gpu-layers', '--temperature', '--top-p', '--top-k', '--min-p', '--ctx-size', '--n-cpu-moe']
 // Params that get a custom widget (excluded from the regular command grid).
 const CUSTOM_PARAMS = ['--model', '--port', '--host', '--api-key', '--mmproj', '--spec-type', '--spec-draft-model', '--chat-template', '--reasoning-budget', '--reasoning-budget-message', '--n-cpu-moe', '--reasoning-preserve',
   '--spec-ngram-map-k4v-size-n', '--spec-ngram-map-k4v-size-m', '--spec-ngram-map-k4v-min-hits',
-  '--spec-ngram-mod-n-match', '--spec-ngram-mod-n-min', '--spec-ngram-mod-n-max']
+  '--spec-ngram-mod-n-match', '--spec-ngram-mod-n-min', '--spec-ngram-mod-n-max',
+  // Rendered inside the Speculative Decoding widget, next to the other draft settings.
+  '--spec-draft-type-k', '--spec-draft-type-v']
 // Sampling values are per-model/user-preferred, set once
 // at template creation from the starred sampling preset, and must NEVER be
 // touched by the Quick/FullAuto/Clear engine presets. Shared list so every
@@ -161,7 +168,7 @@ function NgramModifierBlock({ title, flagPrefix, enabled, onToggle, disabled, fi
 
 export default function CmdParamsEditor({ templateId, args, onChange, modelPathFallback, serverPortFallback, disabled: disabledProp, backendKey: backendKeyProp, backendVersionName: backendVersionProp, backendType: backendTypeProp, headerPortalTarget }: Props) {
   const {
-    commandsSchema, updateCard, cards, models, cpuInfo,
+    commandsSchema: activeCommandsSchema, updateCard, cards, models, cpuInfo,
     detectedSpeculation, setDetectedSpeculation, markSpeculationApplied,
     ggufMetadata, setGgufMetadata, activeBackend, backends,
     paramViewMode, setParamViewMode,
@@ -214,6 +221,25 @@ export default function CmdParamsEditor({ templateId, args, onChange, modelPathF
     return b || activeBackend
   }, [effectiveBackendKey, effectiveBackendVersionName, effectiveBackendType, backends, activeBackend])
 
+  // The store's schema belongs to the sidebar's active backend. A Template
+  // pinned to another fork needs that fork's own schema, or its fork-only
+  // params are hidden and its KV cache types look invalid. Until the pinned
+  // fork's schema arrives nothing is shown rather than the wrong one.
+  const schemaBackendKey = effectiveBackend?.backendKey
+  const needsOwnSchema = !!schemaBackendKey && schemaBackendKey !== activeBackend?.backendKey
+  const [ownSchema, setOwnSchema] = useState<{ key: string; schema: typeof activeCommandsSchema } | null>(null)
+  useEffect(() => {
+    if (!needsOwnSchema || !schemaBackendKey) return
+    let cancelled = false
+    window.api.getCommands(schemaBackendKey).then(schema => {
+      if (!cancelled) setOwnSchema({ key: schemaBackendKey, schema })
+    })
+    return () => { cancelled = true }
+  }, [needsOwnSchema, schemaBackendKey])
+  const commandsSchema = !needsOwnSchema
+    ? activeCommandsSchema
+    : (ownSchema && ownSchema.key === schemaBackendKey ? ownSchema.schema : null)
+
   // Keep a ref mirroring the latest `args` prop. Async
   // callbacks (e.g. the speculation/MTP file-scan below) close over `args` as
   // of the render in which the effect fired. If the scan takes a while and the
@@ -236,9 +262,14 @@ export default function CmdParamsEditor({ templateId, args, onChange, modelPathF
     return () => {
       if (saveTimeoutRef.current) {
         clearTimeout(saveTimeoutRef.current)
+        saveTimeoutRef.current = null
         if (templateId) {
           const latestCard = useStore.getState().cards.find(c => c.template.id === templateId)
-          if (latestCard) window.api?.saveTemplate?.(latestCard.template).catch(() => {})
+          if (latestCard) {
+            Promise.resolve(window.api?.saveTemplate?.(latestCard.template))
+              .catch(() => {})
+              .finally(() => markTemplateSaveDone(templateId))
+          } else markTemplateSaveDone(templateId)
         }
       }
     }
@@ -572,6 +603,18 @@ export default function CmdParamsEditor({ templateId, args, onChange, modelPathF
     // memory for users who don't need vision), until manually turned on.
     // Defaults to true (matches the setting's own ON-by-default).
     : (!!detectedMmproj && modelDefaults.autoEnableMmproj !== false)
+  // "Offload mmproj to RAM": per-Template pin (absent = follow the global
+  // Overrides switch). Resolved here once so the widget hint and the command
+  // preview agree with what the launch actually does.
+  const mmprojOffloadMode = getMmprojOffloadMode(args)
+  const mmprojOffloadToRam = resolveMmprojOffloadToRam(mmprojOffloadMode, modelDefaults.mmprojOffloadToRam)
+  function setMmprojOffloadMode(mode: MmprojOffloadMode) {
+    const newArgs = { ...args }
+    // 'follow' is the absence of the key, so an untouched Template stays clean.
+    if (mode === 'follow') delete newArgs[MMPROJ_OFFLOAD_MODE_KEY]
+    else newArgs[MMPROJ_OFFLOAD_MODE_KEY] = mode
+    commit(newArgs)
+  }
   const mmprojMode: 'auto' | 'manual' = useMemo(() => {
     if (!mmprojOn) return 'manual'  // off → show Manual
     if (detectedMmproj && mmprojArgValue === detectedMmproj.path) return 'auto'
@@ -621,12 +664,19 @@ export default function CmdParamsEditor({ templateId, args, onChange, modelPathF
       // in-memory store, so this also flushes the change to the template's
       // JSON file on disk, debounced (400ms) so rapid consecutive edits
       // (typing in a number field, dragging a slider) settle to one write.
+      // The template counts as having an unsaved edit from here until its
+      // save settles (see templateSync.ts); a restarted timer is the same edit.
       if (saveTimeoutRef.current) clearTimeout(saveTimeoutRef.current)
+      else markTemplateSavePending(templateId)
       const idToSave = templateId
       const silent = !!opts?.silent
       saveTimeoutRef.current = setTimeout(() => {
+        saveTimeoutRef.current = null
         const latestCard = useStore.getState().cards.find(c => c.template.id === idToSave)
-        if (latestCard) window.api?.saveTemplate?.(latestCard.template, silent ? { silentSync: true } : undefined).catch(() => {})
+        if (!latestCard) { markTemplateSaveDone(idToSave); return }
+        Promise.resolve(window.api?.saveTemplate?.(latestCard.template, silent ? { silentSync: true } : undefined))
+          .catch(() => {})
+          .finally(() => markTemplateSaveDone(idToSave))
       }, 400)
     }
   }
@@ -761,7 +811,7 @@ export default function CmdParamsEditor({ templateId, args, onChange, modelPathF
     newArgs['--spec-draft-n-max'] = tierDef.draftMax
     newArgs['--spec-draft-n-min'] = tierDef.draftMin
     newArgs['--spec-draft-p-min'] = tierDef.draftPMin
-    commit(newArgs, { silent: true })
+    commit(applySpecDraftKvDefaults(newArgs, effectiveBackend?.backendKey), { silent: true })
   }, [effectiveModelPath, disabled, detectedSpeculation, args])
 
   // Selecting a primary method (Off / Native MTP / Draft Model / EAGLE3 /
@@ -796,7 +846,9 @@ export default function CmdParamsEditor({ templateId, args, onChange, modelPathF
         delete newArgs['--spec-draft-model']  // Native MTP is embedded, no sidecar file
       }
     }
-    commit(newArgs); if (templateId) markSpeculationApplied(templateId, true)
+    // Draft KV cache types: seeded with the backend's KV defaults while a
+    // method is on, removed when off.
+    commit(applySpecDraftKvDefaults(newArgs, effectiveBackend?.backendKey)); if (templateId) markSpeculationApplied(templateId, true)
   }
   function setNgramModifier(which: 'map-k4v' | 'mod', on: boolean) {
     const newArgs = applyNgramModifierToggle(args, which, on)
@@ -954,6 +1006,7 @@ export default function CmdParamsEditor({ templateId, args, onChange, modelPathF
   // implicitly set. Anything that diverges from the previous backend's
   // default is treated as a deliberate override and survives the switch
   // unchanged (as long as it's still a valid option).
+  const specDraftActive = isSpecDraftActive(args)
   const prevKvBackendKeyRef = useRef<string | null | undefined>(effectiveBackend?.backendKey)
   useEffect(() => {
     if (disabled || !commandsSchema) return
@@ -969,29 +1022,45 @@ export default function CmdParamsEditor({ templateId, args, onChange, modelPathF
       }
       return undefined
     }
-    const kOptions = findOptions('--cache-type-k')
-    const vOptions = findOptions('--cache-type-v')
     const newArgs: Record<string, any> = { ...curArgs }
     let changed = false
-    const curK = curArgs['--cache-type-k']
-    const kUnset = curK === undefined || curK === ''
-    const kInvalid = !kUnset && !!kOptions && !kOptions.includes(String(curK))
-    const kOnPriorDefault = !kUnset && String(curK) === String(prevDefaultK)
-    if (kUnset || kInvalid || kOnPriorDefault) {
-      newArgs['--cache-type-k'] = defaultKvQuantK
-      changed = true
+    const backfill = (arg: string, prevDefault: string, newDefault: string) => {
+      const next = resolveKvBackfill(curArgs[arg], findOptions(arg), prevDefault, newDefault)
+      if (next !== undefined) { newArgs[arg] = next; changed = true }
     }
-    const curV = curArgs['--cache-type-v']
-    const vUnset = curV === undefined || curV === ''
-    const vInvalid = !vUnset && !!vOptions && !vOptions.includes(String(curV))
-    const vOnPriorDefault = !vUnset && String(curV) === String(prevDefaultV)
-    if (vUnset || vInvalid || vOnPriorDefault) {
-      newArgs['--cache-type-v'] = defaultKvQuantV
-      changed = true
+    backfill('--cache-type-k', prevDefaultK, defaultKvQuantK)
+    backfill('--cache-type-v', prevDefaultV, defaultKvQuantV)
+    // The draft model's KV cache tracks the same per-backend defaults, but
+    // only exists while a primary speculative method is on; with it off the
+    // keys are dropped (they mean nothing without a draft context).
+    if (specDraftActive) {
+      backfill(SPEC_DRAFT_K_ARG, prevDefaultK, defaultKvQuantK)
+      backfill(SPEC_DRAFT_V_ARG, prevDefaultV, defaultKvQuantV)
+    } else {
+      for (const k of [SPEC_DRAFT_K_ARG, SPEC_DRAFT_V_ARG]) {
+        if (newArgs[k] !== undefined) { delete newArgs[k]; changed = true }
+      }
     }
     if (changed) commit(newArgs, { silent: true })
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [disabled, defaultKvQuantK, defaultKvQuantV, commandsSchema, effectiveBackend?.backendKey])
+  }, [disabled, defaultKvQuantK, defaultKvQuantV, commandsSchema, effectiveBackend?.backendKey, specDraftActive])
+
+  // Drops fork-only args the effective backend's schema doesn't define.
+  // llama-server rejects unknown arguments, and the launch path passes any
+  // stored key through even when the schema lacks it, so a Template moved off
+  // a fork would otherwise fail to start on a stale --kv-tail-tokens.
+  useEffect(() => {
+    if (disabled || !commandsSchema) return
+    const known = new Set<string>()
+    for (const cat of commandsSchema.categories) for (const cmd of cat.commands) known.add(cmd.arg)
+    const curArgs = argsRef.current
+    const stale = Object.keys(curArgs).filter(k => FORK_ONLY_ARGS.has(k) && !known.has(k))
+    if (stale.length === 0) return
+    const newArgs = { ...curArgs }
+    for (const k of stale) delete newArgs[k]
+    commit(newArgs, { silent: true })
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [disabled, commandsSchema])
 
   // '__vramOverheadMB' backfill: same "was this riding the old default, or
   // a deliberate override" reasoning as the KV-quant backfill above, but
@@ -1235,13 +1304,15 @@ export default function CmdParamsEditor({ templateId, args, onChange, modelPathF
     // comment for why this replaced the old __ignoreCtxOverride-based
     // heuristic.
     newArgs['__lastPreset'] = 'quick'
-    commit(newArgs)
+    // Presets reset to the baseline, which includes the draft KV types.
+    commit(applySpecDraftKvDefaults(newArgs, activeBackend?.backendKey, { force: true }))
     // Mark Quick as the active baseline so blue lines DON'T appear.
     setPresetMode('quick')
   }
   function handleClearPreset() {
     const newArgs: Record<string, any> = {}
     if (args['--mmproj'] !== undefined) newArgs['--mmproj'] = args['--mmproj']
+    if (args[MMPROJ_OFFLOAD_MODE_KEY] !== undefined) newArgs[MMPROJ_OFFLOAD_MODE_KEY] = args[MMPROJ_OFFLOAD_MODE_KEY]
     // Clear must preserve sampling values too — it wipes the engine args
     // (everything else), not the model's/user's sampling setup.
     for (const k of SAMPLING_KEYS) {
@@ -1296,7 +1367,7 @@ export default function CmdParamsEditor({ templateId, args, onChange, modelPathF
     newArgs['__ignoreCtxOverride'] = true
     newArgs['__autoCtxFill'] = 'auto'
     newArgs['__lastPreset'] = 'fullauto'
-    commit(newArgs)
+    commit(applySpecDraftKvDefaults(newArgs, activeBackend?.backendKey, { force: true }))
     setPresetMode('fullauto')
   }
 
@@ -1386,6 +1457,9 @@ export default function CmdParamsEditor({ templateId, args, onChange, modelPathF
     runtimeArgs['--port'] = previewEffectivePort
     if (hostOverrideActive) runtimeArgs['--host'] = '0.0.0.0'
     if (apiKeyOverrideActive) runtimeArgs['--api-key'] = baseUrlOverride.apiKey
+    // Same rule as the real launch (ModelCard.tsx / mcpControl.ts): only with
+    // a projector in use, and never --mmproj-offload (GPU offload is the default).
+    if ((runtimeArgs['--mmproj'] || runtimeArgs['-mm']) && mmprojOffloadToRam) runtimeArgs['--no-mmproj-offload'] = true
     return runtimeArgs
   }
 
@@ -1622,6 +1696,9 @@ export default function CmdParamsEditor({ templateId, args, onChange, modelPathF
             <select className="cmd-select" value={val} onChange={(e) => handleUpdate(cmd.arg, e.target.value)} disabled={disabled}>
               {!cmd.requireValue && <option value="">{cmd.emptyLabel || 'Default'}</option>}
               {cmd.options?.map(opt => <option key={opt} value={opt}>{opt}</option>)}
+              {/* A stored value outside the option list must still display as
+                  itself; otherwise the browser shows the first option instead. */}
+              {val !== '' && cmd.options && !cmd.options.includes(String(val)) && <option value={String(val)}>{String(val)}</option>}
             </select>
           )}
         </div>
@@ -1660,6 +1737,32 @@ export default function CmdParamsEditor({ templateId, args, onChange, modelPathF
             <span className="toggle-track"></span><span className="toggle-thumb"></span>
           </label>
         </div>
+      </div>
+      {/* Where the projector lives. Follow global / Disabled / Enabled, same
+          control as Automatic Checkpoint Saving. Enabled = RAM
+          (--no-mmproj-offload, keeps VRAM for the model); Disabled = GPU, the
+          llama-server default, which needs no flag. Dimmed while the
+          projector is off, but still settable ahead of enabling it. */}
+      <div className="mmproj-widget-row" style={mmprojOn ? {} : { opacity: 0.5 }}>
+        <span className="mmproj-widget-label">Offload mmproj to RAM</span>
+        <div className="theme-segmented">
+          {(['follow', 'disabled', 'enabled'] as const).map(mode => (
+            <button
+              key={mode}
+              type="button"
+              className={`theme-segmented-btn ${mmprojOffloadMode === mode ? 'active' : ''}`}
+              onClick={() => setMmprojOffloadMode(mode)}
+              disabled={disabled}
+            >
+              {mode === 'follow' ? 'Follow global' : mode === 'disabled' ? 'Disabled' : 'Enabled'}
+            </button>
+          ))}
+        </div>
+      </div>
+      <div style={{ fontSize: 11, color: 'var(--text-muted)', paddingLeft: 4, marginBottom: 6 }}>
+        {mmprojOffloadMode === 'follow' && `--no-mmproj-offload: Follows Overrides: currently ${mmprojOffloadToRam ? 'on, so the projector stays in RAM' : 'off, so the projector is offloaded to the GPU'}.`}
+        {mmprojOffloadMode === 'disabled' && '--no-mmproj-offload: The projector is offloaded to the GPU (llama-server default), even while the global switch is on.'}
+        {mmprojOffloadMode === 'enabled' && '--no-mmproj-offload: The projector stays in RAM to preserve faster memory for the model, even while the global switch is off.'}
       </div>
       {/* Selection + status stay visible (dimmed, not hidden) when the
           projector is OFF, so the user can see and change what WOULD be
@@ -1750,6 +1853,15 @@ export default function CmdParamsEditor({ templateId, args, onChange, modelPathF
   )
 
   // ----- Speculative Decoding widget -----
+  // Options for the draft KV dropdowns come from the effective backend's own
+  // schema (forks extend the list), the same source the target KV selects use.
+  // (Plain computation, not a hook: this runs after the early return above.)
+  const specDraftKvOptions: Record<string, string[]> = {}
+  for (const cat of commandsSchema.categories) {
+    for (const cmd of cat.commands) {
+      if ((cmd.arg === SPEC_DRAFT_K_ARG || cmd.arg === SPEC_DRAFT_V_ARG) && cmd.options) specDraftKvOptions[cmd.arg] = cmd.options
+    }
+  }
   const renderSpecWidget = () => {
     const detected = effectiveModelPath ? detectedSpeculation[effectiveModelPath] : null
     const candidates = detected?.candidates || []
@@ -1870,6 +1982,28 @@ export default function CmdParamsEditor({ templateId, args, onChange, modelPathF
               <HybridSlider value={draftPMinVal ?? currentSpecTierDef.draftPMin} min={0} max={1} step={0.01} onChange={v => handleUpdate('--spec-draft-p-min', v)} defaultVal={currentSpecTierDef.draftPMin} disabled={disabled} />
               {draftPMinChanged && <button type="button" className="cmd-reset-btn" onClick={() => handleUpdate('--spec-draft-p-min', currentSpecTierDef.draftPMin)} disabled={disabled} title={`Reset to ${currentSpecTierDef.label} default (${currentSpecTierDef.draftPMin})`}><RotateCcw size={12} /></button>}
             </div>
+            {/* Draft model KV cache types: same option list as the target's
+                KV Cache Type (per backend), defaulting to that backend's own
+                KV default. Only shown while a method is on. */}
+            {([['K', SPEC_DRAFT_K_ARG, defaultKvQuantK], ['V', SPEC_DRAFT_V_ARG, defaultKvQuantV]] as const).map(([side, arg, def]) => {
+              const cur = typeof args[arg] === 'string' && args[arg] ? String(args[arg]) : def
+              const options = specDraftKvOptions[arg] || []
+              const changed = cur !== def
+              return (
+                <div key={arg} className={`cmd-row ${changed ? 'changed-param' : ''}`} style={{ padding: '6px 0', border: 'none', background: 'transparent', position: 'relative' }}>
+                  {changed && <div className="changed-indicator" />}
+                  <div className="cmd-label-group">
+                    <div className="cmd-label">Draft Model KV Cache Type ({side})</div>
+                    <div className="cmd-arg">{side === 'K' ? '-ctkd, ' : '-ctvd, '}{arg}</div>
+                  </div>
+                  <select className="cmd-select" value={cur} onChange={e => handleUpdate(arg, e.target.value)} disabled={disabled}>
+                    {options.map(opt => <option key={opt} value={opt}>{opt}</option>)}
+                    {!options.includes(cur) && <option value={cur}>{cur}</option>}
+                  </select>
+                  {changed && <button type="button" className="cmd-reset-btn" onClick={() => handleUpdate(arg, def)} disabled={disabled} title={`Reset to ${def} (this backend's KV default)`}><RotateCcw size={12} /></button>}
+                </div>
+              )
+            })}
           </div>
         )}
         {currentSpecTierDef.method === 'draft-model' && !args['--spec-draft-model'] && (

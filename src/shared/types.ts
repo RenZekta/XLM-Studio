@@ -73,6 +73,11 @@ export interface BackendVersion {
 export interface CommandParam {
   arg: string
   short?: string
+  // Further spellings llama-server accepts for the same flag (e.g.
+  // --cache-type-k-draft for --spec-draft-type-k). Used when importing a
+  // command and when MCP callers name a parameter; the stored key is always
+  // `arg`.
+  aliases?: string[]
   label: string
   description: string
   type: 'boolean' | 'number' | 'string' | 'select' | 'text'
@@ -262,7 +267,7 @@ export interface CardState {
 
 // Tracked backend repository (a fork of llama.cpp to watch for releases).
 export interface TrackedBackend {
-  id: string              // stable slug, e.g. "llama-cpp" or "atomic-llama-cpp-turboquant"
+  id: string              // stable slug, e.g. "llama-cpp" or "beellama-cpp"
   repo: string            // "owner/repo"
   name: string            // display name e.g. "llama.cpp"
   folderName: string      // subfolder name under BACKEND_DIR for this backend
@@ -270,6 +275,9 @@ export interface TrackedBackend {
   // Optional default options injected into the commands.json for select params,
   // keyed by the param arg name (e.g. "--cache-type-k").
   defaultOptions?: Record<string, string[]>
+  // Parameters only this fork's llama-server accepts. Merged into the base
+  // schema by category name (a missing category is appended).
+  extraCommands?: CommandCategory[]
 }
 
 // Result of checking a single tracked backend for updates.
@@ -434,6 +442,14 @@ export interface BaseUrlOverride {
 // global switch says; 'disabled'/'enabled' pin this Template's checkpointing
 // off or on regardless of it.
 export type CheckpointMode = 'follow' | 'disabled' | 'enabled'
+
+// A Template's per-preset override for the global "Offload mmproj to RAM"
+// switch (Overrides -> modelDefaults.mmprojOffloadToRam), same shape as
+// CheckpointMode: 'follow' does whatever the global switch says; 'enabled'
+// keeps this Template's multimodal projector in RAM (--no-mmproj-offload);
+// 'disabled' lets it be offloaded to the GPU (llama-server's default, so no
+// flag is emitted).
+export type MmprojOffloadMode = 'follow' | 'disabled' | 'enabled'
 
 export interface KvCacheCheckpointSettings {
   enabled: boolean

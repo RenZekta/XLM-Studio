@@ -1,10 +1,11 @@
 import React, { useState, useEffect, useRef } from 'react'
 import { useStore } from '../store/useStore'
 import { FolderOpen, ChevronDown, Terminal } from 'lucide-react'
-import type { Template } from '../../../shared/types'
+import type { Template, CommandsSchema } from '../../../shared/types'
 import CmdParamsEditor from './CmdParamsEditor'
 import { buildQuickEngineBaseline, seedSamplingArgsFromPreset } from '../../../shared/presetBaselines'
 import { useOverlayClose } from '../hooks/useOverlayClose'
+import { normalizeImportedArgs } from '../../../shared/importCommand'
 function parseCommand(cmd: string): {
   modelPath: string
   serverPort: number
@@ -176,12 +177,17 @@ export default function CreateModal() {
     const file = await window.api.pickModelFile()
     if (file) setModelPath(file.path)
   }
-  function handleImportCmd() {
+  async function handleImportCmd() {
     if (!importCmd.trim()) return
     const parsed = parseCommand(importCmd)
+    // Normalize against the schema of the backend this Template will use, so
+    // short flags/aliases (-ctkd, -c, ...) land under the keys the editor reads.
+    let schema: CommandsSchema | null = null
+    try { schema = await window.api.getCommands(backendKey || activeBackend?.backendKey || '') } catch {}
+    const normalized = normalizeImportedArgs(parsed.args, schema)
     if (parsed.modelPath) setModelPath(parsed.modelPath)
     if (parsed.serverPort) setServerPort(parsed.serverPort)
-    setArgs((prev) => ({ ...prev, ...parsed.args }))
+    setArgs((prev) => ({ ...prev, ...normalized }))
     setShowImport(false)
     setImportCmd('')
   }

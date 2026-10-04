@@ -5,6 +5,8 @@ import type {
   KvCacheCheckpointSettings
 } from '../../../shared/types'
 
+let backendSwitchSeq = 0
+
 interface CardState {
   template: Template
   status: RunningStatus
@@ -69,7 +71,7 @@ interface AppStore {
   metadataExtractions: Record<string, { name: string; status: 'extracting' | 'done' | 'error' }>
   vramInfo: { freeVRAMMB: number; totalVRAMMB: number; hasNvidia: boolean; gpuName: string | null; vendor?: string | null; gpuType?: string | null } | null
   systemRam: { totalRAMMB: number; freeRAMMB: number } | null
-  modelDefaults: { autoFitEnabled: boolean; autoFitContextLength: number; guardrailMode: string; customMaxSizeGB: number; useCurrentMemState?: boolean; moeOffloadStrategy?: 'offload' | 'max'; autoFitUse2xIncrements?: boolean; autoFitYarnAutoScale?: boolean; autoEnableMmproj?: boolean; cpuThreadsOverrideEnabled?: boolean; cpuThreadsOverridePercent?: number; parallelOverrideEnabled?: boolean; parallelInferenceMode?: 'unified' | 'separate'; parallelOverrideValue?: number; parallelOverrideValueDense?: number; parallelOverrideValueMoe?: number; perfMaxSessions?: number; autoOpenChatUI?: boolean }
+  modelDefaults: { autoFitEnabled: boolean; autoFitContextLength: number; guardrailMode: string; customMaxSizeGB: number; useCurrentMemState?: boolean; moeOffloadStrategy?: 'offload' | 'max'; autoFitUse2xIncrements?: boolean; autoFitYarnAutoScale?: boolean; autoEnableMmproj?: boolean; mmprojOffloadToRam?: boolean; cpuThreadsOverrideEnabled?: boolean; cpuThreadsOverridePercent?: number; parallelOverrideEnabled?: boolean; parallelInferenceMode?: 'unified' | 'separate'; parallelOverrideValue?: number; parallelOverrideValueDense?: number; parallelOverrideValueMoe?: number; perfMaxSessions?: number; autoOpenChatUI?: boolean }
   baseUrlOverride: { enabled: boolean; port: number; serveOnLocalNetwork: boolean; apiKeyEnabled: boolean; apiKey: string }
   kvCacheCheckpoints: KvCacheCheckpointSettings
   samplingPresets: any[]
@@ -90,6 +92,7 @@ interface AppStore {
   setShowCreateModal: (show: boolean, template?: Template | null) => void
   setPrefillModelPath: (path: string | null) => void
   setActiveBackend: (b: BackendVersion) => void
+  switchBackend: (b: BackendVersion) => Promise<void>
   setCommandsSchema: (s: CommandsSchema) => void
   setBackends: (b: BackendVersion[]) => void
   setModels: (m: ModelGroup[]) => void
@@ -177,7 +180,7 @@ export const useStore = create<AppStore>((set) => ({
   metadataExtractions: {},
   vramInfo: null,
   systemRam: null,
-  modelDefaults: { autoFitEnabled: true, autoFitContextLength: 60000, guardrailMode: 'strict', customMaxSizeGB: 0, useCurrentMemState: false, moeOffloadStrategy: 'max' /* default to MAX+ForceMoEtoCPU */, autoEnableMmproj: true, cpuThreadsOverrideEnabled: false, cpuThreadsOverridePercent: 100, parallelOverrideEnabled: false, parallelInferenceMode: 'unified', parallelOverrideValue: 4, parallelOverrideValueDense: 4, parallelOverrideValueMoe: 4, perfMaxSessions: 20, autoOpenChatUI: false },
+  modelDefaults: { autoFitEnabled: true, autoFitContextLength: 60000, guardrailMode: 'strict', customMaxSizeGB: 0, useCurrentMemState: false, moeOffloadStrategy: 'max' /* default to MAX+ForceMoEtoCPU */, autoEnableMmproj: true, mmprojOffloadToRam: true, cpuThreadsOverrideEnabled: false, cpuThreadsOverridePercent: 100, parallelOverrideEnabled: false, parallelInferenceMode: 'unified', parallelOverrideValue: 4, parallelOverrideValueDense: 4, parallelOverrideValueMoe: 4, perfMaxSessions: 20, autoOpenChatUI: false },
   baseUrlOverride: { enabled: true, port: 1234, serveOnLocalNetwork: false, apiKeyEnabled: false, apiKey: '' },
   kvCacheCheckpoints: { enabled: false, mode: 'model', autoDeleteRedundant: false, externalFolders: [], mainFolder: null },
   samplingPresets: [],
@@ -194,6 +197,19 @@ export const useStore = create<AppStore>((set) => ({
   setShowCreateModal: (show, template = null) => set({ showCreateModal: show, editingTemplate: template }),
   setPrefillModelPath: (path) => set({ prefillModelPath: path }),
   setActiveBackend: (b) => set({ activeBackend: b }),
+  // The active backend and the commands schema describe the same thing and
+  // must change in one update: the KV cache defaults and option lists are
+  // derived from the pair, so a window where only one has changed shows (and
+  // briefly applies) values that don't belong to either backend. The schema
+  // is fetched first; a response that arrives after a newer switch started is
+  // dropped so rapid clicks can't leave the older backend's schema behind.
+  switchBackend: async (b) => {
+    const seq = ++backendSwitchSeq
+    let schema: CommandsSchema | null = null
+    try { schema = await window.api.getCommands(b.backendKey) } catch {}
+    if (seq !== backendSwitchSeq) return
+    set(schema ? { activeBackend: b, commandsSchema: schema } : { activeBackend: b })
+  },
   setCommandsSchema: (s) => set({ commandsSchema: s }),
   setBackends: (b) => set({ backends: b }),
   setModels: (m) => set({ models: m }),

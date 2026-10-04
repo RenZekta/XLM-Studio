@@ -1,7 +1,8 @@
 import React, { useState, useEffect, useCallback, useRef, useMemo } from 'react'
 import { useStore } from '../store/useStore'
+import { useOutsideClick } from '../hooks/useOutsideClick'
 import {
-  Activity, ChevronDown, Download, Upload, Maximize2, X, GitCompare
+  Activity, ChevronDown, ChevronUp, Download, Upload, Maximize2, X, GitCompare
 } from 'lucide-react'
 import {
   ResponsiveContainer, ComposedChart, Line, XAxis, YAxis, CartesianGrid,
@@ -51,6 +52,9 @@ function fmtDuration(startedAt: number, endedAt: number | null) {
   return `${sec}s`
 }
 
+// Width shared by the Active Sessions and Session History buttons/menus.
+const DROPDOWN_WIDTH = 280
+
 export default function MonitoringView() {
   const { modelDefaults, setModelDefaults } = useStore()
 
@@ -65,6 +69,15 @@ export default function MonitoringView() {
   const [maxSessionsDraft, setMaxSessionsDraft] = useState<string | null>(null)
   const [importBusy, setImportBusy] = useState(false)
   const hasAutoSelectedRef = useRef(false)
+
+  // The two dropdown menus are independent and can be open together (e.g. to
+  // compare sessions from both lists). They close only when the user clicks
+  // outside the whole controls row; the other dropdown, the Compare toggle and
+  // the import/export buttons are all inside it, so using them leaves the
+  // menus open.
+  const controlsRowRef = useRef<HTMLDivElement>(null)
+  useOutsideClick(controlsRowRef, activeDropdownOpen, () => setActiveDropdownOpen(false))
+  useOutsideClick(controlsRowRef, historyDropdownOpen, () => setHistoryDropdownOpen(false))
 
   const refreshActive = useCallback(async () => {
     const list = await window.api?.perfGetActiveSessions?.() || []
@@ -210,14 +223,18 @@ export default function MonitoringView() {
       {/* ----- Controls row: Active Sessions / Session History / Compare / Export-Import ----- */}
       <div className="settings-section">
         <div className="settings-row" style={{ borderBottom: 'none', flexDirection: 'column', alignItems: 'flex-start', gap: 12 }}>
-          <div style={{ display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap', width: '100%' }}>
+          <div ref={controlsRowRef} style={{ display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap', width: '100%' }}>
+            {/* Both dropdown wrappers share one fixed width and each menu is
+                exactly as wide as its own button (left: 0 + right: 0), so a
+                menu can never extend under its neighbour. */}
             {/* Active Sessions dropdown */}
-            <div style={{ position: 'relative' }}>
-              <button className="btn btn-secondary" onClick={() => { setActiveDropdownOpen(v => !v); setHistoryDropdownOpen(false) }}>
-                <Activity size={14} /> Active Sessions ({activeSessions.length}) <ChevronDown size={13} />
+            <div style={{ position: 'relative', width: DROPDOWN_WIDTH, maxWidth: '100%' }}>
+              <button className="btn btn-secondary" style={{ width: '100%', justifyContent: 'space-between' }} onClick={() => setActiveDropdownOpen(v => !v)}>
+                <span style={{ display: 'inline-flex', alignItems: 'center', gap: 6 }}><Activity size={14} /> Active Sessions ({activeSessions.length})</span>
+                {activeDropdownOpen ? <ChevronUp size={13} /> : <ChevronDown size={13} />}
               </button>
               {activeDropdownOpen && (
-                <div className="dropdown-panel" style={{ position: 'absolute', top: '100%', left: 0, marginTop: 4, zIndex: 50, minWidth: 260, maxHeight: 280, overflowY: 'auto', background: 'var(--surface)', border: '1px solid var(--border)', borderRadius: 'var(--radius-sm)', boxShadow: 'var(--shadow-md)' }}>
+                <div className="dropdown-panel" style={{ position: 'absolute', top: '100%', left: 0, right: 0, marginTop: 4, zIndex: 50, maxHeight: 280, overflowY: 'auto', background: 'var(--surface)', border: '1px solid var(--border)', borderRadius: 'var(--radius-sm)', boxShadow: 'var(--shadow-md)' }}>
                   {activeSessions.length === 0 && <div style={{ padding: 12, fontSize: 12, color: 'var(--text-muted)' }}>No models are currently running.</div>}
                   {activeSessions.map(s => {
                     const k: SelKey = { kind: 'active', templateId: s.templateId }
@@ -238,12 +255,13 @@ export default function MonitoringView() {
             </div>
 
             {/* Session History dropdown */}
-            <div style={{ position: 'relative' }}>
-              <button className="btn btn-secondary" onClick={() => { setHistoryDropdownOpen(v => !v); setActiveDropdownOpen(false) }}>
-                <ChevronDown size={13} style={{ marginRight: 2 }} /> Session History ({history.length})
+            <div style={{ position: 'relative', width: DROPDOWN_WIDTH, maxWidth: '100%' }}>
+              <button className="btn btn-secondary" style={{ width: '100%', justifyContent: 'space-between' }} onClick={() => setHistoryDropdownOpen(v => !v)}>
+                <span>Session History ({history.length})</span>
+                {historyDropdownOpen ? <ChevronUp size={13} /> : <ChevronDown size={13} />}
               </button>
               {historyDropdownOpen && (
-                <div className="dropdown-panel" style={{ position: 'absolute', top: '100%', left: 0, marginTop: 4, zIndex: 50, minWidth: 280, maxHeight: 320, overflowY: 'auto', background: 'var(--surface)', border: '1px solid var(--border)', borderRadius: 'var(--radius-sm)', boxShadow: 'var(--shadow-md)' }}>
+                <div className="dropdown-panel" style={{ position: 'absolute', top: '100%', left: 0, right: 0, marginTop: 4, zIndex: 50, maxHeight: 320, overflowY: 'auto', background: 'var(--surface)', border: '1px solid var(--border)', borderRadius: 'var(--radius-sm)', boxShadow: 'var(--shadow-md)' }}>
                   {history.length === 0 && <div style={{ padding: 12, fontSize: 12, color: 'var(--text-muted)' }}>No session data recorded yet.</div>}
                   {history.map(s => {
                     const k: SelKey = { kind: 'history', sessionId: s.id }
