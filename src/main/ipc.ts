@@ -10,6 +10,7 @@ import https from 'https'
 import http from 'http'
 import { app } from 'electron'
 import { extractZip } from './zipExtract'
+import { initGithubToken, getGithubToken, saveGithubToken, clearGithubToken, githubTokenStatus } from './githubToken'
 import net from 'net'
 import type {
   ModelGroup, ModelEntry, MmprojFile, SpecDecodeSidecarFile, BackendVersion,
@@ -1541,19 +1542,50 @@ function listModelDownloadsImpl() {
     queuePosition: t.phase === 'queued' ? modelDownloadQueue.indexOf(t.id) + 1 : undefined
   }))
 }
-function fetchJson(url: string): Promise<unknown> {
+
+// Non-2xx responses are rejected with the server's own message: GitHub's API
+// answers rate limiting (403/429, common behind shared egress IPs such as VPN
+// or WARP exits) with a JSON object rather than the expected array, which
+// would otherwise surface as a misleading "invalid response".
+function fetchJson(url: string, redirectsLeft = 5): Promise<unknown> {
   return new Promise((resolve, reject) => {
-    const opts = { headers: { 'User-Agent': `xlm-studio/${app.getVersion()}`, Accept: 'application/json' } }
+    const headers: Record<string, string> = { 'User-Agent': `xlm-studio/${app.getVersion()}`, Accept: 'application/json' }
+    // Only ever sent to the GitHub API host itself, never to a redirect target.
+    const token = new URL(url).hostname === 'api.github.com' ? getGithubToken() : null
+    if (token) headers.Authorization = `Bearer ${token}`
     const get = url.startsWith('https') ? https.get : http.get
-    get(url, opts, (res) => {
-      if ((res.statusCode === 301 || res.statusCode === 302) && res.headers.location) {
-        fetchJson(res.headers.location).then(resolve).catch(reject)
+    const req = get(url, { headers }, (res) => {
+      const status = res.statusCode || 0
+      if ([301, 302, 307, 308].includes(status) && res.headers.location) {
+        res.resume()
+        if (redirectsLeft <= 0) return reject(new Error('Too many redirects'))
+        fetchJson(new URL(res.headers.location, url).toString(), redirectsLeft - 1).then(resolve).catch(reject)
         return
       }
       let data = ''
       res.on('data', (c) => (data += c))
-      res.on('end', () => { try { resolve(JSON.parse(data)) } catch (e) { reject(e) } })
-    }).on('error', reject)
+      res.on('end', () => {
+        let body: unknown
+        try { body = JSON.parse(data) } catch { body = undefined }
+        if (status < 200 || status >= 300) {
+          const msg = (body as { message?: string } | undefined)?.message
+          const remaining = res.headers['x-ratelimit-remaining']
+          const rateLimited = status === 429 || (status === 403 && (remaining === '0' || /rate limit/i.test(msg || '')))
+          if (status === 401 && token) {
+            return reject(new Error('GitHub rejected the saved access token (HTTP 401). Replace or remove it in Settings.'))
+          }
+          return reject(new Error(rateLimited
+            ? `GitHub API rate limit reached (HTTP ${status}). ${token
+              ? 'Try again later.'
+              : 'Anonymous requests are limited per IP address, which a VPN/WARP exit IP shares with other users. Add a GitHub access token in Settings to raise the limit.'}`
+            : `HTTP ${status}${msg ? `: ${msg}` : ''}`))
+        }
+        if (body === undefined) return reject(new Error('Response was not valid JSON'))
+        resolve(body)
+      })
+    })
+    req.on('error', reject)
+    req.setTimeout(15000, () => req.destroy(new Error('Request timed out')))
   })
 }
 
@@ -1859,7 +1891,13 @@ function startDownload(
       let receivedBytes = startByte
       res.on('data', (chunk: Buffer) => {
         if (destroyed) return
-        file.write(chunk)
+        // Without backpressure a fast connection buffers the whole archive in
+        // memory faster than the disk drains it, and the resulting GC churn
+        // stalls the main process.
+        if (!file.write(chunk)) {
+          res.pause()
+          file.once('drain', () => res.resume())
+        }
         receivedBytes += chunk.length
         speedBytes += chunk.length
         const now = Date.now()
@@ -1915,7 +1953,7 @@ async function smartExtractBackend(opts: {
 }): Promise<{ extractPath: string; versionDir: string }> {
   const mainBackend = await resolveMainBackendFolder()
   const typeDir = join(mainBackend, opts.backendKey, opts.backendType)
-  if (!existsSync(typeDir)) mkdirSync(typeDir, { recursive: true })
+  await fsPromises.mkdir(typeDir, { recursive: true })
   // Marks this directory as a TYPE folder (containing version subfolders)
   // rather than a version folder itself. Without this, scanBackendRoot has
   // no reliable way to tell "type/version/.../exe" apart from a legacy
@@ -1923,11 +1961,11 @@ async function smartExtractBackend(opts: {
   // (e.g. inside a stray build/bin/ wrapper) -- both look identical to a
   // recursive exe search. Written every time (idempotent) in case an older
   // build of the app created this folder before the marker existed.
-  try { writeFileSync(join(typeDir, BACKEND_TYPE_MARKER), '') } catch {}
+  try { await fsPromises.writeFile(join(typeDir, BACKEND_TYPE_MARKER), '') } catch {}
 
   // Extract into a temporary staging folder first so we can normalise structure.
   const staging = join(typeDir, `.staging-${Date.now()}`)
-  mkdirSync(staging, { recursive: true })
+  await fsPromises.mkdir(staging, { recursive: true })
   try {
     if (opts.isTarGz) {
       await new Promise<void>((resolve, reject) => {
@@ -1940,12 +1978,12 @@ async function smartExtractBackend(opts: {
     }
   } catch (err) {
     // Cleanup staging on failure.
-    try { rmrf(staging) } catch {}
+    try { await rmrf(staging) } catch {}
     throw err
   }
 
   // Inspect the staging folder's top-level entries.
-  const topEntries = readdirSync(staging, { withFileTypes: true })
+  const topEntries = await fsPromises.readdir(staging, { withFileTypes: true })
   let versionDir: string
   // The version folder name MUST match the release tag so the
   // version scanner can match it against the tracker payload and flip the
@@ -1954,39 +1992,35 @@ async function smartExtractBackend(opts: {
   // structure named the root folder (e.g. "build", "bin", etc.).
   const finalVersionName = opts.versionHint || `version-${Date.now()}`
   const dst = join(typeDir, finalVersionName)
-  if (existsSync(dst)) rmrf(dst)
-  mkdirSync(dst, { recursive: true })
+  await rmrf(dst)
+  await fsPromises.mkdir(dst, { recursive: true })
   if (topEntries.length === 1 && topEntries[0].isDirectory()) {
     // Single top-level folder — move its CONTENTS into the version dir (flattening
     // the generic "build"/"bin" wrapper into the version-named dir).
     const src = join(staging, topEntries[0].name)
-    const innerEntries = readdirSync(src, { withFileTypes: true })
+    const innerEntries = await fsPromises.readdir(src, { withFileTypes: true })
     for (const e of innerEntries) {
       const s = join(src, e.name)
       const d = join(dst, e.name)
-      try { renameSync(s, d) } catch {}
+      try { await fsPromises.rename(s, d) } catch {}
     }
   } else {
     // Multiple entries at root — move all into the version dir.
     for (const e of topEntries) {
       const src = join(staging, e.name)
       const d = join(dst, e.name)
-      try { renameSync(src, d) } catch {}
+      try { await fsPromises.rename(src, d) } catch {}
     }
   }
   versionDir = dst
-  try { rmrf(staging) } catch {}
+  try { await rmrf(staging) } catch {}
   return { extractPath: typeDir, versionDir }
 }
 
-function rmrf(dir: string): void {
-  if (!existsSync(dir)) return
-  for (const e of readdirSync(dir, { withFileTypes: true })) {
-    const p = join(dir, e.name)
-    if (e.isDirectory()) rmrf(p)
-    else unlinkSync(p)
-  }
-  rmdirSync(dir)
+// Async so deleting a large backend (thousands of files) never blocks the
+// main process event loop.
+async function rmrf(dir: string): Promise<void> {
+  await fsPromises.rm(dir, { recursive: true, force: true })
 }
 
 function copyDirRecursive(src: string, dst: string): void {
@@ -2002,13 +2036,13 @@ function copyDirRecursive(src: string, dst: string): void {
 // renameSync fails with EXDEV when source and destination are on different
 // filesystems/drives (common for external model folders on another disk),
 // so fall back to a recursive copy + delete in that case.
-function moveDirRecursive(src: string, dst: string): void {
+async function moveDirRecursive(src: string, dst: string): Promise<void> {
   try {
     renameSync(src, dst)
   } catch (err: any) {
     if (err && err.code === 'EXDEV') {
       copyDirRecursive(src, dst)
-      rmrf(src)
+      await rmrf(src)
     } else {
       throw err
     }
@@ -2086,7 +2120,7 @@ async function cleanupOldBackendVersions(backendKey: string, backendType: string
       if (isComparableBackendVersion(e.name) && compareBackendVersions(e.name, newVersion) < 0) {
         const oldDir = join(typeDir, e.name)
         try {
-          rmrf(oldDir)
+          await rmrf(oldDir)
           deleted.push(e.name)
           console.log(`[Backend cleanup] Deleted outdated version "${e.name}" (older than "${newVersion}") in ${typeDir}`)
         } catch (err) {
@@ -2172,6 +2206,7 @@ export function registerIpcHandlers(): void {
     }
   })
   registerPerfHandlers()
+  initGithubToken(APP_ROOT)
 
   // ----- Models: smart grouped listing -----
   async function listModelsImpl(): Promise<ModelGroup[]> {
@@ -2314,7 +2349,7 @@ export function registerIpcHandlers(): void {
           destDir = join(mainFolder, `${e.name} (${n})`)
         }
         try {
-          moveDirRecursive(srcDir, destDir)
+          await moveDirRecursive(srcDir, destDir)
           migrated.push(e.name)
         } catch (err) {
           failed.push(e.name)
@@ -2419,7 +2454,7 @@ export function registerIpcHandlers(): void {
         : join(root.dir, backendKey, parts.slice(2).join('::'))
       // Safety: must stay within this root.
       if (!isSafePath(root.dir, versionDir)) return { success: false, error: 'Access denied' }
-      if (existsSync(versionDir)) rmrf(versionDir)
+      await rmrf(versionDir)
       return { success: true }
     } catch (err) {
       return { success: false, error: String(err) }
@@ -2435,7 +2470,7 @@ export function registerIpcHandlers(): void {
       for (const root of roots) {
         const typeDir = join(root.dir, opts.backendKey, opts.backendType)
         if (!isSafePath(root.dir, typeDir)) continue
-        if (existsSync(typeDir)) { rmrf(typeDir); deletedAny = true }
+        if (existsSync(typeDir)) { await rmrf(typeDir); deletedAny = true }
       }
       return { success: true, deleted: deletedAny }
     } catch (err) {
@@ -3409,8 +3444,20 @@ export function registerIpcHandlers(): void {
     try {
       sendDownloadProgress(sender, { percent: 0, phase: 'downloading', trackedId: activeDownloadTrackedId, assetName: opts.assetName })
       await new Promise<void>((resolve, reject) => {
+        // The data callback fires per network chunk (thousands per second on
+        // a fast link); every IPC message re-renders subscribed views, so
+        // only forward a change in whole percent, at most every 100 ms.
+        let lastPercent = 0
+        let lastSentAt = 0
         cancelBackendDl = startDownload(opts.url, archivePath, 0,
-          (r, t) => sendDownloadProgress(sender, { percent: t > 0 ? Math.round(r / t * 100) : 0, phase: 'downloading', trackedId: activeDownloadTrackedId, assetName: opts.assetName }),
+          (r, t) => {
+            const percent = t > 0 ? Math.round(r / t * 100) : 0
+            const now = Date.now()
+            if (percent === lastPercent || now - lastSentAt < 100) return
+            lastPercent = percent
+            lastSentAt = now
+            sendDownloadProgress(sender, { percent, phase: 'downloading', trackedId: activeDownloadTrackedId, assetName: opts.assetName })
+          },
           resolve, reject)
       })
       cancelBackendDl = null
@@ -3683,6 +3730,37 @@ export function registerIpcHandlers(): void {
   ipcMain.handle('onDownloadProgress', () => {})
   ipcMain.handle('removeDownloadListener', () => {})
   ipcMain.handle('get-version', () => app.getVersion())
+
+  // ----- GitHub access token (raises the API rate limit for update checks) -----
+  ipcMain.handle('github-token-status', () => githubTokenStatus())
+  // Validated against /rate_limit before being stored, so a typo never
+  // replaces a working token.
+  ipcMain.handle('github-token-set', async (_e, raw: string) => {
+    const token = String(raw || '').trim()
+    if (!/^[A-Za-z0-9_]{20,255}$/.test(token)) return { success: false, error: 'That does not look like a GitHub token.' }
+    try {
+      const body = await new Promise<any>((resolvePromise, reject) => {
+        const req = https.get('https://api.github.com/rate_limit', {
+          headers: { 'User-Agent': `xlm-studio/${app.getVersion()}`, Accept: 'application/json', Authorization: `Bearer ${token}` }
+        }, (res) => {
+          let data = ''
+          res.on('data', (c) => (data += c))
+          res.on('end', () => {
+            if (res.statusCode === 401) return reject(new Error('GitHub rejected this token (HTTP 401).'))
+            if (res.statusCode !== 200) return reject(new Error(`HTTP ${res.statusCode}`))
+            try { resolvePromise(JSON.parse(data)) } catch (e) { reject(e) }
+          })
+        })
+        req.on('error', reject)
+        req.setTimeout(15000, () => req.destroy(new Error('Request timed out')))
+      })
+      const { encrypted } = saveGithubToken(token)
+      return { success: true, encrypted, limit: body?.resources?.core?.limit as number | undefined }
+    } catch (err) {
+      return { success: false, error: err instanceof Error ? err.message : String(err) }
+    }
+  })
+  ipcMain.handle('github-token-clear', () => { clearGithubToken(); return { success: true } })
 
   // ----- Theme -----
   ipcMain.handle('get-theme', async () => {

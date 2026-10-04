@@ -166,12 +166,6 @@ export default function App() {
       window.api?.onBackendsCheckedSilent?.((data: any) => {
         if (data?.results) {
           for (const r of data.results) setTrackerResult(r)
-          // Sync legacy releaseInfo with llama.cpp for the UpdateBanner.
-          const llama = data.results.find((r: any) => r.trackedId === 'llama-cpp')
-          if (llama) {
-            const { trackedId, folderName, ...rest } = llama
-            useStore.getState().setReleaseInfo(rest as any)
-          }
         }
       })
     } catch {}

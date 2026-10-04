@@ -49,6 +49,9 @@ backend/*
 templates/*
 !templates/.gitkeep
 
+# Saved GitHub access token (dev builds keep app data in the repo root)
+github-token.json
+
 # Editor directories and files
 .vscode/*
 !.vscode/extensions.json

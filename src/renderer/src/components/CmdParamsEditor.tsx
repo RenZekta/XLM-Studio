@@ -1708,11 +1708,11 @@ export default function CmdParamsEditor({ templateId, args, onChange, modelPathF
             the field looks unaffected even though what actually launches
             uses a different number entirely. A separate full-width grid row
             (gridColumn spans both .cmd-row columns) rather than sitting
-            beside the input, so it sits at the bottom-left of the row,
-            under the flags, instead of squeezing the input's own column. */}
+            beside the input, right-aligned so it sits under the value
+            field without widening the input's own column. */}
         {(cmd.arg === '--parallel' || cmd.arg === '-np') && parallelOverrideActive && (
           <span
-            style={{ gridColumn: '1 / -1', fontSize: 10, color: 'var(--warning)' }}
+            style={{ gridColumn: '1 / -1', justifySelf: 'end', textAlign: 'right', fontSize: 10, color: 'var(--warning)' }}
             title={`The global Parallel Inference override (Overrides tab) replaces this with ${previewEffectiveParallel} at launch, regardless of the value set here.`}
           >
             overridden to {previewEffectiveParallel} at launch

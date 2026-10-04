@@ -3,7 +3,7 @@ import { useStore } from '../store/useStore'
 import {
   HardDrive, Download, Trash, RefreshCw, Loader2, ChevronDown, Terminal,
   Bell, BellOff, Folder, Monitor, Moon, Sun, Plus, Link2,
-  AlertCircle, ExternalLink, Cpu, Layers, Database
+  AlertCircle, ExternalLink, Cpu, Layers, Database, Key
 } from 'lucide-react'
 import CommandsEditor from './CommandsEditor'
 import ExternalFolderList from './ExternalFolderList'
@@ -23,7 +23,7 @@ function getNotifPref(): 'banner' | 'manual' {
 export default function SettingsView() {
   const {
     backends, activeBackend, switchBackend, setBackends,
-    releaseInfo, downloadProgress, setDownloadProgress, setReleaseInfo,
+    releaseInfo, downloadProgress, setDownloadProgress,
     setModels, compactSidebarEnabled, setCompactSidebarEnabled,
     theme, systemTheme,
     externalModelFolders, externalBackendFolders,
@@ -85,6 +85,39 @@ export default function SettingsView() {
     setModels(m)
   }
 
+  const [ghStatus, setGhStatus] = useState<{ hasToken: boolean; encrypted: boolean } | null>(null)
+  const [ghTokenInput, setGhTokenInput] = useState('')
+  const [ghBusy, setGhBusy] = useState(false)
+  const [ghMessage, setGhMessage] = useState<{ ok: boolean; text: string } | null>(null)
+
+  useEffect(() => {
+    window.api.getGithubTokenStatus().then(setGhStatus).catch(() => {})
+  }, [])
+
+  async function handleSaveGithubToken() {
+    setGhBusy(true)
+    setGhMessage(null)
+    try {
+      const res = await window.api.setGithubToken(ghTokenInput)
+      if (!res.success) {
+        setGhMessage({ ok: false, text: res.error || 'Could not save the token.' })
+        return
+      }
+      setGhTokenInput('')
+      setGhStatus(await window.api.getGithubTokenStatus())
+      setGhMessage({ ok: true, text: `Token saved${res.limit ? ` (limit: ${res.limit} requests/hour)` : ''}.` })
+      handleCheckAllBackends()
+    } finally {
+      setGhBusy(false)
+    }
+  }
+
+  async function handleRemoveGithubToken() {
+    await window.api.clearGithubToken()
+    setGhStatus(await window.api.getGithubTokenStatus())
+    setGhMessage(null)
+  }
+
   function handleNotifPref(pref: 'banner' | 'manual') {
     setNotifPref(pref)
     localStorage.setItem(NOTIF_KEY, pref)
@@ -114,16 +147,10 @@ export default function SettingsView() {
     try {
       const { results } = await window.api.checkAllBackends()
       for (const r of results) setTrackerResult(r)
-      // Also sync the legacy releaseInfo with the llama.cpp result for the banner.
-      const llama = results.find(r => r.trackedId === 'llama-cpp')
-      if (llama) {
-        const { trackedId, folderName, ...rest } = llama
-        setReleaseInfo(rest as any)
-      }
     } finally {
       setCheckingAllBackends(false)
     }
-  }, [setCheckingAllBackends, setTrackerResult, setReleaseInfo])
+  }, [setCheckingAllBackends, setTrackerResult])
 
   async function handleAddTrackedBackend() {
     setCustomBackendErr('')
@@ -305,6 +332,50 @@ export default function SettingsView() {
               <BellOff size={13} /> Check Manually Only
             </button>
           </div>
+        </div>
+      </div>
+
+      {/* GitHub access token */}
+      <div className="settings-section">
+        <div className="settings-section-title"><Key /> GitHub Access</div>
+        <div className="settings-row" style={{ borderBottom: 'none', flexDirection: 'column', alignItems: 'flex-start', gap: 12 }}>
+          <p style={{ fontSize: 13, color: 'var(--text-secondary)', lineHeight: 1.6 }}>
+            Backend update checks use GitHub's API, which allows only 60 anonymous requests per hour per IP address.
+            Behind a VPN or WARP that quota is often already used up. A personal access token raises it to 5,000 per hour.
+            It needs no permissions or scopes: create a fine-grained token with public repository read-only access.
+          </p>
+          <button className="btn btn-ghost" onClick={() => window.api.openExternal('https://github.com/settings/personal-access-tokens/new')}>
+            <ExternalLink size={13} /> Create a token on GitHub
+          </button>
+          {ghStatus?.hasToken ? (
+            <div style={{ display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' }}>
+              <span style={{ fontSize: 13, color: 'var(--success)' }}>A token is saved.</span>
+              <button className="btn btn-secondary" onClick={handleRemoveGithubToken}>Remove token</button>
+            </div>
+          ) : (
+            <div style={{ display: 'flex', gap: 8, width: '100%', maxWidth: 520 }}>
+              <input
+                className="form-input"
+                type="password"
+                autoComplete="off"
+                spellCheck={false}
+                placeholder="github_pat_..."
+                value={ghTokenInput}
+                onChange={(e) => setGhTokenInput(e.target.value)}
+                onKeyDown={(e) => { if (e.key === 'Enter' && ghTokenInput.trim() && !ghBusy) handleSaveGithubToken() }}
+                style={{ flex: 1 }}
+              />
+              <button className="btn btn-primary" disabled={ghBusy || !ghTokenInput.trim()} onClick={handleSaveGithubToken}>
+                {ghBusy ? <Loader2 size={14} className="spin" /> : null} Save
+              </button>
+            </div>
+          )}
+          {ghStatus?.hasToken && !ghStatus.encrypted && (
+            <div className="form-hint">OS secure storage is unavailable here, so the token is stored unencrypted in the app data folder.</div>
+          )}
+          {ghMessage && (
+            <div className="form-hint" style={{ color: ghMessage.ok ? 'var(--success)' : 'var(--danger)' }}>{ghMessage.text}</div>
+          )}
         </div>
       </div>
 

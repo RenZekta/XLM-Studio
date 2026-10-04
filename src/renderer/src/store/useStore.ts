@@ -225,6 +225,8 @@ export const useStore = create<AppStore>((set) => ({
       delete next[trackedId]
       return { downloadProgress: next }
     }
+    const prev = s.downloadProgress[trackedId]
+    if (prev && prev.percent === data.percent && prev.phase === data.phase && prev.queuePosition === data.queuePosition) return {}
     return { downloadProgress: { ...s.downloadProgress, [trackedId]: data } }
   }),
   setTemplateSearch: (q) => set({ templateSearch: q }),
@@ -260,7 +262,15 @@ export const useStore = create<AppStore>((set) => ({
   setMainModelFolder: (f) => set({ mainModelFolder: f }),
   setMainBackendFolder: (f) => set({ mainBackendFolder: f }),
   setTrackedBackends: (t) => set({ trackedBackends: t }),
-  setTrackerResult: (r) => set((s) => ({ trackerResults: { ...s.trackerResults, [r.trackedId]: r } })),
+  // The update banner reads releaseInfo, which mirrors the llama.cpp tracker
+  // result; keeping them in one setter means every refresh path (Settings
+  // tracker, banner, startup check) closes or opens the banner consistently.
+  setTrackerResult: (r) => set((s) => {
+    const trackerResults = { ...s.trackerResults, [r.trackedId]: r }
+    if (r.trackedId !== 'llama-cpp') return { trackerResults }
+    const { trackedId: _id, folderName: _folder, ...releaseInfo } = r
+    return { trackerResults, releaseInfo }
+  }),
   setCheckingAllBackends: (v) => set({ checkingAllBackends: v }),
   setTheme: (t) => {
     localStorage.setItem('hexllama_theme', t)

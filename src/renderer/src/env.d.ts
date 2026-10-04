@@ -112,6 +112,9 @@ interface LlamaCppApi {
   getVersion: () => Promise<string>
 
   // Theme
+  getGithubTokenStatus: () => Promise<{ hasToken: boolean; encrypted: boolean }>
+  setGithubToken: (token: string) => Promise<{ success: boolean; error?: string; encrypted?: boolean; limit?: number }>
+  clearGithubToken: () => Promise<{ success: boolean }>
   getTheme: () => Promise<ThemePref>
   setTheme: (theme: ThemePref) => Promise<{ success: boolean; theme: ThemePref }>
   getSystemTheme: () => Promise<'dark' | 'light'>

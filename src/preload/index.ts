@@ -118,6 +118,9 @@ const api = {
   getVersion: () => ipcRenderer.invoke('get-version'),
 
   // ----- Theme -----
+  getGithubTokenStatus: () => ipcRenderer.invoke('github-token-status') as Promise<{ hasToken: boolean; encrypted: boolean }>,
+  setGithubToken: (token: string) => ipcRenderer.invoke('github-token-set', token) as Promise<{ success: boolean; error?: string; encrypted?: boolean; limit?: number }>,
+  clearGithubToken: () => ipcRenderer.invoke('github-token-clear') as Promise<{ success: boolean }>,
   getTheme: () => ipcRenderer.invoke('get-theme') as Promise<ThemePref>,
   setTheme: (theme: ThemePref) => ipcRenderer.invoke('set-theme', theme) as Promise<{ success: boolean; theme: ThemePref }>,
   getSystemTheme: () => ipcRenderer.invoke('get-system-theme') as Promise<'dark' | 'light'>,

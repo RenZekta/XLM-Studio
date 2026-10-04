@@ -1,4 +1,4 @@
-import React, { useState } from 'react'
+import React, { useEffect, useRef, useState } from 'react'
 import { useStore } from '../store/useStore'
 import { Link2, Database, Shield, Copy, Check, Server, Save } from 'lucide-react'
 import { formatWithSpaces, parseSpacedNumber, CONTEXT_POWER_OF_TWO_STEPS, snapToNearestPowerOfTwo, indexOnLadder } from '../utils/contextFormat'
@@ -19,7 +19,38 @@ function BaseUrlField({ port, onPortChange, onPortBlur }: {
 }) {
   const [focused, setFocused] = useState(false)
   const [copied, setCopied] = useState(false)
+  // Edited as text so an empty field is representable mid-edit; the committed
+  // port only changes once the draft is a valid number.
+  const [draft, setDraft] = useState(String(port))
+  const inputRef = useRef<HTMLInputElement>(null)
   const fullUrl = `http://localhost:${port}/v1`
+
+  useEffect(() => { if (!focused) setDraft(String(port)) }, [port, focused])
+
+  // The whole box is one click target for the port: a press anywhere outside
+  // the input and copy button focuses it and puts the caret on whichever side
+  // of the digits is nearer the press. preventDefault keeps an already-focused
+  // input from blurring. setSelectionRange is why this is a text input;
+  // type=number throws on it.
+  function handleBoxMouseDown(e: React.MouseEvent<HTMLDivElement>) {
+    const input = inputRef.current
+    if (!input || e.target === input) return
+    if ((e.target as HTMLElement).closest('button')) return
+    e.preventDefault()
+    const rect = input.getBoundingClientRect()
+    const atStart = e.clientX < rect.left + rect.width / 2
+    input.focus()
+    const pos = atStart ? 0 : input.value.length
+    input.setSelectionRange(pos, pos)
+  }
+
+  function handleDraftChange(raw: string) {
+    const digits = raw.replace(/\D/g, '').slice(0, 5)
+    if (digits === '') { setDraft(''); return }
+    const p = Math.min(65535, Math.max(1, Number(digits)))
+    setDraft(String(p) === digits ? digits : String(p))
+    onPortChange(p)
+  }
   function handleCopy() {
     navigator.clipboard.writeText(fullUrl).then(() => {
       setCopied(true)
@@ -29,8 +60,9 @@ function BaseUrlField({ port, onPortChange, onPortBlur }: {
   return (
     <div
       className="base-url-field-lm"
+      onMouseDown={handleBoxMouseDown}
       style={{
-        display: 'flex', alignItems: 'center',
+        display: 'flex', alignItems: 'center', cursor: 'text',
         width: '100%', maxWidth: 420, height: 36,
         border: `1px solid ${focused ? 'var(--info-blue, #3b82f6)' : 'var(--border)'}`,
         borderRadius: 'var(--radius-sm)',
@@ -53,27 +85,27 @@ function BaseUrlField({ port, onPortChange, onPortBlur }: {
       </span>
       {/* The port — inline transparent input. White in both states. */}
       <input
-        type="number"
-        min={1}
-        max={65535}
-        value={port}
+        ref={inputRef}
+        type="text"
+        inputMode="numeric"
+        value={draft}
         onFocus={() => setFocused(true)}
-        onChange={(e) => {
-          const p = Math.max(1, Math.min(65535, Number(e.target.value) || 1234))
-          onPortChange(p)
+        onChange={(e) => handleDraftChange(e.target.value)}
+        onBlur={() => {
+          setFocused(false)
+          if (draft === '') setDraft(String(port))
+          onPortBlur()
         }}
-        onBlur={() => { setFocused(false); onPortBlur() }}
         style={{
-          width: `${Math.max(1, String(port || '').length)}ch`,
+          width: `${Math.max(1, draft.length)}ch`,
           minWidth: '1ch',
           border: 'none', outline: 'none', background: 'transparent',
           textAlign: 'center',
           fontFamily: 'var(--font-mono)', fontSize: 13,
           color: 'var(--text)', fontWeight: 600,
-          MozAppearance: 'textfield', padding: 0,
-          flexGrow: 0
+          padding: 0, flexGrow: 0
         }}
-        title="Port number (1–65535)"
+        title="Port number (1-65535)"
       />
       {/* Right side: in REST show "/v1" + copy button as one continuous white
           link. When FOCUSED, push "/v1" to the right border (gray) and hide the
@@ -161,7 +193,7 @@ export default function OverridesView() {
               }}
               onPortBlur={async () => { try { await window.api?.setBaseUrlOverride?.(baseUrlOverride) } catch {} }}
             />
-            <div className="form-hint">Only the port number is editable. Click the box to edit, or use the copy button to copy the full URL.</div>
+            <div className="form-hint">Only the port number is editable. Click anywhere in the box to edit it, or use the copy button to copy the full URL.</div>
           </div>
 
           {/* Serve on local network */}

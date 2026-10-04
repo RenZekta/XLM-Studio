@@ -13,7 +13,7 @@ import { X, Download, Loader2, RefreshCw } from 'lucide-react'
 export default function UpdateBanner() {
   const {
     releaseInfo, updateDismissed, setUpdateDismissed, downloadProgress, setDownloadProgress,
-    setBackends, setTrackerResult, setReleaseInfo
+    setBackends, setTrackerResult
   } = useStore()
   const [updating, setUpdating] = useState(false)
 
@@ -47,12 +47,8 @@ export default function UpdateBanner() {
     const backendsData = await window.api.listBackends()
     setBackends(backendsData)
     const updated = await window.api.checkTrackedBackend('llama-cpp')
-    if (!('error' in updated)) {
-      setTrackerResult(updated)
-      const { trackedId, folderName, ...rest } = updated
-      setReleaseInfo(rest as typeof releaseInfo)
-    }
-    setUpdateDismissed(true)
+    if (!('error' in updated)) setTrackerResult(updated)
+    else setUpdateDismissed(true)
   }
 
   function handleCancel() {
