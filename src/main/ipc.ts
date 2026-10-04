@@ -9,7 +9,7 @@ import { spawn, ChildProcess, exec } from 'child_process'
 import https from 'https'
 import http from 'http'
 import { app } from 'electron'
-import extract from 'extract-zip'
+import { extractZip } from './zipExtract'
 import net from 'net'
 import type {
   ModelGroup, ModelEntry, MmprojFile, SpecDecodeSidecarFile, BackendVersion,
@@ -1936,7 +1936,7 @@ async function smartExtractBackend(opts: {
         p.on('exit', code => code === 0 ? resolve() : reject(new Error(`tar exited with code ${code}`)))
       })
     } else {
-      await extract(opts.archivePath, { dir: staging })
+      await extractZip(opts.archivePath, staging)
     }
   } catch (err) {
     // Cleanup staging on failure.
