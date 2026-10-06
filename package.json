@@ -39,5 +39,10 @@
     "react-dom": "^18.3.1",
     "typescript": "^5.5.2",
     "vite": "^7.3.6"
+  },
+  "overrides": {
+    "app-builder-lib": {
+      "@electron/get": "^5.1.0"
+    }
   }
 }
