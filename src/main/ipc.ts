@@ -19,6 +19,7 @@ import type {
 } from '../shared/types'
 import { MCP_TOOL_IDS } from '../shared/types'
 import { extractBackendTypeFromAssetName } from '../shared/backendType'
+import { compareBackendVersions, isComparableBackendVersion, selectLatestRelease } from '../shared/backendVersion'
 import { BEELLAMA_BACKEND_KEY, BEELLAMA_KV_TYPES, BEELLAMA_EXTRA_COMMANDS } from '../shared/backendForks'
 import { initPerfMonitor, registerPerfHandlers, startTracking, stopTracking, stopAllTracking } from './perfMonitor'
 import { initMcpLayer, registerMcpHandlers } from './mcpServer'
@@ -2049,44 +2050,6 @@ async function moveDirRecursive(src: string, dst: string): Promise<void> {
   }
 }
 
-// Parses a backend version/tag string into a comparable shape. Most tracked
-// forks version themselves as "bNNNNN" (the upstream llama.cpp build number
-// alone), but some forks bump their own release independently of upstream
-// and encode that as a suffix, e.g. TurboQuant's "b10269-1.6.0" (upstream
-// base b10269, fork semver 1.6.0). The base build number is NOT sufficient
-// to order these: two fork releases can share the same upstream base while
-// one is strictly newer, so the fork semver (when present) is compared as
-// a tiebreaker after the base build number. Forks with plain semver tags
-// (e.g. "v0.4.0") have no build number at all; those compare by semver alone.
-function parseBackendVersion(name: string): { build: number; fork: number[] } {
-  // A digit run touching a dot belongs to a semver, not to a build number.
-  const buildMatch = name.match(/(?<![\d.])(\d{3,6})(?![\d.])/)
-  const build = buildMatch ? parseInt(buildMatch[1], 10) : 0
-  const forkMatch = name.match(/(\d+(?:\.\d+)+)/)
-  const fork = forkMatch ? forkMatch[1].split('.').map(n => parseInt(n, 10)) : []
-  return { build, fork }
-}
-
-// Forks that only publish semver tags (e.g. BeeLlama's "v0.4.0") have no
-// build number, so a version is comparable when either part was parsed.
-function isComparableBackendVersion(name: string): boolean {
-  const v = parseBackendVersion(name)
-  return v.build > 0 || v.fork.length > 0
-}
-
-// Returns negative if a < b, 0 if equal, positive if a > b.
-function compareBackendVersions(a: string, b: string): number {
-  const pa = parseBackendVersion(a)
-  const pb = parseBackendVersion(b)
-  if (pa.build !== pb.build) return pa.build - pb.build
-  const len = Math.max(pa.fork.length, pb.fork.length)
-  for (let i = 0; i < len; i++) {
-    const diff = (pa.fork[i] || 0) - (pb.fork[i] || 0)
-    if (diff !== 0) return diff
-  }
-  return 0
-}
-
 // Auto-delete outdated backend versions in the same fork folder.
 // After a new version is downloaded & extracted, any OLDER version in the
 // same forkDir is removed to save disk space. The newly downloaded version
@@ -3538,39 +3501,13 @@ export function registerIpcHandlers(): void {
           return true
         })
       }
-      // Llama.cpp started publishing periodic semantic-version
-      // milestone tags (e.g. "v0.3.0") ALONGSIDE the continuous per-commit
-      // "bNNNNN" builds it's always used. The milestone tags are SOURCE-ONLY
-      // (no built binaries attached at all) — but /releases/latest just
-      // returns whichever release is chronologically newest, so the moment
-      // a milestone tag lands, update-checking pointed at a release with
-      // nothing to actually download. Worse, a tag like "v0.3.0" also never
-      // numerically or exactly matches an installed "bNNNNN" folder name, so
-      // it kept reporting "update available" permanently, with no way to
-      // ever resolve it. Fetch the releases LIST instead and use the first
-      // one (most recent first, GitHub's default ordering) that actually
-      // has a real platform binary attached — this skips source-only tags
-      // automatically, including any future ones, without hardcoding a
-      // specific tag name/pattern to ignore.
-      const releases = await fetchJson(`https://api.github.com/repos/${tracked.repo}/releases?per_page=10`) as any
+      const releases = await fetchJson(`https://api.github.com/repos/${tracked.repo}/releases?per_page=20`) as any
       if (!Array.isArray(releases) || releases.length === 0) {
         return { ...base, error: 'Invalid response from GitHub' }
       }
-      let release: any = null
-      let platformAssets: any[] = []
-      for (const rel of releases) {
-        if (rel.draft || rel.prerelease) continue
-        const assets = platformAssetsFor(rel)
-        if (assets.length > 0) { release = rel; platformAssets = assets; break }
-      }
-      if (!release) {
-        // Nothing in the recent history has a matching binary for this
-        // platform at all — fall back to the newest release so we still
-        // surface SOMETHING (with an empty asset list) rather than silently
-        // reporting nothing at all.
-        release = releases[0]
-        platformAssets = platformAssetsFor(release)
-      }
+      const release = selectLatestRelease<any>(releases, rel => platformAssetsFor(rel).length > 0)
+      if (!release) return { ...base, error: 'No releases found' }
+      const platformAssets = platformAssetsFor(release)
       // Per-asset install status: each asset represents a distinct GPU-
       // runtime variant (see extractBackendTypeFromAssetName), installed
       // independently under <folderName>/<type>/<version>/. "Outdated" only
