@@ -15,7 +15,8 @@ import net from 'net'
 import type {
   ModelGroup, ModelEntry, MmprojFile, SpecDecodeSidecarFile, BackendVersion,
   CommandsSchema, TrackedBackend, TrackedBackendRelease,
-  ThemePref, ReleaseInfo, BaseUrlOverride, McpSettings, KvCacheCheckpointSettings, CheckpointMode
+  ThemePref, ReleaseInfo, BaseUrlOverride, McpSettings, KvCacheCheckpointSettings, CheckpointMode,
+  StrataSettings, StrataModelInfo, GitEngineStatus, InstalledOtherPlatform
 } from '../shared/types'
 import { MCP_TOOL_IDS } from '../shared/types'
 import { extractBackendTypeFromAssetName } from '../shared/backendType'
@@ -25,11 +26,22 @@ import { initPerfMonitor, registerPerfHandlers, startTracking, stopTracking, sto
 import { initMcpLayer, registerMcpHandlers } from './mcpServer'
 import { toolTemplateAction } from './mcpControl'
 import { randomBytes } from 'crypto'
+import { engineOf, type EngineId } from '../shared/engines'
+import { assetMatchesHost } from '../shared/assetPlatform'
+import { NATIVE_PLATFORM, platformOfBuildDir, installVersionName } from './buildPlatform'
+import { STRATA_ARCH, strataTableHash, strataVerdict, type StrataTable } from '../shared/strata'
+import { fingerprintGguf } from './ggufTensors'
+import { LineAssembler } from './lineAssembler'
+import {
+  STRATA_DATA_DIRNAME, DEFAULT_STRATA_DATA, strataLauncherName, looksLikeStrataClone, gitAvailable,
+  gitVersionLabel, baseTagOf, compareTags, latestRemoteTag, updateGitEngine, githubCloneUrl, cloneGitEngine,
+  probeGitEngine, readRememberedDataDir, resolveStrataData, buildStrataSpawn
+} from './strataEngine'
 
 const APP_ROOT = app.isPackaged ? join(app.getPath('userData')) : join(process.cwd())
 const MODELS_DIR    = join(APP_ROOT, 'models')
 const TEMPLATES_DIR = join(APP_ROOT, 'templates')
-const BACKEND_DIR   = join(APP_ROOT, 'backend')
+const BACKEND_DIR   = join(APP_ROOT, 'engines')
 const CHECKPOINTS_DIR = join(APP_ROOT, 'KV-Checkpoints')
 // The index lives next to settings.json rather than inside CHECKPOINTS_DIR
 // itself -- the checkpoint FILES can live in an external folder the user
@@ -154,6 +166,16 @@ const DEFAULT_TRACKED: TrackedBackend[] = [
       '--spec-draft-type-v': BEELLAMA_KV_TYPES
     },
     extraCommands: BEELLAMA_EXTRA_COMMANDS
+  },
+  // Strata is installed as a git clone into <engines folder>/Strata/Strata.
+  {
+    id: 'strata',
+    repo: 'Niko1221/Strata',
+    name: 'Strata',
+    folderName: 'Strata',
+    isDefault: true,
+    engine: 'strata',
+    kind: 'git'
   }
 ]
 
@@ -215,6 +237,11 @@ interface AppSettings {
   starredPresetId?: string
   mcp?: McpSettings
   globalBackend?: { backendKey: string; backendVersion: string; backendType?: string | null } | null
+  // The global selection of every engine other than llama.cpp (which keeps
+  // using globalBackend): which repo's install new templates follow.
+  globalEngineBackends?: Partial<Record<EngineId, { backendKey: string }>>
+  autoUpdateTrackedEngines?: boolean
+  strata?: StrataSettings
   launchOnStartup?: boolean
   autostartMainTemplates?: boolean
   kvCacheCheckpoints?: KvCacheCheckpointSettings
@@ -297,11 +324,14 @@ const DEFAULT_SETTINGS: AppSettings = {
   mainBackendFolder: null,
   theme: 'system',
   trackedBackends: DEFAULT_TRACKED,
-  modelDefaults: { autoFitEnabled: true, autoFitContextLength: 60000, guardrailMode: 'strict', customMaxSizeGB: 0, useCurrentMemState: false, moeOffloadStrategy: 'max' /* default: MAX GPU layers + force MoE experts to CPU */, autoFitUse2xIncrements: false, autoFitYarnAutoScale: false, autoEnableMmproj: true, mmprojOffloadToRam: true, cpuThreadsOverrideEnabled: false, cpuThreadsOverridePercent: 100, parallelOverrideEnabled: false, parallelInferenceMode: 'unified', parallelOverrideValue: 4, parallelOverrideValueDense: 4, parallelOverrideValueMoe: 4, perfMaxSessions: 20, autoOpenChatUI: false },
+  modelDefaults: { autoFitEnabled: true, autoFitContextLength: 60000, guardrailMode: 'strict', customMaxSizeGB: 0, useCurrentMemState: true, moeOffloadStrategy: 'max' /* default: MAX GPU layers + force MoE experts to CPU */, autoFitUse2xIncrements: false, autoFitYarnAutoScale: false, autoEnableMmproj: true, mmprojOffloadToRam: true, cpuThreadsOverrideEnabled: false, cpuThreadsOverridePercent: 50, parallelOverrideEnabled: false, parallelInferenceMode: 'unified', parallelOverrideValue: 4, parallelOverrideValueDense: 4, parallelOverrideValueMoe: 4, perfMaxSessions: 20, autoOpenChatUI: false },
   baseUrlOverride: { ...DEFAULT_BASE_URL_OVERRIDE },
   samplingPresets: [],
   starredPresetId: 'lm-studio',
   globalBackend: null,
+  globalEngineBackends: {},
+  autoUpdateTrackedEngines: false,
+  strata: { pullBeforeLaunch: true, parallelOverride: null, data: { ...DEFAULT_STRATA_DATA } },
   mcp: {
     enabled: true,
     skillMode: false,
@@ -314,6 +344,29 @@ const DEFAULT_SETTINGS: AppSettings = {
   launchOnStartup: false,
   autostartMainTemplates: false,
   kvCacheCheckpoints: { ...DEFAULT_KV_CACHE_CHECKPOINTS }
+}
+
+function migrateStrataSettings(raw: any): StrataSettings {
+  const str = (v: unknown) => (typeof v === 'string' && v.trim() ? v : null)
+  return {
+    pullBeforeLaunch: raw?.pullBeforeLaunch ?? true,
+    parallelOverride: Number.isInteger(raw?.parallelOverride) && raw.parallelOverride >= 1 && raw.parallelOverride <= 8 ? raw.parallelOverride : null,
+    data: {
+      mode: raw?.data?.mode === 'isolated' ? 'isolated' : 'global',
+      dataDir: str(raw?.data?.dataDir),
+      isolatedDir: str(raw?.data?.isolatedDir)
+    }
+  }
+}
+
+function migrateGlobalEngineBackends(raw: any): Partial<Record<EngineId, { backendKey: string }>> {
+  const out: Partial<Record<EngineId, { backendKey: string }>> = {}
+  if (raw && typeof raw === 'object') {
+    for (const id of Object.keys(raw)) {
+      if (id !== 'llama.cpp' && engineOf(id) === id && typeof raw[id]?.backendKey === 'string') out[id as EngineId] = { backendKey: raw[id].backendKey }
+    }
+  }
+  return out
 }
 
 // Merge a (possibly missing/partial/legacy) mcp settings blob with defaults.
@@ -372,7 +425,7 @@ async function loadSettings(): Promise<AppSettings> {
         autoFitContextLength: data.modelDefaults?.autoFitContextLength ?? DEFAULT_SETTINGS.modelDefaults!.autoFitContextLength,
         guardrailMode: data.modelDefaults?.guardrailMode ?? DEFAULT_SETTINGS.modelDefaults!.guardrailMode,
         customMaxSizeGB: data.modelDefaults?.customMaxSizeGB ?? DEFAULT_SETTINGS.modelDefaults!.customMaxSizeGB,
-        useCurrentMemState: data.modelDefaults?.useCurrentMemState ?? false,
+        useCurrentMemState: data.modelDefaults?.useCurrentMemState ?? DEFAULT_SETTINGS.modelDefaults!.useCurrentMemState,
         // Respect a saved value; otherwise fall back to the CURRENT default
         // (DEFAULT_SETTINGS), not a hardcoded literal — so bumping the
         // default above reaches everyone without a saved value, not just a
@@ -390,9 +443,9 @@ async function loadSettings(): Promise<AppSettings> {
         // projector out of VRAM (--no-mmproj-offload). ON by default.
         mmprojOffloadToRam: data.modelDefaults?.mmprojOffloadToRam ?? true,
         // "Recommended CPU Threads override" — off by default (uses the
-        // built-in 75%-of-physical-cores default), value 100% when enabled.
+        // built-in 50%-of-physical-cores default), value 50% when enabled.
         cpuThreadsOverrideEnabled: data.modelDefaults?.cpuThreadsOverrideEnabled ?? false,
-        cpuThreadsOverridePercent: data.modelDefaults?.cpuThreadsOverridePercent ?? 100,
+        cpuThreadsOverridePercent: data.modelDefaults?.cpuThreadsOverridePercent ?? 50,
         // Overrides tab -> "Parallel Inference" block.
         parallelOverrideEnabled: data.modelDefaults?.parallelOverrideEnabled ?? false,
         parallelInferenceMode: (data.modelDefaults?.parallelInferenceMode === 'separate') ? 'separate' : 'unified',
@@ -413,6 +466,9 @@ async function loadSettings(): Promise<AppSettings> {
       globalBackend: (data.globalBackend && typeof data.globalBackend.backendKey === 'string')
         ? { backendKey: data.globalBackend.backendKey, backendVersion: data.globalBackend.backendVersion, backendType: data.globalBackend.backendType ?? null }
         : null,
+      globalEngineBackends: migrateGlobalEngineBackends(data.globalEngineBackends),
+      autoUpdateTrackedEngines: !!data.autoUpdateTrackedEngines,
+      strata: migrateStrataSettings(data.strata),
       mcp: migrateMcpSettings(data.mcp),
       launchOnStartup: !!data.launchOnStartup,
       autostartMainTemplates: !!data.autostartMainTemplates,
@@ -476,7 +532,7 @@ async function backendRoots(): Promise<{ dir: string; external: boolean }[]> {
   return roots
 }
 
-const runningProcesses = new Map<string, { proc: ChildProcess; port: number; modelPath?: string; templateName?: string; checkpointsActive?: boolean }>
+const runningProcesses = new Map<string, { proc: ChildProcess; port: number; modelPath?: string; templateName?: string; checkpointsActive?: boolean; engine?: EngineId; cloneDir?: string }>
 let sharedChatWindow: BrowserWindow | null = null
 
 // Per-model flags so we only emit each "important" app-log event once per run.
@@ -524,7 +580,11 @@ function isPortAvailable(port: number): Promise<boolean> {
 // POSIX: SIGKILL to the negative group id after detaching into its own group),
 // then poll the port until it's free (or a timeout). This makes Stop→Start
 // reliable without orphaned children.
-function killProcessTree(proc: ChildProcess): Promise<void> {
+// graceMs (POSIX only): send SIGTERM to the process group first and give it
+// that long to exit before the SIGKILL. Strata releases tens of GB of pinned
+// RAM when it is allowed to shut down cleanly. Windows always force-kills the
+// tree, which frees that memory with the processes.
+function killProcessTree(proc: ChildProcess, opts?: { graceMs?: number }): Promise<void> {
   return new Promise((resolve) => {
     if (!proc || proc.exitCode !== null || proc.signalCode) {
       resolve()
@@ -548,19 +608,27 @@ function killProcessTree(proc: ChildProcess): Promise<void> {
         setTimeout(done, 200)
       })
     } else {
-      try {
-        // Try sending SIGKILL to the whole process group first (covers children).
-        if (pid) {
-          try { process.kill(-pid, 'SIGKILL') } catch { /* group may not exist */ }
-          try { proc.kill('SIGKILL') } catch { /* already dead */ }
+      const hardKill = () => {
+        try {
+          // Try sending SIGKILL to the whole process group first (covers children).
+          if (pid) {
+            try { process.kill(-pid, 'SIGKILL') } catch { /* group may not exist */ }
+            try { proc.kill('SIGKILL') } catch { /* already dead */ }
+          }
+        } catch {
+          try { proc.kill('SIGKILL') } catch {}
         }
-      } catch {
-        try { proc.kill('SIGKILL') } catch {}
+        setTimeout(done, 200)
       }
-      setTimeout(done, 200)
+      if (opts?.graceMs && pid) {
+        try { process.kill(-pid, 'SIGTERM') } catch { try { proc.kill('SIGTERM') } catch {} }
+        setTimeout(() => { if (!settled) hardKill() }, opts.graceMs)
+      } else {
+        hardKill()
+      }
     }
     // Hard safety net so we never hang the IPC handler.
-    setTimeout(done, 6000)
+    setTimeout(done, (opts?.graceMs ?? 0) + 6000)
   })
 }
 
@@ -804,6 +872,13 @@ interface DiscoveredExe {
   exeAbs: string   // absolute path to the executable
   dir: string      // directory containing the exe (cwd)
   exeName: string  // just the filename
+}
+
+// Like discoverBackendExe, but a build made for another OS is not an install
+// that can run here (a Linux "llama-server" would otherwise match on Windows).
+function discoverNativeExe(dir: string): DiscoveredExe | null {
+  const found = discoverBackendExe(dir)
+  return found && platformOfBuildDir(dir) === NATIVE_PLATFORM ? found : null
 }
 
 function discoverBackendExe(dir: string, depth = 0, maxDepth = 6): DiscoveredExe | null {
@@ -1075,6 +1150,8 @@ async function scanBackendRoot(rootDir: string, rootExternal: boolean, rootIndex
   }
   for (const e of topEntries) {
     if (!e.isDirectory()) continue
+    // Strata's shared data folder lives beside the repo folders.
+    if (e.name.toLowerCase() === STRATA_DATA_DIRNAME.toLowerCase()) continue
     const forkDir = join(rootDir, e.name)
     let l2Entries: import('fs').Dirent[]
     try {
@@ -1086,6 +1163,26 @@ async function scanBackendRoot(rootDir: string, rootExternal: boolean, rootIndex
     let foundAnyNested = false
     for (const l2 of l2Dirs) {
       const l2Path = join(forkDir, l2.name)
+      // A git-installed engine (Strata): a clone recognised by its files.
+      if (looksLikeStrataClone(l2Path)) {
+        foundAnyNested = true
+        const version = await gitVersionLabel(l2Path)
+        out.push({
+          id: `${rootIndex}::${e.name}::${l2.name}`,
+          name: l2.name,
+          displayName: `${e.name} (${version})`,
+          backendKey: e.name,
+          backendType: null,
+          version,
+          path: l2Path,
+          exe: strataLauncherName(),
+          hasCommands: existsSync(join(BACKEND_DIR, e.name, 'commands.json')),
+          engine: 'strata',
+          rootDir,
+          external: rootExternal
+        })
+        continue
+      }
       // The marker file is the ONLY reliable way to tell "l2 is a TYPE
       // folder containing version subfolders" apart from "l2 IS a version
       // folder whose exe happens to be nested a level or two deep" --
@@ -1098,7 +1195,7 @@ async function scanBackendRoot(rootDir: string, rootExternal: boolean, rootIndex
       if (!isMarkedTypeFolder) {
         // Try layout 2 (l2 IS the version): exe directly inside (or nested
         // build/bin/).
-        const directFound = discoverBackendExe(l2Path)
+        const directFound = discoverNativeExe(l2Path)
         if (directFound) {
           foundAnyNested = true
           out.push({
@@ -1128,7 +1225,7 @@ async function scanBackendRoot(rootDir: string, rootExternal: boolean, rootIndex
       }
       for (const l3 of l3Entries.filter(d => d.isDirectory() && !d.name.startsWith('.staging-'))) {
         const l3Path = join(l2Path, l3.name)
-        const found = discoverBackendExe(l3Path)
+        const found = discoverNativeExe(l3Path)
         if (!found) continue
         foundAnyNested = true
         out.push({
@@ -1150,7 +1247,7 @@ async function scanBackendRoot(rootDir: string, rootExternal: boolean, rootIndex
     if (foundAnyNested) continue
     // 3. LEGACY FLAT LAYOUT: forkDir itself contains the exe (no version subfolders).
     // The exe may be directly in forkDir or nested in build/bin/.
-    const direct = discoverBackendExe(forkDir)
+    const direct = discoverNativeExe(forkDir)
     if (direct) {
       // Legacy: the folder name is the version; assume the default "llama.cpp" fork.
       const version = e.name
@@ -1176,19 +1273,26 @@ async function scanBackendRoot(rootDir: string, rootExternal: boolean, rootIndex
 // --------------------------------------------------------------------------
 // Default commands schema + tracked-backend default overrides
 // --------------------------------------------------------------------------
-function loadDefaultCommandsSchema(): CommandsSchema | null {
-  const defaultPath = app.isPackaged
-    ? join(process.resourcesPath, 'resources', 'commands.json')
-    : join(process.cwd(), 'resources', 'commands.json')
-  if (existsSync(defaultPath)) {
-    try { return JSON.parse(readFileSync(defaultPath, 'utf-8')) as CommandsSchema } catch {}
+const ENGINE_COMMANDS_FILES: Record<EngineId, string> = {
+  'llama.cpp': 'commands.json',
+  strata: 'commands.strata.json'
+}
+
+// The built-in parameter schema of an engine, read fresh from resources/.
+function loadEngineCommandsSchema(engine: EngineId): CommandsSchema | null {
+  const file = ENGINE_COMMANDS_FILES[engine]
+  const path = app.isPackaged
+    ? join(process.resourcesPath, 'resources', file)
+    : join(process.cwd(), 'resources', file)
+  if (existsSync(path)) {
+    try { return JSON.parse(readFileSync(path, 'utf-8')) as CommandsSchema } catch {}
   }
   return null
 }
 
 // Produce a commands.json for a tracked backend, applying defaultOptions overrides.
 function buildTrackedCommandsSchema(tracked: TrackedBackend): CommandsSchema | null {
-  const base = loadDefaultCommandsSchema()
+  const base = loadEngineCommandsSchema(engineOf(tracked))
   if (!base) return null
   if (tracked.defaultOptions) {
     for (const cat of base.categories) {
@@ -1991,7 +2095,7 @@ async function smartExtractBackend(opts: {
   // UI state to "Up to date". We always use opts.versionHint (the release tag)
   // as the final folder name, regardless of what the archive's internal
   // structure named the root folder (e.g. "build", "bin", etc.).
-  const finalVersionName = opts.versionHint || `version-${Date.now()}`
+  const finalVersionName = installVersionName(typeDir, opts.versionHint || `version-${Date.now()}`)
   const dst = join(typeDir, finalVersionName)
   await rmrf(dst)
   await fsPromises.mkdir(dst, { recursive: true })
@@ -2080,6 +2184,8 @@ async function cleanupOldBackendVersions(backendKey: string, backendType: string
       if (e.name === newVersion) continue
       // Skip staging folders.
       if (e.name.startsWith('.staging-')) continue
+      // A build for another OS is never "outdated" by a build for this one.
+      if (platformOfBuildDir(join(typeDir, e.name)) !== NATIVE_PLATFORM) continue
       if (isComparableBackendVersion(e.name) && compareBackendVersions(e.name, newVersion) < 0) {
         const oldDir = join(typeDir, e.name)
         try {
@@ -2109,7 +2215,7 @@ export async function cleanupAllProcesses(): Promise<void> {
   // processes actually die, so their data gets persisted to history instead
   // of just vanishing.
   stopAllTracking()
-  await Promise.all(entries.map(([_id, e]) => killProcessTree(e.proc).catch(() => {})))
+  await Promise.all(entries.map(([_id, e]) => killProcessTree(e.proc, e.engine === 'strata' ? { graceMs: 8000 } : undefined).catch(() => {})))
 }
 
 // Peek at the running-process count so the quit handler can decide whether to
@@ -2171,6 +2277,19 @@ export function registerIpcHandlers(): void {
   registerPerfHandlers()
   initGithubToken(APP_ROOT)
 
+  // Paths extraction was already started for in this session. A file that
+  // fails to parse is never cached, so without this every model listing would
+  // retry it.
+  const metadataAttempted = new Set<string>()
+  function extractMissingMetadata(paths: Iterable<string>): void {
+    for (const p of paths) {
+      if (metadataAttempted.has(p)) continue
+      if (metadataCache[p]?.schemaVersion === METADATA_SCHEMA_VERSION) continue
+      metadataAttempted.add(p)
+      void getGgufMetadataImpl(p).catch(() => {})
+    }
+  }
+
   // ----- Models: smart grouped listing -----
   async function listModelsImpl(): Promise<ModelGroup[]> {
     const settings = await loadSettings()
@@ -2219,6 +2338,8 @@ export function registerIpcHandlers(): void {
     // see pruneCheckpointsForMissingModels: unconditional, not gated behind
     // the redundant-checkpoints confirm/auto-delete setting.
     pruneCheckpointsForMissingModels(detectedPaths)
+    void refreshStrataVerdicts()
+    extractMissingMetadata(detectedPaths)
     return groups
   }
   ipcMain.handle('list-models', async () => listModelsImpl())
@@ -2238,6 +2359,7 @@ export function registerIpcHandlers(): void {
   ipcMain.handle('clear-metadata-cache', async () => {
     const count = Object.keys(metadataCache).length
     metadataCache = {}
+    metadataAttempted.clear()
     saveMetadataCache()
     return { success: true, cleared: count }
   })
@@ -2262,10 +2384,12 @@ export function registerIpcHandlers(): void {
     const folder = r.filePaths[0]
     const s = await loadSettings()
     if (!s.externalModelFolders.includes(folder)) {
+      // The first folder in an empty list becomes the main (starred) one.
+      if (s.externalModelFolders.length === 0) s.mainModelFolder = folder
       s.externalModelFolders.push(folder)
       await saveSettings(s)
     }
-    return { success: true, folders: sortExternalFolders(s.externalModelFolders, s.mainModelFolder) }
+    return { success: true, folders: sortExternalFolders(s.externalModelFolders, s.mainModelFolder), mainFolder: s.mainModelFolder }
   })
   ipcMain.handle('remove-external-model-folder', async (_e, folder: string) => {
     const s = await loadSettings()
@@ -2426,14 +2550,26 @@ export function registerIpcHandlers(): void {
   // Deletes every installed version of one backend variant (e.g. all "cuda"
   // installs of a fork) at once -- used by the tracker dropdown's per-type
   // trash icon, which manages a whole variant rather than one version.
-  ipcMain.handle('delete-backend-type', async (_e, opts: { backendKey: string; backendType: string }) => {
+  // Removes the builds of one type made for one OS (this machine's by
+  // default). The type folder goes too once no build is left in it, so a
+  // build for the other OS in the same folder is never touched.
+  ipcMain.handle('delete-backend-type', async (_e, opts: { backendKey: string; backendType: string; platform?: string }) => {
     try {
+      const platform = (opts.platform === 'windows' || opts.platform === 'linux' || opts.platform === 'macos') ? opts.platform : NATIVE_PLATFORM
       const roots = await backendRoots()
       let deletedAny = false
       for (const root of roots) {
         const typeDir = join(root.dir, opts.backendKey, opts.backendType)
-        if (!isSafePath(root.dir, typeDir)) continue
-        if (existsSync(typeDir)) { await rmrf(typeDir); deletedAny = true }
+        if (!isSafePath(root.dir, typeDir) || !existsSync(typeDir)) continue
+        for (const v of readdirSync(typeDir, { withFileTypes: true })) {
+          if (!v.isDirectory()) continue
+          const versionDir = join(typeDir, v.name)
+          if (!v.name.startsWith('.staging-') && platformOfBuildDir(versionDir) !== platform) continue
+          await rmrf(versionDir)
+          deletedAny = true
+        }
+        const left = readdirSync(typeDir, { withFileTypes: true }).some(v => v.isDirectory())
+        if (!left) await rmrf(typeDir)
       }
       return { success: true, deleted: deletedAny }
     } catch (err) {
@@ -2462,10 +2598,11 @@ export function registerIpcHandlers(): void {
     const folder = r.filePaths[0]
     const s = await loadSettings()
     if (!s.externalBackendFolders.includes(folder)) {
+      if (s.externalBackendFolders.length === 0) s.mainBackendFolder = folder
       s.externalBackendFolders.push(folder)
       await saveSettings(s)
     }
-    return { success: true, folders: sortExternalFolders(s.externalBackendFolders, s.mainBackendFolder) }
+    return { success: true, folders: sortExternalFolders(s.externalBackendFolders, s.mainBackendFolder), mainFolder: s.mainBackendFolder }
   })
   ipcMain.handle('remove-external-backend-folder', async (_e, folder: string) => {
     const s = await loadSettings()
@@ -2499,10 +2636,13 @@ export function registerIpcHandlers(): void {
     const folder = r.filePaths[0]
     const s = await loadSettings()
     const cfg = s.kvCacheCheckpoints || { ...DEFAULT_KV_CACHE_CHECKPOINTS }
-    if (!cfg.externalFolders.includes(folder)) cfg.externalFolders.push(folder)
+    if (!cfg.externalFolders.includes(folder)) {
+      if (cfg.externalFolders.length === 0) cfg.mainFolder = folder
+      cfg.externalFolders.push(folder)
+    }
     s.kvCacheCheckpoints = cfg
     await saveSettings(s)
-    return { success: true, folders: sortExternalFolders(cfg.externalFolders, cfg.mainFolder) }
+    return { success: true, folders: sortExternalFolders(cfg.externalFolders, cfg.mainFolder), mainFolder: cfg.mainFolder }
   })
   ipcMain.handle('remove-external-checkpoint-folder', async (_e, folder: string) => {
     const s = await loadSettings()
@@ -2559,7 +2699,7 @@ export function registerIpcHandlers(): void {
     return s.trackedBackends
   }
   ipcMain.handle('list-tracked-backends', async () => listTrackedBackendsImpl())
-  ipcMain.handle('add-tracked-backend', async (_e, link: string) => {
+  ipcMain.handle('add-tracked-backend', async (_e, link: string, manualEngine?: string) => {
     const trimmed = (link || '').trim()
     if (!trimmed) return { success: false, error: 'Empty link' }
     // Accept either "owner/repo" or a full github URL.
@@ -2574,7 +2714,12 @@ export function registerIpcHandlers(): void {
     const folderName = backendFolderNameFor(repo, taken)
     const displayName = repo.split('/').pop() || repo
     const id = folderName + '-' + Date.now().toString(36)
+    // Engines installed by cloning are recognised by the repo's files; a
+    // manual choice from the Add dialog overrides the probe.
+    const probed = manualEngine ? null : await probeGitEngine(repo)
+    const engine: EngineId = manualEngine ? engineOf(manualEngine) : (probed?.engine ?? 'llama.cpp')
     const tracked: TrackedBackend = { id, repo, name: displayName, folderName, isDefault: false }
+    if (engine !== 'llama.cpp') { tracked.engine = engine; tracked.kind = 'git' }
     s.trackedBackends.push(tracked)
     await saveSettings(s)
     return { success: true, tracked }
@@ -2603,11 +2748,13 @@ export function registerIpcHandlers(): void {
   // (i.e. an arg that isn't a built-in one at all) — those are merged in on
   // top and preserved; anything matching a built-in arg is always overridden
   // by the fresh computation, full stop.
-  async function getCommandsImpl(backendKey: string): Promise<CommandsSchema | null> {
-    if (!backendKey) return loadDefaultCommandsSchema()
+  // engineHint covers a repo folder with no tracker entry (e.g. a clone
+  // placed by hand), whose engine cannot be read from settings.
+  async function getCommandsImpl(backendKey: string, engineHint?: string): Promise<CommandsSchema | null> {
+    if (!backendKey) return loadEngineCommandsSchema(engineOf(engineHint))
     const s = await loadSettings()
     const tracked = s.trackedBackends.find(t => t.folderName === backendKey || t.id === backendKey)
-    const fresh = tracked ? buildTrackedCommandsSchema(tracked) : loadDefaultCommandsSchema()
+    const fresh = tracked ? buildTrackedCommandsSchema(tracked) : loadEngineCommandsSchema(engineOf(engineHint))
     if (!fresh) return null
     const knownArgs = new Set<string>()
     for (const cat of fresh.categories) for (const cmd of cat.commands) knownArgs.add(cmd.arg)
@@ -2638,7 +2785,7 @@ export function registerIpcHandlers(): void {
     } catch {}
     return fresh
   }
-  ipcMain.handle('get-commands', async (_e, backendKey: string) => getCommandsImpl(backendKey))
+  ipcMain.handle('get-commands', async (_e, backendKey: string, engine?: string) => getCommandsImpl(backendKey, engine))
   ipcMain.handle('save-backend-commands', async (_e, backendKey: string, schema: unknown) => {
     try {
       const dir = join(BACKEND_DIR, backendKey)
@@ -2855,7 +3002,8 @@ export function registerIpcHandlers(): void {
   })
 
   // ----- Run model -----
-  async function runModelImpl(opts: { id: string; name: string; backendPath: string; exe: string; args: string[]; openBrowser: boolean; port: number; ignoreBaseUrlOverride?: boolean; skipCheckpoint?: boolean; checkpointMode?: CheckpointMode }) {
+  async function runModelImpl(opts: { id: string; name: string; backendPath: string; exe: string; args: string[]; openBrowser: boolean; port: number; ignoreBaseUrlOverride?: boolean; skipCheckpoint?: boolean; checkpointMode?: CheckpointMode; engine?: EngineId; modelPath?: string }) {
+    const isStrata = engineOf(opts.engine) === 'strata'
     if (runningProcesses.has(opts.id)) return { success: false, error: 'Already running' }
     // If base URL override is enabled, use the override port, ignoring
     // the template's original Server Port completely. A template with its
@@ -2906,7 +3054,7 @@ export function registerIpcHandlers(): void {
     // override (doing so would break the per-preset ignore flag). It only
     // ensures --ctx-size is present (0 = native) when the renderer didn't set
     // one (e.g. MoE Auto mode passes --fit and leaves ctx to llama-server).
-    {
+    if (!isStrata) {
       const hasFit = finalArgs.includes('--fit') || finalArgs.includes('-fit')
       if (!hasFit) {
         const idx = finalArgs.indexOf('--ctx-size')
@@ -2918,7 +3066,7 @@ export function registerIpcHandlers(): void {
     // be polled, regardless of whether the user has it in their own template
     // args. Doesn't change behavior other than exposing the /metrics
     // endpoint — safe to always add.
-    if (!finalArgs.includes('--metrics')) finalArgs.push('--metrics')
+    if (!isStrata && !finalArgs.includes('--metrics')) finalArgs.push('--metrics')
     // Force-enable --slot-save-path when checkpointing is active, the same
     // unconditional way as --metrics above, so the /slots save/restore
     // endpoints exist regardless of the template's own args. Skipped for
@@ -2930,7 +3078,7 @@ export function registerIpcHandlers(): void {
     // on the command line for THIS run, so it (not a fresh re-read of
     // settings later) is what Stop and the restore-on-ready poll must use.
     let kvCheckpointsEnabled = false
-    if (!opts.skipCheckpoint) {
+    if (!opts.skipCheckpoint && !isStrata) {
       const kvSettings = await loadSettings()
       kvCheckpointsEnabled = resolveCheckpointEnabled(!!kvSettings.kvCacheCheckpoints?.enabled, opts.checkpointMode)
       if (kvCheckpointsEnabled && !finalArgs.includes('--slot-save-path')) {
@@ -2978,7 +3126,9 @@ export function registerIpcHandlers(): void {
       // the user can see exactly what is being passed to llama.cpp.
       serverReadyFlags.delete(opts.id)
       modelLoadingFlags.delete(opts.id)
-      {
+      if (isStrata) {
+        emitAppLog(opts.id, opts.name, `Launching "${opts.name}" - engine=Strata - port=${finalPort}${overridePort !== null ? ' (override)' : ''}`)
+      } else {
         const ctxArgIdx = finalArgs.indexOf('--ctx-size')
         const ctxArgShortIdx = finalArgs.indexOf('-c')
         const ctxArgPos = ctxArgIdx !== -1 ? ctxArgIdx : ctxArgShortIdx
@@ -3004,67 +3154,119 @@ export function registerIpcHandlers(): void {
         }
         emitAppLog(opts.id, opts.name, parts.join(' · '))
       }
+      let strataSpawn: ReturnType<typeof buildStrataSpawn> | null = null
+      if (isStrata) {
+        const s3 = await loadSettings()
+        const strataSettings = s3.strata ?? { pullBeforeLaunch: true, parallelOverride: null, data: { ...DEFAULT_STRATA_DATA } }
+        // Update the clone first (independent of the tracker's auto-update).
+        // A failure never blocks the launch.
+        if (strataSettings.pullBeforeLaunch) {
+          emitAppLog(opts.id, opts.name, 'Updating Strata (git) ...')
+          if (isEngineRunningFrom(opts.backendPath)) {
+            // Files under a live server must not change.
+            emitAppLog(opts.id, opts.name, 'Update skipped (a Strata model is already running from this install)')
+          } else if (!(await gitAvailable())) {
+            emitAppLog(opts.id, opts.name, 'Warning: git was not found, launching the installed version')
+          } else {
+            const up = await updateGitEngine(opts.backendPath)
+            emitAppLog(opts.id, opts.name, up.error ? `Warning: update failed, launching the installed version: ${up.error.split('\n')[0]}`
+              : up.skipped ? `Update skipped (${up.skipped})` : up.updated ? 'Strata updated' : 'Strata is up to date')
+          }
+        }
+        // <engines folder>/<repo>/<clone> -> <engines folder>
+        const data = resolveStrataData(strataSettings.data, dirname(dirname(opts.backendPath)))
+        if (!finalArgs.includes('--data-dir')) finalArgs.push('--data-dir', data.dataDir)
+        strataSpawn = buildStrataSpawn(opts.backendPath, finalArgs, data.env)
+        if ('error' in strataSpawn) return { success: false, error: strataSpawn.error }
+      }
       // detached:true on POSIX so we get a new process group we can SIGKILL
       // wholesale (covers llama-server's child threads). On Windows we rely on
       // `taskkill /F /T` instead, so detached doesn't matter there.
-      const proc = spawn(exePath, finalArgs, { detached: process.platform !== 'win32', stdio: 'pipe', cwd: dirname(exePath), windowsHide: false })
-      // Stream server logs to all renderer windows for the Logs tab.
-      proc.stderr?.on('data', (d) => {
-        const line = d.toString()
-        console.error('[llama-server]', line)
-        BrowserWindow.getAllWindows().forEach(win => {
-          if (!win.isDestroyed()) win.webContents.send('server-log', { id: opts.id, name: opts.name, stream: 'stderr', line, ts: Date.now() })
-        })
-        // Surface important stderr events (errors/fatals) as
-        // highlighted app-level logs so they aren't lost in the raw stream.
-        try {
-          const lower = line.toLowerCase()
-          if (lower.includes('error') || lower.includes('fatal') || lower.includes('failed') || lower.includes('cannot') || lower.includes('abort')) {
-            const trimmed = line.replace(/\s+/g, ' ').trim().slice(0, 300)
-            if (trimmed) emitAppLog(opts.id, opts.name, `⚠ ${trimmed}`)
-          }
-        } catch {}
-      })
-      proc.stdout?.on('data', (d) => {
-        const line = d.toString()
-        console.log('[llama-server]', line)
-        BrowserWindow.getAllWindows().forEach(win => {
-          if (!win.isDestroyed()) win.webContents.send('server-log', { id: opts.id, name: opts.name, stream: 'stdout', line, ts: Date.now() })
-        })
-        // Detect lifecycle / generation / chat-request markers in
-        // the llama-server output and emit enriched app-level logs for them.
-        try {
-          const lower = line.toLowerCase()
-          // Model loaded / ready to serve.
-          if (!modelLoadingFlags.get(opts.id) && (lower.includes('model loaded') || lower.includes('llama_model_loader') || lower.includes('load_tensors'))) {
-            modelLoadingFlags.set(opts.id, true)
-            emitAppLog(opts.id, opts.name, 'Model loaded — preparing server...')
-          }
-          // HTTP server listening (ready to accept requests).
-          if (!serverReadyFlags.get(opts.id) && (lower.includes('server is listening') || lower.includes('http server listening') || lower.includes('listening on') || lower.includes('all slots are initialized') || lower.includes('main: server listening'))) {
+      const proc = strataSpawn && !('error' in strataSpawn)
+        ? spawn(strataSpawn.command, strataSpawn.args, strataSpawn.options)
+        : spawn(exePath, finalArgs, { detached: process.platform !== 'win32', stdio: 'pipe', cwd: dirname(exePath), windowsHide: false })
+      if (isStrata) {
+        // setup, the server and the engine's narration all arrive on these
+        // two pipes; whole lines go to the Logs view, one entry per line.
+        const emitLine = (stream: 'stdout' | 'stderr') => (text: string) => {
+          BrowserWindow.getAllWindows().forEach(win => {
+            if (!win.isDestroyed()) win.webContents.send('server-log', { id: opts.id, name: opts.name, stream, line: text, ts: Date.now() })
+          })
+          if (!serverReadyFlags.get(opts.id) && /^ready: https?:\/\//.test(text.trim())) {
             serverReadyFlags.set(opts.id, true)
-            emitAppLog(opts.id, opts.name, `✓ Server ready — listening on port ${finalPort}`)
+            emitAppLog(opts.id, opts.name, `Server ready - listening on port ${finalPort}`)
+            return
           }
-          // Chat completion request (user message hitting the API).
-          if (lower.includes('chat/completions') || lower.includes('/v1/chat/completions')) {
-            if (lower.includes('post') || lower.includes('request') || lower.includes(' 200 ')) {
-              emitAppLog(opts.id, opts.name, '💬 Chat completion request received (user message)')
+          const lower = text.toLowerCase()
+          if (lower.includes('traceback') || lower.includes('error') || lower.includes('failed') || lower.includes('setup stopped')) {
+            emitAppLog(opts.id, opts.name, `Warning: ${text.replace(/\s+/g, ' ').trim().slice(0, 300)}`)
+          }
+        }
+        const outAsm = new LineAssembler()
+        const errAsm = new LineAssembler()
+        proc.stdout?.on('data', (d) => outAsm.push(d).forEach(emitLine('stdout')))
+        proc.stderr?.on('data', (d) => errAsm.push(d).forEach(emitLine('stderr')))
+        proc.stdout?.on('end', () => outAsm.end().forEach(emitLine('stdout')))
+        proc.stderr?.on('end', () => errAsm.end().forEach(emitLine('stderr')))
+      } else {
+        // Stream server logs to all renderer windows for the Logs tab.
+        proc.stderr?.on('data', (d) => {
+          const line = d.toString()
+          console.error('[llama-server]', line)
+          BrowserWindow.getAllWindows().forEach(win => {
+            if (!win.isDestroyed()) win.webContents.send('server-log', { id: opts.id, name: opts.name, stream: 'stderr', line, ts: Date.now() })
+          })
+          // Surface important stderr events (errors/fatals) as
+          // highlighted app-level logs so they aren't lost in the raw stream.
+          try {
+            const lower = line.toLowerCase()
+            if (lower.includes('error') || lower.includes('fatal') || lower.includes('failed') || lower.includes('cannot') || lower.includes('abort')) {
+              const trimmed = line.replace(/\s+/g, ' ').trim().slice(0, 300)
+              if (trimmed) emitAppLog(opts.id, opts.name, `⚠ ${trimmed}`)
             }
-          }
-          // Generation completion — llama-server prints "print_timings:" after each
-          // generation with prompt/predicted token stats.
-          if (lower.includes('print_timings')) {
-            const m = line.match(/n_predict\s*=\s*(\d+)/i) || line.match(/predicted\s+(\d+)\s+tokens/i)
-            const n = m ? m[1] : ''
-            emitAppLog(opts.id, opts.name, n ? `✨ Generation completed — ${n} tokens predicted` : '✨ Generation completed')
-          }
-          // System prompt / slot events (indicates system message processing).
-          if (lower.includes('slot') && (lower.includes('system') || lower.includes('prompt processing'))) {
-            const trimmed = line.replace(/\s+/g, ' ').trim().slice(0, 160)
-            if (trimmed) emitAppLog(opts.id, opts.name, `🔧 ${trimmed}`)
-          }
-        } catch {}
-      })
+          } catch {}
+        })
+        proc.stdout?.on('data', (d) => {
+          const line = d.toString()
+          console.log('[llama-server]', line)
+          BrowserWindow.getAllWindows().forEach(win => {
+            if (!win.isDestroyed()) win.webContents.send('server-log', { id: opts.id, name: opts.name, stream: 'stdout', line, ts: Date.now() })
+          })
+          // Detect lifecycle / generation / chat-request markers in
+          // the llama-server output and emit enriched app-level logs for them.
+          try {
+            const lower = line.toLowerCase()
+            // Model loaded / ready to serve.
+            if (!modelLoadingFlags.get(opts.id) && (lower.includes('model loaded') || lower.includes('llama_model_loader') || lower.includes('load_tensors'))) {
+              modelLoadingFlags.set(opts.id, true)
+              emitAppLog(opts.id, opts.name, 'Model loaded — preparing server...')
+            }
+            // HTTP server listening (ready to accept requests).
+            if (!serverReadyFlags.get(opts.id) && (lower.includes('server is listening') || lower.includes('http server listening') || lower.includes('listening on') || lower.includes('all slots are initialized') || lower.includes('main: server listening'))) {
+              serverReadyFlags.set(opts.id, true)
+              emitAppLog(opts.id, opts.name, `Server ready - listening on port ${finalPort}`)
+            }
+            // Chat completion request (user message hitting the API).
+            if (lower.includes('chat/completions') || lower.includes('/v1/chat/completions')) {
+              if (lower.includes('post') || lower.includes('request') || lower.includes(' 200 ')) {
+                emitAppLog(opts.id, opts.name, '💬 Chat completion request received (user message)')
+              }
+            }
+            // Generation completion — llama-server prints "print_timings:" after each
+            // generation with prompt/predicted token stats.
+            if (lower.includes('print_timings')) {
+              const m = line.match(/n_predict\s*=\s*(\d+)/i) || line.match(/predicted\s+(\d+)\s+tokens/i)
+              const n = m ? m[1] : ''
+              emitAppLog(opts.id, opts.name, n ? `✨ Generation completed — ${n} tokens predicted` : '✨ Generation completed')
+            }
+            // System prompt / slot events (indicates system message processing).
+            if (lower.includes('slot') && (lower.includes('system') || lower.includes('prompt processing'))) {
+              const trimmed = line.replace(/\s+/g, ' ').trim().slice(0, 160)
+              if (trimmed) emitAppLog(opts.id, opts.name, `🔧 ${trimmed}`)
+            }
+          } catch {}
+        })
+      }
       proc.on('error', (err: any) => {
         let msg = String(err)
         if (err.code === 'UNKNOWN' && opts.backendPath.toLowerCase().includes('arm64') && process.arch !== 'arm64') {
@@ -3081,12 +3283,14 @@ export function registerIpcHandlers(): void {
       })
       runningProcesses.set(opts.id, {
         proc, port: finalPort,
-        modelPath: extractArgValue(finalArgs, '--model', '-m') || undefined,
+        modelPath: (isStrata ? opts.modelPath : extractArgValue(finalArgs, '--model', '-m')) || undefined,
         templateName: opts.name,
-        checkpointsActive: kvCheckpointsEnabled
+        checkpointsActive: kvCheckpointsEnabled,
+        engine: isStrata ? 'strata' : undefined,
+        cloneDir: isStrata ? opts.backendPath : undefined
       })
       // Begin polling this instance's /metrics endpoint.
-      startTracking(opts.id, finalPort, opts.name)
+      startTracking(opts.id, finalPort, opts.name, isStrata ? 'strata' : 'llama.cpp')
       // Kick off the KV cache checkpoint restore (if one applies) in the
       // background -- it waits on serverReadyFlags itself, so it never
       // delays this function's own return.
@@ -3130,15 +3334,28 @@ export function registerIpcHandlers(): void {
         // chat window badge. A value of 0 means "native" — pass undefined so
         // the badge isn't shown with a misleading "0"; the built-in web UI
         // reads the real n_ctx from the server's /props endpoint.
-        const ctxIdx2 = finalArgs.indexOf('--ctx-size')
-        const shortCtxIdx2 = finalArgs.indexOf('-c')
+        const ctxIdx2 = finalArgs.indexOf(isStrata ? '--context' : '--ctx-size')
+        const shortCtxIdx2 = isStrata ? -1 : finalArgs.indexOf('-c')
         const cidx = ctxIdx2 !== -1 ? ctxIdx2 : shortCtxIdx2
         let ctxSize: number | undefined
         if (cidx !== -1 && cidx + 1 < finalArgs.length) {
           const v = parseInt(finalArgs[cidx + 1], 10)
           if (!isNaN(v) && v > 0) ctxSize = v
         }
-        setTimeout(() => {
+        if (isStrata) {
+          // Strata only listens once the model is loaded, which takes
+          // minutes (and far longer the first time, while it prepares the
+          // model), so wait for the ready line instead of a fixed delay.
+          const startedAt = Date.now()
+          const waitForReady = setInterval(() => {
+            if (!runningProcesses.has(opts.id) || runningProcesses.get(opts.id)!.proc !== proc || Date.now() - startedAt > 60 * 60 * 1000) {
+              clearInterval(waitForReady)
+            } else if (serverReadyFlags.get(opts.id)) {
+              clearInterval(waitForReady)
+              openChatWindow(finalPort, opts.name, ctxSize)
+            }
+          }, 1000)
+        } else setTimeout(() => {
           if (runningProcesses.has(opts.id)) {
             openChatWindow(finalPort, opts.name, ctxSize)
           }
@@ -3359,7 +3576,7 @@ export function registerIpcHandlers(): void {
     // Kill the whole process tree (children included) and wait for the process
     // to actually exit. This fixes the Stop→Start race where the port was still
     // bound when the user clicked Start again right after Stop.
-    await killProcessTree(proc)
+    await killProcessTree(proc, entry.engine === 'strata' ? { graceMs: 20000 } : undefined)
     // Now poll the port until the OS releases the listening socket. This is the
     // critical step: without it, a rapid restart reports "port already in use".
     await waitForPortFree(port, 8000, 100)
@@ -3467,6 +3684,48 @@ export function registerIpcHandlers(): void {
     processDownloadQueue()
   }
 
+  // ----- Git-installed engines (Strata) -----
+  // The clone of a git engine: the first folder under <root>/<folderName>/
+  // that has the engine's marker files.
+  async function findGitEngineClone(tracked: TrackedBackend): Promise<string | null> {
+    for (const root of await backendRoots()) {
+      const forkDir = join(root.dir, tracked.folderName)
+      let subs: import('fs').Dirent[]
+      try { subs = readdirSync(forkDir, { withFileTypes: true }) } catch { continue }
+      for (const d of subs) {
+        if (d.isDirectory() && looksLikeStrataClone(join(forkDir, d.name))) return join(forkDir, d.name)
+      }
+    }
+    return null
+  }
+
+  function isEngineRunningFrom(cloneDir: string): boolean {
+    for (const r of runningProcesses.values()) if (r.cloneDir === cloneDir) return true
+    return false
+  }
+
+  // Update state by release tag: an update exists when the newest tag on the
+  // remote is newer than the tag the clone is based on.
+  async function gitEngineStatus(tracked: TrackedBackend): Promise<GitEngineStatus> {
+    const clone = await findGitEngineClone(tracked)
+    const status: GitEngineStatus = {
+      trackedId: tracked.id, folderName: tracked.folderName, installed: !!clone,
+      localVersion: null, latestTag: null, updateAvailable: false
+    }
+    try {
+      const url = githubCloneUrl(tracked.repo)
+      if (url) status.latestTag = await latestRemoteTag(url)
+    } catch (err: any) {
+      status.error = String(err?.message || err)
+    }
+    if (clone) {
+      status.localVersion = await gitVersionLabel(clone)
+      const baseTag = baseTagOf(status.localVersion)
+      status.updateAvailable = !!(status.latestTag && baseTag && compareTags(status.latestTag, baseTag) > 0)
+    }
+    return status
+  }
+
   async function fetchTrackedRelease(tracked: TrackedBackend): Promise<TrackedBackendRelease> {
     const base: TrackedBackendRelease = {
       trackedId: tracked.id,
@@ -3474,32 +3733,23 @@ export function registerIpcHandlers(): void {
       tagName: '', name: tracked.name, url: '', publishedAt: '',
       isNewer: undefined, assets: []
     }
+    if (tracked.kind === 'git') {
+      const git = await gitEngineStatus(tracked)
+      return {
+        ...base,
+        tagName: git.latestTag || '',
+        url: `https://github.com/${tracked.repo}/releases`,
+        isNewer: git.installed ? git.updateAvailable : undefined,
+        // Callers test `'error' in result`, so the key must be absent (not
+        // undefined) on success.
+        ...(git.error && !git.latestTag ? { error: git.error } : {}),
+        git
+      }
+    }
     try {
-      const isMac = process.platform === 'darwin'
-      const isLinux = process.platform === 'linux'
       const arch = process.arch
       function platformAssetsFor(rel: any): any[] {
-        return (rel.assets || []).filter((a: any) => {
-          const n = a.name.toLowerCase()
-          if (n.startsWith('cudart-')) return false
-          if (isMac) {
-            if (!n.endsWith('.tar.gz') || !n.includes('macos')) return false
-            if (arch === 'arm64' && !n.includes('arm64')) return false
-            if (arch === 'x64' && !n.includes('x64')) return false
-            return true
-          }
-          if (isLinux) {
-            if (!n.endsWith('.tar.gz') || !n.includes('ubuntu')) return false
-            if (arch === 'arm64' && !n.includes('arm64')) return false
-            if (arch === 'x64' && n.includes('arm64')) return false
-            return true
-          }
-          if (!n.endsWith('.zip')) return false
-          if (!(n.includes('win') || n.includes('windows'))) return false
-          if (arch === 'x64' && n.includes('arm64')) return false
-          if (arch === 'arm64' && n.includes('x64')) return false
-          return true
-        })
+        return (rel.assets || []).filter((a: any) => assetMatchesHost(a.name, process.platform, arch))
       }
       const releases = await fetchJson(`https://api.github.com/repos/${tracked.repo}/releases?per_page=20`) as any
       if (!Array.isArray(releases) || releases.length === 0) {
@@ -3521,7 +3771,7 @@ export function registerIpcHandlers(): void {
           if (!existsSync(typeDir)) continue
           try {
             for (const v of readdirSync(typeDir, { withFileTypes: true })) {
-              if (v.isDirectory() && !v.name.startsWith('.staging-')) versions.push(v.name)
+              if (v.isDirectory() && !v.name.startsWith('.staging-') && platformOfBuildDir(join(typeDir, v.name)) === NATIVE_PLATFORM) versions.push(v.name)
             }
           } catch { /* ignore */ }
         }
@@ -3544,6 +3794,25 @@ export function registerIpcHandlers(): void {
       const isNewer = assets.some(a => a.status === 'outdated')
         ? true
         : assets.some(a => a.status === 'installed') ? false : undefined
+      // Builds for another OS sitting in the same folders: listed so they can
+      // be seen and removed, never counted as installed for this machine.
+      const otherPlatform: InstalledOtherPlatform[] = []
+      for (const root of roots) {
+        const forkDir = join(root.dir, tracked.folderName)
+        let typeEntries: import('fs').Dirent[]
+        try { typeEntries = readdirSync(forkDir, { withFileTypes: true }) } catch { continue }
+        for (const t of typeEntries) {
+          const typeDir = join(forkDir, t.name)
+          if (!t.isDirectory() || !existsSync(join(typeDir, BACKEND_TYPE_MARKER))) continue
+          let versionEntries: import('fs').Dirent[]
+          try { versionEntries = readdirSync(typeDir, { withFileTypes: true }) } catch { continue }
+          for (const v of versionEntries) {
+            if (!v.isDirectory() || v.name.startsWith('.staging-')) continue
+            const platform = platformOfBuildDir(join(typeDir, v.name))
+            if (platform !== NATIVE_PLATFORM) otherPlatform.push({ type: t.name, version: v.name, platform })
+          }
+        }
+      }
       return {
         ...base,
         tagName: release.tag_name,
@@ -3551,7 +3820,8 @@ export function registerIpcHandlers(): void {
         url: release.html_url,
         publishedAt: release.published_at,
         isNewer,
-        assets
+        assets,
+        otherPlatform
       }
     } catch (err) {
       return { ...base, error: String(err) }
@@ -3625,6 +3895,81 @@ export function registerIpcHandlers(): void {
     const t = s.trackedBackends.find(x => x.id === trackedId)
     if (!t) return { error: 'Not tracked' }
     return fetchTrackedRelease(t)
+  })
+
+  // Brings every installed tracked engine up to its latest release: release
+  // engines re-download their outdated variants (never a variant that is not
+  // installed), git engines are updated in place unless a model is running
+  // from them. Shared by the Settings button and the auto-update switch.
+  async function updateTrackedEnginesImpl(sender: Electron.WebContents | null): Promise<{ updated: string[]; errors: string[] }> {
+    const s = await loadSettings()
+    const updated: string[] = []
+    const errors: string[] = []
+    for (const t of s.trackedBackends) {
+      if (t.kind === 'git') {
+        const clone = await findGitEngineClone(t)
+        if (!clone || isEngineRunningFrom(clone)) continue
+        const st = await gitEngineStatus(t)
+        if (!st.updateAvailable) continue
+        const r = await updateGitEngine(clone)
+        if (r.error) errors.push(`${t.name}: ${r.error}`)
+        else if (r.updated) updated.push(t.name)
+        continue
+      }
+      if (!sender || sender.isDestroyed()) continue
+      const rel = await fetchTrackedRelease(t)
+      for (const asset of rel.assets || []) {
+        if (asset.status !== 'outdated') continue
+        const res = await new Promise<{ success: boolean; error?: string }>(resolve => {
+          downloadQueue.push({
+            opts: {
+              url: asset.downloadUrl,
+              version: rel.tagName || asset.name.replace(/\.(zip|tar\.gz)$/i, ''),
+              assetName: asset.name, backendKey: t.folderName, trackedId: t.id
+            },
+            sender, resolve
+          })
+          broadcastQueuePositions()
+          processDownloadQueue()
+        })
+        if (res.success) updated.push(`${t.name} (${asset.type || asset.name})`)
+        else errors.push(`${t.name}: ${res.error}`)
+      }
+    }
+    BrowserWindow.getAllWindows().forEach(win => {
+      if (!win.isDestroyed()) win.webContents.send('backends-changed', { deleted: [] })
+    })
+    return { updated, errors }
+  }
+  ipcMain.handle('update-tracked-engines', (e) => updateTrackedEnginesImpl(e.sender))
+
+  ipcMain.handle('install-git-engine', async (_e, trackedId: string) => {
+    const s = await loadSettings()
+    const t = s.trackedBackends.find(x => x.id === trackedId)
+    if (!t || t.kind !== 'git') return { success: false, error: 'Not a git-installed engine' }
+    if (!(await gitAvailable())) return { success: false, error: 'git was not found. Install git and make sure it is on PATH.' }
+    if (await findGitEngineClone(t)) return { success: false, error: 'Already installed' }
+    const dest = join(await resolveMainBackendFolder(), t.folderName, t.repo.split('/')[1])
+    mkdirSync(dirname(dest), { recursive: true })
+    const r = await cloneGitEngine(t.repo, dest, t.branch)
+    BrowserWindow.getAllWindows().forEach(win => {
+      if (!win.isDestroyed()) win.webContents.send('backends-changed', { deleted: [] })
+    })
+    return r.ok ? { success: true, path: dest } : { success: false, error: r.error }
+  })
+
+  ipcMain.handle('update-git-engine', async (_e, trackedId: string) => {
+    const s = await loadSettings()
+    const t = s.trackedBackends.find(x => x.id === trackedId)
+    if (!t || t.kind !== 'git') return { success: false, error: 'Not a git-installed engine' }
+    const clone = await findGitEngineClone(t)
+    if (!clone) return { success: false, error: 'Not installed' }
+    if (isEngineRunningFrom(clone)) return { success: false, error: 'A model is running from this install. Stop it first.' }
+    const r = await updateGitEngine(clone)
+    BrowserWindow.getAllWindows().forEach(win => {
+      if (!win.isDestroyed()) win.webContents.send('backends-changed', { deleted: [] })
+    })
+    return r.error ? { success: false, error: r.error } : { success: true, updated: r.updated, skipped: r.skipped }
   })
 
   ipcMain.handle('open-folder', (_e, folderPath: string) => shell.openPath(folderPath))
@@ -3819,7 +4164,7 @@ export function registerIpcHandlers(): void {
   // key_length, value_length, sliding_window, MLA kv_lora_rank/qk_rope_head_dim,
   // file_type). Uses a typed reader that walks the metadata KV array and tensor
   // info array.
-  async function getGgufMetadataImpl(modelPath: string) {
+  async function extractGgufMetadataImpl(modelPath: string) {
     // Check the persistent cache first — metadata is stable for a given
     // file (it's read from the GGUF header), so caching avoids re-parsing on
     // every view. The cache is pruned in `list-models` when files disappear.
@@ -4384,6 +4729,73 @@ export function registerIpcHandlers(): void {
       return { ...result, error: String(err) }
     }
   }
+  // ----- Strata model validation -----
+  // The fingerprint table of the installed Strata when there is one (it
+  // tracks which files that version runs), else the snapshot we ship.
+  let strataTableCache: { key: string; table: StrataTable; hash: string } | null = null
+  async function currentStrataTable(): Promise<{ table: StrataTable; hash: string }> {
+    let file: string | null = null
+    const s = await loadSettings()
+    for (const t of s.trackedBackends) {
+      if (t.kind !== 'git') continue
+      const clone = await findGitEngineClone(t)
+      const candidate = clone ? join(clone, 'data', 'gguf_fingerprints.json') : null
+      if (candidate && existsSync(candidate)) { file = candidate; break }
+    }
+    if (!file) {
+      file = app.isPackaged
+        ? join(process.resourcesPath, 'resources', 'strata-fingerprints.json')
+        : join(process.cwd(), 'resources', 'strata-fingerprints.json')
+    }
+    const key = `${file}|${statSync(file).mtimeMs}`
+    if (strataTableCache?.key === key) return strataTableCache
+    const table = JSON.parse(readFileSync(file, 'utf-8')) as StrataTable
+    strataTableCache = { key, table, hash: strataTableHash(table) }
+    return strataTableCache
+  }
+
+  // Adds (or refreshes) meta.strata for a model whose architecture Strata
+  // can run. Cheap for everything else: the architecture is already cached.
+  async function withStrataInfo(modelPath: string, meta: any): Promise<any> {
+    if (!modelPath || !meta || meta.error || meta.architecture !== STRATA_ARCH) return meta
+    try {
+      const { table, hash } = await currentStrataTable()
+      if (meta.strata && meta.strata.tableHash === hash) return meta
+      const fp = await fingerprintGguf(modelPath)
+      const info: StrataModelInfo = fp
+        ? { ...strataVerdict(fp, table), tableHash: hash }
+        : { kind: 'no', detail: 'Some shards of this model are missing next to this file.', tableHash: hash }
+      meta.strata = info
+      metadataCache[modelPath] = meta
+      saveMetadataCache()
+      BrowserWindow.getAllWindows().forEach(win => {
+        if (!win.isDestroyed()) win.webContents.send('gguf-metadata-updated', { modelPath, meta })
+      })
+    } catch (err) {
+      console.error('[strata] could not fingerprint', modelPath, err)
+    }
+    return meta
+  }
+
+  async function getGgufMetadataImpl(modelPath: string) {
+    return withStrataInfo(modelPath, await extractGgufMetadataImpl(modelPath))
+  }
+
+  // Brings every cached Strata-capable model up to date with the current
+  // table (entries cached before this existed, or after Strata updated it).
+  let strataRefreshRunning = false
+  async function refreshStrataVerdicts(): Promise<void> {
+    if (strataRefreshRunning) return
+    strataRefreshRunning = true
+    try {
+      for (const path of Object.keys(metadataCache)) {
+        if (metadataCache[path]?.architecture === STRATA_ARCH && existsSync(path)) await withStrataInfo(path, metadataCache[path])
+      }
+    } finally {
+      strataRefreshRunning = false
+    }
+  }
+
   ipcMain.handle('get-gguf-metadata', async (_e, modelPath: string) => getGgufMetadataImpl(modelPath))
 
   // ----- VRAM telemetry -----
@@ -4688,7 +5100,7 @@ export function registerIpcHandlers(): void {
       // Clamp 0-100, and snap to a whole-core-equivalent isn't possible here
       // (this handler doesn't know physicalCores) — the renderer already
       // snaps before calling this, so just clamp defensively.
-      cpuThreadsOverridePercent: Math.max(0, Math.min(100, Number(defaults.cpuThreadsOverridePercent) || 100)),
+      cpuThreadsOverridePercent: Math.max(0, Math.min(100, Number(defaults.cpuThreadsOverridePercent) || 50)),
       parallelOverrideEnabled: !!defaults.parallelOverrideEnabled,
       parallelInferenceMode: (defaults.parallelInferenceMode === 'separate') ? 'separate' : 'unified',
       parallelOverrideValue: Math.max(1, Math.min(256, Number(defaults.parallelOverrideValue) || 4)),
@@ -4716,6 +5128,55 @@ export function registerIpcHandlers(): void {
   ipcMain.handle('set-autostart-main-templates', async (_e, enabled: boolean) => {
     const s = await loadSettings()
     s.autostartMainTemplates = !!enabled
+    await saveSettings(s)
+    return { success: true }
+  })
+
+  // ----- Engine settings (tracker auto-update, Strata) -----
+  ipcMain.handle('get-engine-settings', async () => {
+    const s = await loadSettings()
+    const strata = s.strata ?? { pullBeforeLaunch: true, parallelOverride: null, data: { ...DEFAULT_STRATA_DATA } }
+    const resolved = resolveStrataData(strata.data, await resolveMainBackendFolder())
+    return {
+      autoUpdateTrackedEngines: !!s.autoUpdateTrackedEngines,
+      strata,
+      // What Strata will actually use, and what its own settings remember
+      // (an existing install may point somewhere else).
+      strataDataDir: resolved.dataDir,
+      strataRememberedDataDir: readRememberedDataDir(),
+      gitAvailable: await gitAvailable()
+    }
+  })
+  ipcMain.handle('set-auto-update-tracked-engines', async (_e, enabled: boolean) => {
+    const s = await loadSettings()
+    s.autoUpdateTrackedEngines = !!enabled
+    await saveSettings(s)
+    return { success: true }
+  })
+  ipcMain.handle('set-strata-settings', async (_e, patch: Partial<StrataSettings> & { data?: Partial<StrataSettings['data']> }) => {
+    const s = await loadSettings()
+    const cur = s.strata ?? { pullBeforeLaunch: true, parallelOverride: null, data: { ...DEFAULT_STRATA_DATA } }
+    s.strata = migrateStrataSettings({
+      pullBeforeLaunch: patch?.pullBeforeLaunch ?? cur.pullBeforeLaunch,
+      parallelOverride: patch && 'parallelOverride' in patch ? patch.parallelOverride : cur.parallelOverride,
+      data: { ...cur.data, ...(patch?.data || {}) }
+    })
+    await saveSettings(s)
+    return { success: true }
+  })
+  ipcMain.handle('pick-strata-data-folder', async () => {
+    const r = await dialog.showOpenDialog({ title: 'Choose the Strata data folder', properties: ['openDirectory', 'createDirectory'] })
+    return r.canceled || !r.filePaths.length ? null : r.filePaths[0]
+  })
+  ipcMain.handle('get-global-engine-backends', async () => (await loadSettings()).globalEngineBackends || {})
+  ipcMain.handle('set-global-engine-backend', async (_e, engine: string, backendKey: string | null) => {
+    const id = engineOf(engine)
+    if (id === 'llama.cpp') return { success: false, error: 'llama.cpp uses the global backend setting' }
+    const s = await loadSettings()
+    const map = { ...(s.globalEngineBackends || {}) }
+    if (backendKey) map[id] = { backendKey }
+    else delete map[id]
+    s.globalEngineBackends = map
     await saveSettings(s)
     return { success: true }
   })
@@ -4851,6 +5312,12 @@ export function registerIpcHandlers(): void {
           win.webContents.send('backends-checked-silent', { results })
         }
       })
+      // Optional: install what the check just found. Release downloads
+      // report progress to the first window, which exists by now.
+      if (s.autoUpdateTrackedEngines) {
+        const win = BrowserWindow.getAllWindows().find(w => !w.isDestroyed())
+        await updateTrackedEnginesImpl(win ? win.webContents : null)
+      }
     } catch {}
   })
 
@@ -4932,7 +5399,7 @@ function getHardcodedPresets(): any[] {
       name: 'LM Studio',
       isDefault: true,
       isStarred: false,
-      values: { topK: 40, topP: 0.95, minP: 0.05, repeatPenalty: 1.1, presencePenalty: 0.0 }
+      values: { temperature: 0.8, topK: 40, topP: 0.95, minP: 0.05, repeatPenalty: 1.1, presencePenalty: 0.0 }
     },
     {
       id: 'qwen-thinking',

@@ -32,7 +32,7 @@ function zodShapeFor(params: { name: string; type: string; required: boolean; de
     let field: z.ZodTypeAny
     if (p.type.includes('[]')) field = z.array(z.any()).describe(p.description)
     else if (p.type === 'number') field = z.number().describe(p.description)
-    else if (p.type === 'object') field = z.record(z.any()).describe(p.description)
+    else if (p.type === 'object') field = z.record(z.string(), z.any()).describe(p.description)
     else field = z.union([z.string(), z.number()]).describe(p.description)
     shape[p.name] = p.required ? field : field.optional()
   }

@@ -4,6 +4,10 @@ import { Play, Square, Settings, ChevronDown, MoreVertical, Copy, Trash, Upload,
 import type { CardState, Template, CheckpointMode } from '../../../shared/types'
 import { applyMmprojOffloadFlag } from '../../../shared/mmprojOffload'
 import CmdParamsEditor from './CmdParamsEditor'
+import EngineParamsEditor from './EngineParamsEditor'
+import { ENGINES, engineOf } from '../../../shared/engines'
+import { buildStrataArgv, strataGgufDir } from '../../../shared/strata'
+import { resolveEngineBackend } from '../utils/engineBackends'
 import { effectiveTemplatePort, starColorForPort } from '../utils/templatePort'
 interface Props {
   card: CardState
@@ -32,9 +36,16 @@ export default function ModelCard({ card, dragHandleProps }: Props) {
   //   3. OFF → use the preset's own --ctx-size value (if set and > 0).
   //   4. Otherwise fall back to the model's native context_length from the
   //      GGUF metadata, then 32768.
+  const cardEngine = engineOf(card.template)
   const ignoreCtxOverride = card.template.args?.['__ignoreCtxOverride'] === true
   const autoCtxFill = (card.template.args?.['__autoCtxFill'] as 'off' | 'auto') || 'off'
   const effectiveCtx = useMemo(() => {
+    // Other engines carry their own context flag, and 0 means the engine
+    // picks (no badge). None of the llama.cpp overrides below apply.
+    if (cardEngine !== 'llama.cpp') {
+      const own = Number(card.template.args?.['--context'])
+      return own > 0 ? own : 0
+    }
     const presetCtx = card.template.args?.['--ctx-size']
     const presetVal = presetCtx !== undefined && presetCtx !== '' && presetCtx !== null ? Number(presetCtx) : 0
     const meta = ggufMetadata[card.template.modelPath || '']
@@ -57,10 +68,10 @@ export default function ModelCard({ card, dragHandleProps }: Props) {
       base = Math.max(base, minCtx)
     }
     return base
-  }, [modelDefaults, card.template.args, card.template.modelPath, ggufMetadata, ignoreCtxOverride])
+  }, [modelDefaults, card.template.args, card.template.modelPath, ggufMetadata, ignoreCtxOverride, cardEngine])
   // "from override" = the value comes from the global override (blue badge).
   // When the per-preset Ignore-Override is ON, the badge is neutral (preset).
-  const ctxFromOverride = !ignoreCtxOverride && !!modelDefaults?.autoFitEnabled
+  const ctxFromOverride = cardEngine === 'llama.cpp' && !ignoreCtxOverride && !!modelDefaults?.autoFitEnabled
   // When both Ignore-Override + AutoFill (Maximum) are ON, the
   // hint changes to "*Auto/Max Context Fill".
   const bothAutoFillOn = ignoreCtxOverride && autoCtxFill !== 'off'
@@ -111,6 +122,40 @@ export default function ModelCard({ card, dragHandleProps }: Props) {
       const res = await window.api.stopModel(card.template.id)
       if (res.success) setCardStatus(card.template.id, 'idle')
       else { setCardStatus(card.template.id, 'running'); alert(`Failed to stop: ${res.error}`) }
+      return
+    }
+    if (cardEngine !== 'llama.cpp') {
+      const build = resolveEngineBackend(cardEngine, { backendKey: card.template.backendKey }, backends, activeBackend, useStore.getState().engineGlobals)
+      if (!build || !build.exe) {
+        alert(`${ENGINES[cardEngine].label} is not installed. Install it from Settings > Engine tracker.`)
+        return
+      }
+      const modelPath = card.template.modelPath
+      if (!modelPath) { alert('This Template has no model file selected.'); return }
+      const meta = ggufMetadata[modelPath]
+      // The Overrides page can force one parallel value on every Strata
+      // Template, like the llama.cpp parallel override does for its own.
+      const forcedParallel = (await window.api.getEngineSettings().catch(() => null))?.strata.parallelOverride
+      const built = buildStrataArgv({
+        ggufDir: strataGgufDir(modelPath), family: meta?.strata?.family, model: meta?.strata?.model,
+        port: card.template.serverPort || 8080,
+        args: forcedParallel ? { ...card.template.args, '--parallel': forcedParallel } : card.template.args
+      })
+      if ('error' in built) { alert(built.error); return }
+      const engineRes = await window.api.runModel({
+        id: card.template.id,
+        name: card.template.name,
+        backendPath: build.path,
+        exe: build.exe,
+        args: built.argv,
+        openBrowser: useStore.getState().modelDefaults?.autoOpenChatUI === true,
+        port: card.template.serverPort || 8080,
+        ignoreBaseUrlOverride: card.template.args?.['__ignoreBaseUrlOverride'] === true,
+        engine: cardEngine,
+        modelPath
+      })
+      if (engineRes.success) setCardStatus(card.template.id, 'running', engineRes.pid, engineRes.port)
+      else { alert(`Failed to run: ${engineRes.error}`); setCardStatus(card.template.id, 'error') }
       return
     }
     // backendVersion (the version subfolder name) is only unique within a
@@ -324,21 +369,23 @@ export default function ModelCard({ card, dragHandleProps }: Props) {
                   blue and matches the Model Defaults value; otherwise it reflects
                   the preset's --ctx-size. Always visible so the user can verify
                   the value before/while running. */}
-              <span
+              {(cardEngine === 'llama.cpp' || effectiveCtx > 0) && <span
                 className={`ctx-badge ${ctxFromOverride ? 'ctx-badge-override' : ''} ${isRunning ? 'ctx-badge-live' : ''}`}
                 title={
                   ctxFromOverride
                     ? `Context: ${effectiveCtx.toLocaleString()} tokens — from Minimum Context Length Override (Model Defaults). Passed to llama.cpp, /props and the chat window.`
-                    : `Context: ${effectiveCtx.toLocaleString()} tokens — from this preset's --ctx-size. Passed to llama.cpp, /props and the chat window.`
+                    : cardEngine === 'llama.cpp'
+                      ? `Context: ${effectiveCtx.toLocaleString()} tokens - from this preset's --ctx-size. Passed to llama.cpp, /props and the chat window.`
+                      : `Context: ${effectiveCtx.toLocaleString()} tokens - from this Template's --context. Passed to ${ENGINES[cardEngine].label} and the chat window.`
                 }
               >
                 <Gauge size={11} />
                 ctx {effectiveCtx.toLocaleString()}
-              </span>
+              </span>}
               {/* Yellow hint when Ignore Context Length Override is ON. When
                   AutoFill is also ON, the hint shows "Auto Context Fill" with
                   a two-row tooltip. */}
-              {bothAutoFillOn ? (
+              {cardEngine !== 'llama.cpp' ? null : bothAutoFillOn ? (
                 <span
                   className="ctx-override-hint"
                   title={`Ignore Context Length Override in preset settings is turned on\nUse Automatic Context Fill is set to Auto`}
@@ -432,7 +479,7 @@ export default function ModelCard({ card, dragHandleProps }: Props) {
       </div>
       <div className={`card-expanded ${isExpanded ? 'open' : ''}`}>
         <div className="expanded-inner">
-          <CmdParamsEditor templateId={card.template.id} args={card.template.args} />
+          {engineOf(card.template) === 'llama.cpp' ? <CmdParamsEditor templateId={card.template.id} args={card.template.args} /> : <EngineParamsEditor engine={engineOf(card.template)} templateId={card.template.id} args={card.template.args} />}
         </div>
       </div>
     </div>

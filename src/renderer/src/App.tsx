@@ -18,6 +18,7 @@ import MetadataExtractionToast from './components/MetadataExtractionToast'
 import { phrases } from './utils/phrases'
 import { useTheme } from './hooks/useTheme'
 import type { Template } from '../../shared/types'
+import { engineOf } from '../../shared/engines'
 
 export default function App() {
   const searchParams = new URLSearchParams(window.location.search)
@@ -44,7 +45,7 @@ export default function App() {
 
   const {
     view, showCreateModal,
-    setBackends, setModels, switchBackend, setCommandsSchema,
+    setBackends, setEngineGlobals, setModels, switchBackend, setCommandsSchema,
     setCards, setPaths, setReleaseInfo, setCheckingUpdate,
     upsertModelDownload, removeModelDownload,
     setExternalModelFolders, setExternalBackendFolders,
@@ -71,25 +72,11 @@ export default function App() {
         setBackends(backendsData)
         setModels(modelsData)
         // Bulk-load the GGUF metadata cache so metadata is instantly
-        // available for every detected model (no re-extraction on view).
+        // available for every detected model. Models missing from it are
+        // extracted by the main process as part of listModels.
         try {
           const cache = await window.api?.getMetadataCache?.()
           if (cache && typeof cache === 'object') setGgufMetadataBulk(cache)
-        } catch {}
-        // Trigger background extraction for any detected model that
-        // isn't yet in the cache. The main process caches + broadcasts the
-        // result; we show a "extracting…" notification meanwhile.
-        try {
-          const allPaths: string[] = []
-          for (const g of modelsData) for (const m of g.models) allPaths.push(m.path)
-          const cached = useStore.getState().ggufMetadata
-          for (const p of allPaths) {
-            if (!cached[p]) {
-              // Fire-and-forget — the onMetadataExtracting listener shows the
-              // notification; onGgufMetadataUpdated populates the store.
-              window.api?.getGgufMetadata?.(p).catch(() => {})
-            }
-          }
         } catch {}
         setExternalModelFolders(extModelFolders)
         setExternalBackendFolders(extBackendFolders)
@@ -103,8 +90,12 @@ export default function App() {
           const mb = await window.api.getMainBackendFolder()
           setMainBackendFolder(mb.isDefault ? null : mb.folder)
         } catch {}
-        if (backendsData.length > 0) {
-          let initialBackend = backendsData[0]
+        try { setEngineGlobals(await window.api.getGlobalEngineBackends()) } catch {}
+        // Other engines are installed alongside llama.cpp builds, but the
+        // sidebar's active backend (and the schema it drives) is llama.cpp's.
+        const llamaBackends = backendsData.filter(b => engineOf(b) === 'llama.cpp')
+        if (llamaBackends.length > 0) {
+          let initialBackend = llamaBackends[0]
           try {
             const persisted = await window.api.getGlobalBackend()
             if (persisted) {
@@ -114,7 +105,7 @@ export default function App() {
               // builds of "b10269-1.6.0"), so without also matching
               // backendType this could silently restore the wrong variant
               // whenever it happened to sort earlier in the list.
-              const match = backendsData.find(b =>
+              const match = llamaBackends.find(b =>
                 b.backendKey === persisted.backendKey &&
                 b.name === persisted.backendVersion &&
                 (b.backendType ?? null) === (persisted.backendType ?? null)
@@ -240,9 +231,24 @@ export default function App() {
     // losing every log line that arrived while the user was on another tab).
     // appendLog writes into the global store, so logs now persist for the
     // life of the app regardless of which view is active.
+    //
+    // Every line is its own IPC message, and an engine build can print
+    // hundreds in a burst. Applying each as a separate store update re-renders
+    // every store subscriber and the whole Logs list per line, so the view
+    // falls far behind the engine. Collect what arrives and apply it as one
+    // update every 50ms: nothing is dropped or held back beyond that.
     try {
+      let pendingLogs: any[] = []
+      let flushTimer: ReturnType<typeof setTimeout> | null = null
+      const flushLogs = () => {
+        flushTimer = null
+        const batch = pendingLogs
+        pendingLogs = []
+        useStore.getState().appendLogs(batch)
+      }
       window.api?.onServerLog?.((data) => {
-        useStore.getState().appendLog(data as any)
+        pendingLogs.push(data)
+        if (!flushTimer) flushTimer = setTimeout(flushLogs, 50)
       })
     } catch {}
 

@@ -7,12 +7,14 @@
 // the app goes through the ControlDeps object injected via initControlLayer,
 // mirroring the dependency-injection pattern perfMonitor.ts already uses for
 // startTracking/stopTracking.
-import { buildQuickEngineBaseline, SAMPLING_KEYS, seedSamplingArgsFromPreset } from '../shared/presetBaselines'
+import { buildQuickEngineBaseline, SAMPLING_KEYS, SAMPLING_PRESET_MARKER, seedSamplingArgsFromPreset } from '../shared/presetBaselines'
 import { COMMON_PARAM_FLAGS } from '../shared/commonParams'
 import { applyNgramModifierToggle, getNgramModifierState, NGRAM_MAP_K4V_FLAGS, NGRAM_MOD_FLAGS } from '../shared/specToggles'
 import type { Template, CheckpointMode } from '../shared/types'
 import { applyMmprojOffloadFlag, MMPROJ_OFFLOAD_MODE_KEY, getMmprojOffloadMode, resolveMmprojOffloadToRam } from '../shared/mmprojOffload'
 import { applySpecDraftKvDefaults } from '../shared/specDraftKv'
+import { engineOf, ENGINES, type EngineId } from '../shared/engines'
+import { buildStrataArgv, buildStrataQuickBaseline, strataGgufDir } from '../shared/strata'
 
 // Speculative-decoding tier table — mirrors src/main/ipc.ts's own
 // SPEC_TIER_DEFS/classifySidecarFilename (and CmdParamsEditor.tsx's
@@ -52,7 +54,7 @@ export interface ControlDeps {
   // that). Used by info-models so listing models stays cheap.
   getCachedMetadata: (modelPath: string) => any | null
   getCommands: (backendKey: string) => Promise<any>
-  runModel: (opts: { id: string; name: string; backendPath: string; exe: string; args: string[]; openBrowser: boolean; port: number; ignoreBaseUrlOverride?: boolean; skipCheckpoint?: boolean; checkpointMode?: CheckpointMode }) => Promise<{ success: boolean; pid?: number; error?: string; port?: number }>
+  runModel: (opts: { id: string; name: string; backendPath: string; exe: string; args: string[]; openBrowser: boolean; port: number; ignoreBaseUrlOverride?: boolean; skipCheckpoint?: boolean; checkpointMode?: CheckpointMode; engine?: EngineId; modelPath?: string }) => Promise<{ success: boolean; pid?: number; error?: string; port?: number }>
   stopModel: (id: string, opts?: { skipCheckpoint?: boolean }) => Promise<{ success: boolean; error?: string }>
   isRunning: (templateId: string) => { running: boolean; port?: number }
   getOverridePort: () => Promise<number | null>
@@ -120,10 +122,20 @@ async function assertEditAllowed(t: Template) {
 // backend even though the template's Template Args looked identical to a
 // manual, working start.
 async function resolveBackend(template: Template): Promise<any> {
-  const backends = await D().listBackends()
-  if (backends.length === 0) throw new ToolError('No backends installed — install a backend in the Backends tab first.')
+  const engine = engineOf(template)
+  const backends = (await D().listBackends()).filter((b: any) => engineOf(b) === engine)
+  if (backends.length === 0) {
+    throw new ToolError(engine === 'llama.cpp'
+      ? 'No backends installed - install a backend in the Backends tab first.'
+      : `${ENGINES[engine].label} is not installed - install it in the Engine tracker first.`)
+  }
   const settings = await D().loadSettings()
-  const globalBackend = settings.globalBackend
+  // llama.cpp keeps its global selection in globalBackend; every other
+  // engine has one entry (a repo) in globalEngineBackends.
+  const otherGlobal = settings.globalEngineBackends?.[engine]
+  const globalBackend = engine === 'llama.cpp'
+    ? settings.globalBackend
+    : (otherGlobal ? { backendKey: otherGlobal.backendKey, backendVersion: undefined, backendType: undefined } : null)
   if (template.backendKey) {
     // backendKey+version alone stopped being unique once multi-backend-type
     // support shipped (the same fork+version can exist under several type
@@ -173,6 +185,9 @@ async function resolveBackend(template: Template): Promise<any> {
     }
     const match = backends.find((b: any) => b.backendKey === globalBackend.backendKey && b.name === globalBackend.backendVersion)
     if (match) return match
+    // Repo-only selection (engines whose install has no version choice).
+    const byKey = backends.find((b: any) => b.backendKey === globalBackend.backendKey)
+    if (byKey) return byKey
   }
   return backends[0]
 }
@@ -213,7 +228,29 @@ function matchExplicitBackend(
 // Fill mode's --fit flag (strip --ctx-size, pass "--fit on" so llama-server
 // decides offload+context itself) — both ported faithfully, neither needs
 // live VRAM state.
+// Strata templates: the same argv the renderer builds with buildStrataArgv.
+// The model family and variant come from the cached validation of the file.
+async function buildStrataLaunchArgs(template: Template): Promise<{ args: string[]; ctxAutoFitApplied: boolean; fitMode: 'off' | 'auto' }> {
+  if (!template.modelPath) throw new ToolError('This Strata template has no model file selected.')
+  let family: string | undefined
+  let model: string | undefined
+  try {
+    const meta = await D().getGgufMetadata(template.modelPath)
+    family = meta?.strata?.family
+    model = meta?.strata?.model
+  } catch {}
+  const forcedParallel = (await D().loadSettings()).strata?.parallelOverride
+  const built = buildStrataArgv({
+    ggufDir: strataGgufDir(template.modelPath), family, model,
+    port: template.serverPort || 8080,
+    args: { ...(template.args || {}), ...(forcedParallel ? { '--parallel': forcedParallel } : {}) }
+  })
+  if ('error' in built) throw new ToolError(built.error)
+  return { args: built.argv, ctxAutoFitApplied: false, fitMode: 'off' }
+}
+
 async function buildLaunchArgs(template: Template): Promise<{ args: string[]; ctxAutoFitApplied: boolean; fitMode: 'off' | 'auto' }> {
+  if (engineOf(template) === 'strata') return buildStrataLaunchArgs(template)
   const settings = await D().loadSettings()
   const md = settings.modelDefaults || {}
   const raw = { ...(template.args || {}) }
@@ -361,6 +398,7 @@ export async function toolTemplateAction(args: { template: string; action: 'star
   const backend = await resolveBackend(t)
   const { args: launchArgs, ctxAutoFitApplied } = await buildLaunchArgs(t)
   const res = await D().runModel({
+    engine: engineOf(t), modelPath: t.modelPath,
     id: t.id,
     name: t.name,
     backendPath: backend.path,
@@ -375,7 +413,8 @@ export async function toolTemplateAction(args: { template: string; action: 'star
   // a caller that immediately sends a prompt right after this tool call
   // returns can hit llama-server's 503 "Loading model" while it's still
   // reading weights in.
-  const readiness = await waitForServerReady(res.port)
+  // Strata may spend a long time preparing a model on its first launch.
+  const readiness = await waitForServerReady(res.port, engineOf(t) === 'strata' ? 60 * 60 * 1000 : undefined)
   return { template: t.name, action: 'start', ctxAutoFitApplied, ...res, ready: readiness.ready, loadWaitMs: readiness.waitedMs }
 }
 
@@ -790,10 +829,10 @@ export async function toolFreeRam() {
 
 function normalizePreset(preset: string | number): 'clear' | 'quick' | 'full-auto' {
   const s = String(preset).trim().toLowerCase()
-  if (s === '0' || s === 'clean' || s === 'clear') return 'clear'
+  if (s === '0' || s === 'clean' || s === 'clear' || s === 'manual') return 'clear'
   if (s === '1' || s === 'quick') return 'quick'
   if (s === '2' || s === 'full auto' || s === 'full-auto' || s === 'fullauto') return 'full-auto'
-  throw new ToolError(`Unknown preset "${preset}" — use "Clean"/0, "Quick"/1, or "FULL AUTO"/2.`)
+  throw new ToolError(`Unknown preset "${preset}" - use "Manual" (or "Clean")/0, "Quick"/1, or "FULL AUTO"/2.`)
 }
 
 // Quick and Clear are ported faithfully from CmdParamsEditor.tsx's own
@@ -807,6 +846,22 @@ export async function toolApplyParametersPreset(args: { preset: string | number;
   const t = findTemplate(args.template)
   await assertEditAllowed(t)
   const preset = normalizePreset(args.preset)
+  if (engineOf(t) !== 'llama.cpp') {
+    // Other engines have their own, much smaller presets (see
+    // EngineParamsEditor): Full Auto sends nothing and Quick is the shared
+    // baseline. They have no Manual preset, so "manual" means Full Auto.
+    let engineArgs: Record<string, any>
+    if (preset === 'full-auto' || preset === 'clear') engineArgs = { __lastPreset: 'fullauto' }
+    else {
+      let contextLength: number | undefined
+      try { contextLength = (await D().getGgufMetadata(t.modelPath || ''))?.contextLength } catch {}
+      engineArgs = { ...buildStrataQuickBaseline({ contextLength }), __lastPreset: 'quick' }
+    }
+    const enginePatch = { ...t, args: engineArgs, updatedAt: new Date().toISOString() }
+    delete (enginePatch as any)._file
+    await D().saveTemplate(enginePatch)
+    return { template: t.name, preset: preset === 'quick' ? 'Quick' : 'FULL AUTO', applied: true }
+  }
   if (preset === 'clear') {
     // Clean wipes the ENGINE args only — it explicitly PRESERVES --mmproj
     // and every sampling value (temperature/top-p/top-k/min-p/repeat-
@@ -820,6 +875,7 @@ export async function toolApplyParametersPreset(args: { preset: string | number;
     for (const k of SAMPLING_KEYS) {
       if (curArgs[k] !== undefined) preserved[k] = curArgs[k]
     }
+    if (curArgs[SAMPLING_PRESET_MARKER] !== undefined) preserved[SAMPLING_PRESET_MARKER] = curArgs[SAMPLING_PRESET_MARKER]
     preserved['__ignoreCtxOverride'] = false
     preserved['__autoCtxFill'] = 'off'
     preserved['__vramOverheadEnabled'] = false
@@ -1239,6 +1295,7 @@ export async function toolBenchmark(args: { template: string; prompts?: string[]
     const backend = await resolveBackend(target)
     const { args: launchArgs } = await buildLaunchArgs(target)
     const started = await D().runModel({
+    engine: engineOf(target), modelPath: target.modelPath,
       id: target.id, name: target.name, backendPath: backend.path, exe: backend.exe,
       args: launchArgs, openBrowser: false, port: target.serverPort || 8080,
       ignoreBaseUrlOverride: targetIgnoresOverride, skipCheckpoint: true
@@ -1269,6 +1326,7 @@ export async function toolBenchmark(args: { template: string; prompts?: string[]
         const backend = await resolveBackend(target)
         const { args: launchArgs } = await buildLaunchArgs(target)
         const res = await D().runModel({
+    engine: engineOf(target), modelPath: target.modelPath,
           id: target.id, name: target.name, backendPath: backend.path, exe: backend.exe,
           args: launchArgs, openBrowser: false, port: target.serverPort || 8080,
           ignoreBaseUrlOverride: targetIgnoresOverride, skipCheckpoint: true
@@ -1281,6 +1339,7 @@ export async function toolBenchmark(args: { template: string; prompts?: string[]
         const backend = await resolveBackend(blocker)
         const { args: launchArgs } = await buildLaunchArgs(blocker)
         const res = await D().runModel({
+    engine: engineOf(blocker), modelPath: blocker.modelPath,
           id: blocker.id, name: blocker.name, backendPath: backend.path, exe: backend.exe,
           args: launchArgs, openBrowser: false, port: blocker.serverPort || 8080,
           ignoreBaseUrlOverride: blockerIgnoresOverride, skipCheckpoint: true
@@ -1417,6 +1476,7 @@ export async function toolSwitchTemplate(args: { steps: { action: 'start' | 'sto
       const backend = await resolveBackend(step.template)
       const { args: launchArgs } = await buildLaunchArgs(step.template)
       const res = await D().runModel({
+    engine: engineOf(step.template), modelPath: step.template.modelPath,
         id: step.template.id, name: step.template.name, backendPath: backend.path, exe: backend.exe,
         args: launchArgs, openBrowser: false, port: step.template.serverPort || 8080,
         ignoreBaseUrlOverride: (step.template.args || {})['__ignoreBaseUrlOverride'] === true

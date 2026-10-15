@@ -3,23 +3,24 @@ import { useStore } from '../store/useStore'
 import { Plus, Trash } from 'lucide-react'
 import { StarIcon as StarShape } from '../utils/format'
 import { useOverlayClose } from '../hooks/useOverlayClose'
+import SelectMenu from './SelectMenu'
 
 interface Props {
-  onApply: (values: any) => void
+  // The preset this Template was last set from. Owned by the editor (stored in
+  // the Template's args), so the dropdown and the changed-value highlight
+  // always agree. Falls back to the starred preset when unset or deleted.
+  selectedId?: string
+  onApply: (values: any, id: string) => void
   disabled?: boolean
 }
 
 // Reusable sampling temperature presets manager.
-// The dropdown now tracks the currently-selected preset independently
-// of the starred preset, so selecting a preset updates the display.
-export default function SamplingPresets({ onApply, disabled }: Props) {
+export default function SamplingPresets({ selectedId, onApply, disabled }: Props) {
   const { samplingPresets, setSamplingPresets } = useStore()
   const [showAddModal, setShowAddModal] = useState(false)
   const [newName, setNewName] = useState('')
   const overlayClose = useOverlayClose(() => setShowAddModal(false))
   const starred = samplingPresets.find(p => p.isStarred) || samplingPresets[0]
-  // Track the currently-selected preset (defaults to the starred one).
-  const [selectedId, setSelectedId] = useState<string>(starred?.id || '')
   const selectedPreset = samplingPresets.find(p => p.id === selectedId) || starred
 
   async function handleStar(id: string) {
@@ -27,7 +28,6 @@ export default function SamplingPresets({ onApply, disabled }: Props) {
       await window.api?.starSamplingPreset?.(id)
       const updated = samplingPresets.map(p => ({ ...p, isStarred: p.id === id }))
       setSamplingPresets(updated)
-      setSelectedId(id)
     } catch {}
   }
 
@@ -38,7 +38,6 @@ export default function SamplingPresets({ onApply, disabled }: Props) {
     try {
       await window.api?.deleteSamplingPreset?.(id)
       setSamplingPresets(samplingPresets.filter(p => p.id !== id))
-      if (selectedId === id) setSelectedId(starred?.id || '')
     } catch {}
   }
 
@@ -56,27 +55,21 @@ export default function SamplingPresets({ onApply, disabled }: Props) {
 
   function handleSelect(id: string) {
     const p = samplingPresets.find(x => x.id === id)
-    if (p) {
-      setSelectedId(id)
-      onApply(p.values)
-    }
+    if (p) onApply(p.values, id)
   }
 
   return (
     <div className="sampling-presets-row">
       <span className="sampling-presets-label">Sampling Presets:</span>
-      <select
-        className="cmd-select sampling-presets-select"
-        value={selectedPreset?.id || ''}
-        onChange={e => handleSelect(e.target.value)}
-        disabled={disabled}
-      >
-        {samplingPresets.map(p => (
-          <option key={p.id} value={p.id}>
-            {p.name}{p.isStarred ? ' ★' : ''}
-          </option>
-        ))}
-      </select>
+      <div className="sampling-presets-select">
+        <SelectMenu
+          variant="field"
+          value={selectedPreset?.id || ''}
+          onChange={handleSelect}
+          disabled={disabled}
+          options={samplingPresets.map(p => ({ value: p.id, label: `${p.name}${p.isStarred ? ' ★' : ''}` }))}
+        />
+      </div>
       <button
         type="button"
         className="star-btn"

@@ -1,0 +1,263 @@
+{
+  "version": "2026.10.strata-1",
+  "categories": [
+    {
+      "name": "Model",
+      "icon": "Box",
+      "commands": [
+        {
+          "arg": "--family",
+          "label": "Model Family",
+          "description": "Which file family this GGUF belongs to. Detected from the file; set it by hand only for a fine-tune Strata does not recognise.",
+          "type": "select",
+          "options": [
+            "qwen",
+            "swift",
+            "coder",
+            "unsloth"
+          ],
+          "emptyLabel": "Not detected - pick one"
+        },
+        {
+          "arg": "--model",
+          "label": "Model Variant",
+          "description": "Which quantization variant of the family this GGUF is. Detected from the file.",
+          "type": "select",
+          "options": [
+            "Q2_0",
+            "IQ2_XS",
+            "IQ3_XXS",
+            "IQ3_S",
+            "IQ1_M",
+            "UD-IQ4_XS",
+            "UD-Q4_K_XL"
+          ],
+          "emptyLabel": "Not detected - pick one"
+        },
+        {
+          "arg": "--vision",
+          "label": "Image Input",
+          "description": "Let the model read images. yes/gpu puts the encoder on the GPU (about 1.4 GB VRAM), cpu keeps it in RAM.",
+          "type": "select",
+          "options": [
+            "yes",
+            "no",
+            "gpu",
+            "cpu"
+          ],
+          "optionLabels": {
+            "yes": "yes (encoder on the GPU)",
+            "no": "no (text only)",
+            "gpu": "gpu (encoder on the GPU)",
+            "cpu": "cpu (encoder in RAM)"
+          }
+        },
+        {
+          "arg": "--vision-tokens",
+          "label": "Image Tokens",
+          "description": "The most image tokens one picture becomes. More reads small text and charts better but encodes slower.",
+          "type": "number",
+          "min": 64,
+          "placeholder": "1024 (GPU) / 300 (CPU)"
+        }
+      ]
+    },
+    {
+      "name": "Context",
+      "icon": "Database",
+      "commands": [
+        {
+          "arg": "--context",
+          "label": "Context Size",
+          "description": "Context window in tokens. Left empty, setup picks the recommended size for this GPU and RAM.",
+          "type": "number",
+          "min": 1024,
+          "placeholder": ""
+        },
+        {
+          "arg": "--kv",
+          "label": "KV Cache Precision",
+          "description": "KV cache precision above 8K context (up to 8K it is fp16). int8 is Strata's name for the 8-bit KV cache that llama.cpp calls q8_0: the same thing, so the web UI may show \"q8_0\" for it. q4_0 is 4-bit (Hadamard-rotated, half the memory); k8v4 stores K as 8-bit and V as 4-bit.",
+          "type": "select",
+          "options": [
+            "int8",
+            "q4_0",
+            "k8v4"
+          ],
+          "optionLabels": {
+            "int8": "int8 (8-bit, = q8_0)",
+            "q4_0": "q4_0 (4-bit)",
+            "k8v4": "k8v4 (K 8-bit, V 4-bit)"
+          }
+        },
+        {
+          "arg": "--kv-streaming",
+          "label": "KV Streaming",
+          "description": "From a 64K context, keep the KV cache in RAM and only the attention window in VRAM, so more experts fit on the GPU.",
+          "type": "select",
+          "options": [
+            "auto",
+            "on",
+            "off"
+          ]
+        }
+      ]
+    },
+    {
+      "name": "RoPE / YaRN",
+      "icon": "Wind",
+      "commands": [
+        {
+          "arg": "--rope-scaling",
+          "label": "RoPE Scaling",
+          "description": "Context extension used past the trained 262144 tokens. Left empty, setup picks yarn for such a context.",
+          "type": "select",
+          "options": [
+            "none",
+            "linear",
+            "yarn"
+          ]
+        },
+        {
+          "arg": "--rope-scale",
+          "label": "RoPE Scale Factor",
+          "description": "Extension factor. Default: the final context over 262144, at least 1.",
+          "type": "number",
+          "min": 1,
+          "placeholder": "Auto"
+        }
+      ]
+    },
+    {
+      "name": "GPU",
+      "icon": "Zap",
+      "commands": [
+        {
+          "arg": "--backend",
+          "label": "GPU Backend",
+          "description": "cuda = NVIDIA, hip = AMD, sycl = Intel Arc (experimental, Linux). Left empty, setup chooses by itself.",
+          "type": "select",
+          "options": [
+            "cuda",
+            "hip",
+            "sycl"
+          ]
+        },
+        {
+          "arg": "--gpus",
+          "label": "GPUs",
+          "description": "Several GPUs sharing one model, as nvidia-smi numbers them: \"0,2\" or \"all\". The first is the main one.",
+          "type": "string",
+          "placeholder": "auto"
+        },
+        {
+          "arg": "--gpu",
+          "label": "Single GPU",
+          "description": "Use one specific GPU, numbered as nvidia-smi numbers them.",
+          "type": "string",
+          "placeholder": "auto"
+        },
+        {
+          "arg": "--layer-split",
+          "label": "Layer Split",
+          "description": "With several GPUs: where each later GPU's layers start (\"18\" or \"16,32\"). Default: placed from each GPU's free VRAM.",
+          "type": "string",
+          "placeholder": "auto"
+        },
+        {
+          "arg": "--vram-reserve-mib",
+          "label": "VRAM Reserve (MiB)",
+          "description": "VRAM the engine leaves free for other programs. The expert cache takes that much less.",
+          "type": "number",
+          "min": 0,
+          "placeholder": "700"
+        },
+        {
+          "arg": "--parallel",
+          "label": "Parallel Requests",
+          "description": "Up to N requests decode together. Each slot takes VRAM from the expert cache. 1 means one at a time.",
+          "type": "number",
+          "default": 1,
+          "min": 1,
+          "max": 8
+        }
+      ]
+    },
+    {
+      "name": "Memory",
+      "icon": "Cpu",
+      "commands": [
+        {
+          "arg": "--low-ram",
+          "label": "Low-RAM Mode",
+          "description": "Read the experts from one file instead of copying them all into RAM, for a PC with a big GPU and little RAM. auto decides from the RAM size.",
+          "type": "select",
+          "options": [
+            "auto",
+            "on",
+            "off",
+            "resident",
+            "mmap"
+          ]
+        },
+        {
+          "arg": "--resident-budget-gib",
+          "label": "Resident Budget (GiB)",
+          "description": "For the Unsloth variants: the GiB of experts kept in RAM. Default: the RAM less 24 GB.",
+          "type": "number",
+          "min": 1,
+          "placeholder": "Auto"
+        }
+      ]
+    },
+    {
+      "name": "Speculative Decoding",
+      "icon": "GitBranch",
+      "commands": [
+        {
+          "arg": "--draft-vocab",
+          "label": "Draft Vocabulary",
+          "description": "The draft layer's tokens. cjk is the default, en saves about 110 MiB of VRAM, cyrillic and fr add those scripts.",
+          "type": "select",
+          "options": [
+            "cjk",
+            "en",
+            "cyrillic",
+            "fr"
+          ]
+        },
+        {
+          "arg": "--experimental-speed-projection",
+          "label": "Speed Projection (Experimental)",
+          "description": "Experimental control vector applied as a projection on layers 4-44. Off by default.",
+          "type": "select",
+          "options": [
+            "off",
+            "on"
+          ]
+        }
+      ]
+    },
+    {
+      "name": "Server",
+      "icon": "Server",
+      "commands": [
+        {
+          "arg": "--host",
+          "label": "Server Host",
+          "description": "Where the server listens. 127.0.0.1 is this PC only, 0.0.0.0 also other devices on the network (set an API key too).",
+          "type": "string",
+          "default": "127.0.0.1",
+          "placeholder": "127.0.0.1"
+        },
+        {
+          "arg": "--api-key",
+          "label": "API Key",
+          "description": "Require this key from clients. Several keys: key1,key2.",
+          "type": "string",
+          "placeholder": "none"
+        }
+      ]
+    }
+  ]
+}

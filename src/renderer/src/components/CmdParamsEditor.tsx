@@ -5,15 +5,16 @@ import {
   Box, Cpu, Zap, Database, Sliders, Wind, Server, FileText, GitBranch,
   Search, Star, Lock, Clipboard, FolderOpen, Eye, CheckCircle2, XCircle,
   Image as ImageIcon, RotateCcw, Gauge, Sparkles, Layers, AlertTriangle,
-  MessageSquare, Copy, Check, ChevronDown, Repeat
+  MessageSquare, Check, ChevronDown, Repeat
 } from 'lucide-react'
 import type { CommandParam, SpecMethod, CheckpointMode } from '../../../shared/types'
 import HybridSlider from './HybridSlider'
+import CommandPreview, { type PreviewToken } from './CommandPreview'
 import SegmentedToggle from './SegmentedToggle'
 import SamplingPresets from './SamplingPresets'
 import { useVramBudget, computeAutoFillContext, estimateMoeDefaultContext } from '../hooks/useVramBudget'
 import { formatWithSpaces, CONTEXT_POWER_OF_TWO_STEPS, snapToNearestPowerOfTwo } from '../utils/contextFormat'
-import { buildQuickEngineBaseline, computeRecommendedThreads, defaultKvQuantFor, defaultKvQuantVFor, SAMPLING_KEYS } from '../../../shared/presetBaselines'
+import { buildQuickEngineBaseline, computeRecommendedThreads, defaultKvQuantFor, defaultKvQuantVFor, SAMPLING_KEYS, SAMPLING_PRESET_MARKER } from '../../../shared/presetBaselines'
 import { COMMON_PARAM_FLAGS as COMMON_VISIBLE } from '../../../shared/commonParams'
 import { applyNgramModifierToggle } from '../../../shared/specToggles'
 import { FORK_ONLY_ARGS } from '../../../shared/backendForks'
@@ -175,9 +176,7 @@ export default function CmdParamsEditor({ templateId, args, onChange, modelPathF
     setPresetMode, modelDefaults, samplingPresets, baseUrlOverride
   } = useStore()
   const [searchQuery, setSearchQuery] = useState('')
-  const [previewCopied, setPreviewCopied] = useState(false)  // "Copied" flash state for the preview copy button
   // Vertical-stack command preview toggle.
-  const [stackedPreview, setStackedPreview] = useState(false)
   const [showMemoryEngineControl, setShowMemoryEngineControl] = useState(false)
 
   const card = templateId ? cards.find(c => c.template.id === templateId) : null
@@ -327,7 +326,7 @@ export default function CmdParamsEditor({ templateId, args, onChange, modelPathF
   const isMoe = meta?.isMoe || expertCount > 0
   const nativeChatTemplate = meta?.chatTemplate || null
 
-  // CPU info: physical cores for thread slider max + recommended (3/4 by
+  // CPU info: physical cores for thread slider max + recommended (50% by
   // default, or the Settings "Recommended CPU Threads override" percentage
   // if enabled — both go through computeRecommendedThreads for consistency).
   const physicalCores = cpuInfo?.physicalCores || 8
@@ -1129,17 +1128,24 @@ export default function CmdParamsEditor({ templateId, args, onChange, modelPathF
     commit(newArgs)
   }
   // Map each sampling arg to its field name on a SamplingPreset's
-  // `values` object — used to diff against the currently-starred preset,
-  // independent of whichever engine preset (Quick/FullAuto/Clear) is active.
+  // `values` object, used to diff against the Sampling Preset this Template
+  // was last set from, independent of whichever engine preset
+  // (Quick/FullAuto/Clear) is active.
   const SAMPLING_FIELD_MAP: Record<string, string> = {
     '--temperature': 'temperature', '--top-k': 'topK', '--top-p': 'topP',
     '--min-p': 'minP', '--repeat-penalty': 'repeatPenalty', '--presence-penalty': 'presencePenalty'
   }
-  function getStarredSamplingValue(arg: string): any {
-    const starred = samplingPresets?.find(p => p.isStarred) || samplingPresets?.[0]
+  // Like derivedPresetMode, the selected Sampling Preset is derived from this
+  // Template's own args (the SAMPLING_PRESET_MARKER set when a preset is
+  // applied or seeded), not from the star. The star only decides what NEW
+  // Templates start with, and is the fallback for Templates with no marker or
+  // whose preset was deleted.
+  const starredSamplingPreset = samplingPresets?.find(p => p.isStarred) || samplingPresets?.[0]
+  const selectedSamplingPreset = samplingPresets?.find(p => p.id === args[SAMPLING_PRESET_MARKER]) || starredSamplingPreset
+  function getSamplingBaseValue(arg: string): any {
     const field = SAMPLING_FIELD_MAP[arg]
-    if (!starred?.values || !field) return undefined
-    return (starred.values as any)[field]
+    if (!selectedSamplingPreset?.values || !field) return undefined
+    return (selectedSamplingPreset.values as any)[field]
   }
 
   function isChanged(cmd: CommandParam, val: any): boolean {
@@ -1150,12 +1156,12 @@ export default function CmdParamsEditor({ templateId, args, onChange, modelPathF
     //    buildQuickEngineBaseline) — diff against THAT, not a stale
     //    hardcoded copy that could drift from what the button actually sets.
     // Sampling keys (temperature/top-p/etc.) are compared separately,
-    // against the CURRENTLY STARRED sampling preset — never against the
+    // against the SELECTED sampling preset, never against the
     // engine preset (Quick/FullAuto/Clear never touch them), and this
     // comparison applies regardless of derivedPresetMode/Clear, since it's
     // an independent axis from the engine baseline.
     if (SAMPLING_KEYS.includes(cmd.arg)) {
-      const target = getStarredSamplingValue(cmd.arg)
+      const target = getSamplingBaseValue(cmd.arg)
       if (target === undefined) return false
       const currentSet = val !== undefined && val !== false && val !== ''
       if (!currentSet) return false
@@ -1195,16 +1201,16 @@ export default function CmdParamsEditor({ templateId, args, onChange, modelPathF
   }
   function handleReset(cmd: CommandParam) {
     const newArgs: Record<string, any> = { ...args }
-    // CPU Threads resets to 3/4 of physical cores (not the schema default of -1).
+    // CPU Threads resets to the recommended count (not the schema default of -1).
     if (cmd.arg === '--threads') {
       newArgs[cmd.arg] = recommendedThreads
       commit(newArgs)
       return
     }
-    // Sampling keys reset to the currently-starred sampling preset's
-    // value — independent of the engine preset (Quick/FullAuto/Clear).
+    // Sampling keys reset to the selected sampling preset's value,
+    // independent of the engine preset (Quick/FullAuto/Clear).
     if (SAMPLING_KEYS.includes(cmd.arg)) {
-      const target = getStarredSamplingValue(cmd.arg)
+      const target = getSamplingBaseValue(cmd.arg)
       if (target !== undefined) {
         newArgs[cmd.arg] = target
         commit(newArgs)
@@ -1318,6 +1324,8 @@ export default function CmdParamsEditor({ templateId, args, onChange, modelPathF
     for (const k of SAMPLING_KEYS) {
       if (args[k] !== undefined) newArgs[k] = args[k]
     }
+    // ...and the record of which Sampling Preset they came from.
+    if (args[SAMPLING_PRESET_MARKER] !== undefined) newArgs[SAMPLING_PRESET_MARKER] = args[SAMPLING_PRESET_MARKER]
     // Turn OFF the context-fill toggles in Clear mode.
     newArgs['__ignoreCtxOverride'] = false
     newArgs['__autoCtxFill'] = 'off'
@@ -1463,17 +1471,17 @@ export default function CmdParamsEditor({ templateId, args, onChange, modelPathF
     return runtimeArgs
   }
 
-  const cmdPreview = useMemo(() => {
-    const parts: React.ReactNode[] = []
-    parts.push(<span key="base">llama-server</span>)
+  // The command shown in the Preview, as tokens for the shared CommandPreview.
+  // Built from the runtime-accurate args (see buildRuntimeArgs), so it
+  // reflects every active override (context floor, parallel, port, host, API
+  // key) and matches what actually reaches llama-server, not just what is
+  // literally stored in this template.
+  const previewTokens = useMemo<PreviewToken[]>(() => {
+    const tokens: PreviewToken[] = []
     const finalModelPath = card?.template.modelPath || modelPathFallback
-    if (finalModelPath) parts.push(' ', <span key="arg-m" className="arg">-m</span>, ' ', <span key="val-m" className="val">"{finalModelPath}"</span>)
-    // Build a runtime-accurate arg map: skip internal __ flags, and reflect
-    // every active override (context floor, parallel, port, host, API key —
-    // see buildRuntimeArgs) so the preview matches what actually reaches
-    // llama-server, not just what's literally stored in this template.
-    const runtimeArgs = buildRuntimeArgs()
-    Object.entries(runtimeArgs).forEach(([key, val]) => {
+    if (finalModelPath) tokens.push({ flag: '-m', value: `"${finalModelPath}"` })
+    Object.entries(buildRuntimeArgs()).forEach(([key, val]) => {
+      if (val === false || val === null || val === '') return
       const isOverridden =
         (key === '--ctx-size' && ctxOverriddenInPreview) ||
         (key === '--parallel' && parallelOverriddenInPreview) ||
@@ -1487,62 +1495,15 @@ export default function CmdParamsEditor({ templateId, args, onChange, modelPathF
           : key === '--port' && isOverridden
             ? `Set by the global Base URL Override (was ${card?.template.serverPort || serverPortFallback || 8080} for this preset)`
             : key === '--host' && isOverridden
-              ? 'Added by the global Base URL Override → "Serve on local network"'
+              ? 'Added by the global Base URL Override -> "Serve on local network"'
               : key === '--api-key' && isOverridden
-                ? 'Added by the global Base URL Override → API Key'
+                ? 'Added by the global Base URL Override -> API Key'
                 : undefined
-      if (val === true) parts.push(' ', <span key={`arg-${key}`} className="arg">{key}</span>)
-      else if (val !== false && val !== null && val !== '') {
-        parts.push(
-          ' ',
-          <span key={`arg-${key}`} className="arg">{key}</span>,
-          ' ',
-          <span
-            key={`val-${key}`}
-            className={isOverridden ? 'val cmd-preview-overridden' : 'val'}
-            title={title}
-          >{val}</span>
-        )
-      }
+      tokens.push({ flag: key, value: val === true ? undefined : (val as string | number), overridden: isOverridden, title })
     })
-    return parts
+    return tokens
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [args, ignoreCtxOverride, ignoreBaseUrlOverride, autoCtxFill, cards, templateId, modelPathFallback, serverPortFallback, previewEffectiveCtx, ctxOverriddenInPreview, previewEffectiveParallel, parallelOverriddenInPreview, previewEffectivePort, portOverriddenInPreview, hostOverrideActive, apiKeyOverrideActive, baseUrlOverride, isMoe, modelDefaults])
-
-  // Plain-text version of the preview for the copy button.
-  const cmdPreviewText = useMemo(() => {
-    const parts: string[] = ['llama-server']
-    const finalModelPath = card?.template.modelPath || modelPathFallback
-    if (finalModelPath) parts.push('-m', `"${finalModelPath}"`)
-    const runtimeArgs = buildRuntimeArgs()
-    Object.entries(runtimeArgs).forEach(([key, val]) => {
-      if (val === true) parts.push(key)
-      else if (val !== false && val !== null && val !== '') parts.push(key, String(val))
-    })
-    return parts.join(' ')
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [args, ignoreCtxOverride, ignoreBaseUrlOverride, autoCtxFill, cards, templateId, modelPathFallback, serverPortFallback, previewEffectiveCtx, previewEffectiveParallel, previewEffectivePort, hostOverrideActive, apiKeyOverrideActive, baseUrlOverride, isMoe, modelDefaults])
-
-  // Vertical-stack preview — same underlying runtime-accurate args as
-  // cmdPreviewText above, just formatted one flag per line with backslash
-  // line-continuations (shell-script style), for readability with long
-  // commands (e.g. stacked speculative-decoding flags).
-  const cmdPreviewStackedText = useMemo(() => {
-    const finalModelPath = card?.template.modelPath || modelPathFallback
-    const runtimeArgs = buildRuntimeArgs()
-    const argLines: string[] = []
-    if (finalModelPath) argLines.push(`-m "${finalModelPath}"`)
-    Object.entries(runtimeArgs).forEach(([key, val]) => {
-      if (val === true) argLines.push(key)
-      else if (val !== false && val !== null && val !== '') argLines.push(`${key} ${val}`)
-    })
-    const allLines = ['llama-server', ...argLines]
-    return allLines.map((l, i) => {
-      const isLast = i === allLines.length - 1
-      return `${i === 0 ? '' : '  '}${l}${isLast ? '' : ' \\'}`
-    }).join('\n')
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [args, ignoreCtxOverride, ignoreBaseUrlOverride, autoCtxFill, cards, templateId, modelPathFallback, serverPortFallback, previewEffectiveCtx, previewEffectiveParallel, previewEffectivePort, hostOverrideActive, apiKeyOverrideActive, baseUrlOverride, isMoe, modelDefaults])
 
   const filteredCategories = useMemo(() => {
     if (!commandsSchema) return []
@@ -1581,7 +1542,7 @@ export default function CmdParamsEditor({ templateId, args, onChange, modelPathF
     return cats
   }, [commandsSchema, searchQuery, paramViewMode])
 
-  if (!commandsSchema) return <div className="text-muted text-sm">No commands schema loaded. Ensure a backend is installed.</div>
+  if (!commandsSchema) return <div className="text-muted text-sm">No commands schema loaded. Ensure an engine is installed.</div>
 
   // ----- Render a single command row -----
   const renderCommand = (cmd: CommandParam) => {
@@ -2558,14 +2519,14 @@ export default function CmdParamsEditor({ templateId, args, onChange, modelPathF
 
   const headerContent = (
     <>
-      {/* 3-way Settings toggle — FULL AUTO / Quick / Clear. FULL AUTO's
+      {/* 3-way Settings toggle: FULL AUTO / Quick / Manual (stored as 'clear'). FULL AUTO's
           label stacks "FULL" and "AUTO" vertically to save horizontal space. */}
       <SegmentedToggle
         label="Settings:"
         options={[
           { value: 'fullauto', label: 'FULL\nAUTO', icon: null as any },
           { value: 'quick', label: 'Quick' },
-          { value: 'clear', label: 'Clear' }
+          { value: 'clear', label: 'Manual' }
         ]}
         value={derivedPresetMode}
         onChange={v => v === 'fullauto' ? handleFullAutoPreset() : v === 'quick' ? handleQuickPreset() : handleClearPreset()}
@@ -2655,8 +2616,10 @@ export default function CmdParamsEditor({ templateId, args, onChange, modelPathF
       {renderBaseUrlOverrideBlock()}
       {renderAutoCheckpointBlock()}
       <SamplingPresets
-        onApply={(values) => {
+        selectedId={selectedSamplingPreset?.id}
+        onApply={(values, id) => {
           const newArgs = { ...args }
+          newArgs[SAMPLING_PRESET_MARKER] = id
           if (values.temperature !== undefined) newArgs['--temperature'] = values.temperature
           if (values.topK !== undefined) newArgs['--top-k'] = values.topK
           if (values.topP !== undefined) newArgs['--top-p'] = values.topP
@@ -2690,40 +2653,7 @@ export default function CmdParamsEditor({ templateId, args, onChange, modelPathF
           ))
         )}
       </div>
-      <div className="cmd-section" style={{ marginBottom: 0, marginTop: 16 }}>
-        <div className="cmd-section-header" style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
-          <span>Preview</span>
-          <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
-            {/* Vertical-stack toggle — flips the preview between a
-                continuous flag string and one flag per line (shell-script
-                style with backslash continuations), for readability with
-                long/stacked commands. */}
-            <label style={{ display: 'flex', alignItems: 'center', gap: 5, fontSize: 11, color: 'var(--text-muted)', cursor: 'pointer' }} title="Show as a vertical stack of flags instead of one continuous line">
-              <input type="checkbox" checked={stackedPreview} onChange={e => setStackedPreview(e.target.checked)} />
-              Stacked view
-            </label>
-            <button
-              type="button"
-              className="btn btn-ghost btn-icon"
-              onClick={() => {
-                navigator.clipboard.writeText(stackedPreview ? cmdPreviewStackedText : cmdPreviewText).then(() => {
-                  setPreviewCopied(true)
-                  setTimeout(() => setPreviewCopied(false), 1500)
-                })
-              }}
-              title="Copy command to clipboard"
-              style={{ width: 26, height: 26 }}
-            >
-              {previewCopied ? <Check size={13} style={{ color: 'var(--success)' }} /> : <Copy size={13} />}
-            </button>
-          </div>
-        </div>
-        {stackedPreview ? (
-          <pre className="cmd-preview cmd-preview-stacked" style={{ userSelect: 'text', WebkitUserSelect: 'text', cursor: 'text' }}>{cmdPreviewStackedText}</pre>
-        ) : (
-          <div className="cmd-preview" style={{ userSelect: 'text', WebkitUserSelect: 'text', cursor: 'text' }}>{cmdPreview}</div>
-        )}
-      </div>
+      <CommandPreview program="llama-server" tokens={previewTokens} />
     </div>
   )
 }

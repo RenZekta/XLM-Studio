@@ -24,7 +24,7 @@ export interface CpuInfoLike {
 export function computeRecommendedThreads(
   cpuInfo: CpuInfoLike | null | undefined,
   // "Recommended CPU Threads override" (Settings) — when provided, replaces
-  // the built-in 75% default with a user-chosen percentage of physical
+  // the built-in 50% default with a user-chosen percentage of physical
   // cores, always rounded to a whole core count (never "1.5 cores").
   overridePercent?: number | null
 ): number {
@@ -33,7 +33,7 @@ export function computeRecommendedThreads(
     const pct = Math.max(0, Math.min(100, overridePercent))
     return Math.max(1, Math.round((pct / 100) * physicalCores))
   }
-  return Math.max(1, Math.floor(physicalCores * 0.75))
+  return Math.max(1, Math.floor(physicalCores * 0.5))
 }
 
 export function defaultKvQuantFor(backendKey: string | undefined | null): string {
@@ -130,6 +130,14 @@ export function buildQuickEngineBaseline(opts: {
 // mirrors it).
 export const SAMPLING_KEYS = ['--temperature', '--top-p', '--top-k', '--min-p', '--repeat-penalty', '--presence-penalty']
 
+// Per-Template marker (an internal `__` key, never passed to the engine) naming
+// the Sampling Preset this Template was last set from. It is the sampling
+// counterpart of `__lastPreset`: the changed-value highlight and per-field
+// reset diff against THIS preset, not whichever one happens to be starred.
+// Templates without it (or whose preset was deleted) fall back to the starred
+// preset.
+export const SAMPLING_PRESET_MARKER = '__lastSamplingPreset'
+
 // Builds the sampling args a brand-new Template should start with, from
 // whichever Sampling Preset is currently starred (falling back to the first
 // one if none is starred) — the exact same mapping CreateModal.tsx's lazy
@@ -141,6 +149,7 @@ export function seedSamplingArgsFromPreset(samplingPresets: any[] | undefined): 
   const starred = samplingPresets?.find((p: any) => p.isStarred) || samplingPresets?.[0]
   const values = starred?.values
   if (!values) return seeded
+  if (starred.id) seeded[SAMPLING_PRESET_MARKER] = starred.id
   if (values.temperature !== undefined) seeded['--temperature'] = values.temperature
   if (values.topK !== undefined) seeded['--top-k'] = values.topK
   if (values.topP !== undefined) seeded['--top-p'] = values.topP

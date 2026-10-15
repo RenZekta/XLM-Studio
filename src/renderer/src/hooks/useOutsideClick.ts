@@ -4,7 +4,7 @@ import { useEffect, type RefObject } from 'react'
 // element in `ref`, while `active` is true. Put the toggle button inside the
 // ref'd element so clicking it still toggles the menu itself instead of
 // closing it here and immediately re-opening it.
-export function useOutsideClick(ref: RefObject<HTMLElement>, active: boolean, onOutside: () => void): void {
+export function useOutsideClick(ref: RefObject<HTMLElement | null>, active: boolean, onOutside: () => void): void {
   useEffect(() => {
     if (!active) return
     const onPointerDown = (e: MouseEvent) => {

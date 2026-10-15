@@ -1,4 +1,5 @@
 import { create } from 'zustand'
+import type { EngineId } from '../../../shared/engines'
 import type {
   Template, BackendVersion, CommandsSchema, ReleaseInfo, RunningStatus,
   ModelGroup, TrackedBackend, TrackedBackendRelease, ThemePref, SpecDetectionResult,
@@ -6,6 +7,9 @@ import type {
 } from '../../../shared/types'
 
 let backendSwitchSeq = 0
+// Monotonic id handed to each log entry, so the Logs list can key rows on
+// something stable while the 10000-entry cap drops lines off the front.
+let logSeq = 0
 
 interface CardState {
   template: Template
@@ -27,6 +31,9 @@ interface AppStore {
   backends: BackendVersion[]
   models: ModelGroup[]
   activeBackend: BackendVersion | null
+  // The global selection (a repo) of every engine except llama.cpp, whose
+  // selection is activeBackend.
+  engineGlobals: Partial<Record<EngineId, { backendKey: string }>>
   commandsSchema: CommandsSchema | null
   releaseInfo: ReleaseInfo | null
   paths: { models: string; templates: string; backend: string; mainModelFolder: string; mainBackendFolder: string } | null
@@ -85,13 +92,14 @@ interface AppStore {
   // at App root, so they persist until the app is closed or cleared
   // manually — a listener scoped to LogsView's own mount would lose every
   // log that arrived while the view wasn't mounted, not just hide them.
-  logs: { id: string; name: string; stream: 'stdout' | 'stderr' | 'app'; line: string; ts: number }[]
+  logs: { id: string; name: string; stream: 'stdout' | 'stderr' | 'app'; line: string; ts: number; seq?: number }[]
 
   setCompactSidebarEnabled: (enabled: boolean) => void
   setView: (v: AppStore['view']) => void
   setShowCreateModal: (show: boolean, template?: Template | null) => void
   setPrefillModelPath: (path: string | null) => void
   setActiveBackend: (b: BackendVersion) => void
+  setEngineGlobals: (g: Partial<Record<EngineId, { backendKey: string }>>) => void
   switchBackend: (b: BackendVersion) => Promise<void>
   setCommandsSchema: (s: CommandsSchema) => void
   setBackends: (b: BackendVersion[]) => void
@@ -147,15 +155,16 @@ interface AppStore {
   setParamViewMode: (mode: 'common' | 'full') => void
   setQuickBaselineActive: (active: boolean) => void
   setPresetMode: (mode: 'clear' | 'quick' | 'fullauto') => void
-  // Global log actions — appendLog is called by the App-root
-  // listener for every incoming server-log IPC event (so logs accumulate
-  // regardless of which tab is active); clearLogs is the manual "Clear" button.
-  appendLog: (entry: { id: string; name: string; stream: 'stdout' | 'stderr' | 'app'; line: string; ts: number }) => void
+  // Global log actions — appendLogs is called by the App-root
+  // listener with the server-log IPC events collected since its last flush (so
+  // logs accumulate regardless of which tab is active); clearLogs is the
+  // manual "Clear" button.
+  appendLogs: (entries: { id: string; name: string; stream: 'stdout' | 'stderr' | 'app'; line: string; ts: number }[]) => void
   clearLogs: () => void
 }
 
 export const useStore = create<AppStore>((set) => ({
-  cards: [], backends: [], models: [], activeBackend: null,
+  cards: [], backends: [], models: [], activeBackend: null, engineGlobals: {},
   commandsSchema: null, releaseInfo: null, paths: null,
   view: 'cards', showCreateModal: false, editingTemplate: null, prefillModelPath: null,
   updateDismissed: false, checkingUpdate: false, downloadProgress: {},
@@ -180,7 +189,7 @@ export const useStore = create<AppStore>((set) => ({
   metadataExtractions: {},
   vramInfo: null,
   systemRam: null,
-  modelDefaults: { autoFitEnabled: true, autoFitContextLength: 60000, guardrailMode: 'strict', customMaxSizeGB: 0, useCurrentMemState: false, moeOffloadStrategy: 'max' /* default to MAX+ForceMoEtoCPU */, autoEnableMmproj: true, mmprojOffloadToRam: true, cpuThreadsOverrideEnabled: false, cpuThreadsOverridePercent: 100, parallelOverrideEnabled: false, parallelInferenceMode: 'unified', parallelOverrideValue: 4, parallelOverrideValueDense: 4, parallelOverrideValueMoe: 4, perfMaxSessions: 20, autoOpenChatUI: false },
+  modelDefaults: { autoFitEnabled: true, autoFitContextLength: 60000, guardrailMode: 'strict', customMaxSizeGB: 0, useCurrentMemState: true, moeOffloadStrategy: 'max' /* default to MAX+ForceMoEtoCPU */, autoEnableMmproj: true, mmprojOffloadToRam: true, cpuThreadsOverrideEnabled: false, cpuThreadsOverridePercent: 50, parallelOverrideEnabled: false, parallelInferenceMode: 'unified', parallelOverrideValue: 4, parallelOverrideValueDense: 4, parallelOverrideValueMoe: 4, perfMaxSessions: 20, autoOpenChatUI: false },
   baseUrlOverride: { enabled: true, port: 1234, serveOnLocalNetwork: false, apiKeyEnabled: false, apiKey: '' },
   kvCacheCheckpoints: { enabled: false, mode: 'model', autoDeleteRedundant: false, externalFolders: [], mainFolder: null },
   samplingPresets: [],
@@ -197,6 +206,7 @@ export const useStore = create<AppStore>((set) => ({
   setShowCreateModal: (show, template = null) => set({ showCreateModal: show, editingTemplate: template }),
   setPrefillModelPath: (path) => set({ prefillModelPath: path }),
   setActiveBackend: (b) => set({ activeBackend: b }),
+  setEngineGlobals: (g) => set({ engineGlobals: g }),
   // The active backend and the commands schema describe the same thing and
   // must change in one update: the KV cache defaults and option lists are
   // derived from the pair, so a window where only one has changed shows (and
@@ -317,8 +327,9 @@ export const useStore = create<AppStore>((set) => ({
   // over a long-running session (LogsView still only shows the most recent
   // ones by default via its own filter, but the cap lives here now since this
   // is the single persistent source of truth for the whole app lifetime).
-  appendLog: (entry) => set((s) => {
-    const next = [...s.logs, entry]
+  appendLogs: (entries) => set((s) => {
+    if (entries.length === 0) return {}
+    const next = s.logs.concat(entries.map(e => ({ ...e, seq: ++logSeq })))
     return { logs: next.length > 10000 ? next.slice(-10000) : next }
   }),
   clearLogs: () => set({ logs: [] })

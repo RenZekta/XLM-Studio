@@ -11,6 +11,9 @@ import McpSettingsSection from './McpSettingsSection'
 import LaunchSettingsSection from './LaunchSettingsSection'
 import { changeTheme } from '../hooks/useTheme'
 import { formatBytes } from '../utils/format'
+import SegmentedToggle from './SegmentedToggle'
+import { ENGINES, engineOf, type EngineId } from '../../../shared/engines'
+import type { StrataSettings } from '../../../shared/types'
 import { pickDefaultAsset, setLastAssetType } from '../utils/backendAssetPref'
 import type { ThemePref, TrackedBackend, TrackedBackendRelease, RedundantCheckpoint } from '../../../shared/types'
 
@@ -32,7 +35,8 @@ export default function SettingsView() {
     setExternalModelFolders, setExternalBackendFolders,
     setMainModelFolder, setMainBackendFolder, setTrackedBackends,
     setTrackerResult, setCheckingAllBackends,
-    kvCacheCheckpoints, setKvCacheCheckpoints
+    kvCacheCheckpoints, setKvCacheCheckpoints,
+    modelDefaults, setModelDefaults, engineGlobals, setEngineGlobals
   } = useStore()
 
   const [selectedAssetByUrl, setSelectedAssetByUrl] = useState<Record<string, string>>({})
@@ -40,6 +44,18 @@ export default function SettingsView() {
   const [notifPref, setNotifPref] = useState<'banner' | 'manual'>(getNotifPref())
   const [customBackendLink, setCustomBackendLink] = useState('')
   const [customBackendErr, setCustomBackendErr] = useState('')
+  // Engine override for the Add dialog: '' = detect from the repository.
+  const [customEngine, setCustomEngine] = useState<'' | EngineId>('')
+  const [gitBusy, setGitBusy] = useState<Record<string, string>>({})
+  const [gitError, setGitError] = useState<Record<string, string>>({})
+  const [engineSettings, setEngineSettings] = useState<{
+    autoUpdateTrackedEngines: boolean; strata: StrataSettings; strataDataDir: string
+    strataRememberedDataDir: string | null; gitAvailable: boolean
+  } | null>(null)
+  const refreshEngineSettings = useCallback(async () => {
+    try { setEngineSettings(await window.api.getEngineSettings()) } catch {}
+  }, [])
+  useEffect(() => { refreshEngineSettings() }, [refreshEngineSettings])
   // Checkpoints flagged by the last redundant-checkpoint scan (see
   // scan-redundant-checkpoints) -- re-run on mount and whenever the
   // Model/Model-Template mode changes, since both are exactly the moments a
@@ -126,6 +142,11 @@ export default function SettingsView() {
   async function handleSwitchBackend(backendId: string) {
     const b = backends.find(x => x.id === backendId || x.name === backendId)
     if (!b) return
+    if (engineOf(b) !== 'llama.cpp') {
+      setEngineGlobals({ ...engineGlobals, [engineOf(b)]: { backendKey: b.backendKey } })
+      window.api.setGlobalEngineBackend(engineOf(b), b.backendKey).catch(() => {})
+      return
+    }
     window.api.setGlobalBackend({ backendKey: b.backendKey, backendVersion: b.name, backendType: b.backendType ?? null }).catch(() => {})
     await switchBackend(b)
   }
@@ -156,7 +177,7 @@ export default function SettingsView() {
     setCustomBackendErr('')
     const link = customBackendLink.trim()
     if (!link) return
-    const res = await window.api.addTrackedBackend(link)
+    const res = await window.api.addTrackedBackend(link, customEngine || undefined)
     if (res.success && res.tracked) {
       setTrackedBackends([...trackedBackends, res.tracked])
       setCustomBackendLink('')
@@ -164,6 +185,22 @@ export default function SettingsView() {
       handleCheckAllBackends()
     } else {
       setCustomBackendErr(res.error || 'Failed to add')
+    }
+  }
+
+  // Git engines (Strata) are cloned and updated with git; the state shown in
+  // the tracker is the clone, not release assets.
+  async function runGitAction(t: TrackedBackend, kind: 'install' | 'update') {
+    setGitBusy(b => ({ ...b, [t.id]: kind }))
+    setGitError(e => ({ ...e, [t.id]: '' }))
+    try {
+      const res = kind === 'install' ? await window.api.installGitEngine(t.id) : await window.api.updateGitEngine(t.id)
+      if (!res.success) setGitError(e => ({ ...e, [t.id]: res.error || 'Failed' }))
+      setBackends(await window.api.listBackends())
+      const updated = await window.api.checkTrackedBackend(t.id)
+      if (!('error' in updated)) setTrackerResult(updated)
+    } finally {
+      setGitBusy(b => { const n = { ...b }; delete n[t.id]; return n })
     }
   }
 
@@ -226,35 +263,21 @@ export default function SettingsView() {
   // Global equivalent of handleUpdateBackend: every outdated variant across
   // every tracked backend.
   async function handleUpdateAll() {
-    const jobs: { t: TrackedBackend; release: TrackedBackendRelease; asset: TrackedBackendRelease['assets'][number] }[] = []
-    for (const t of trackedBackends) {
-      const release = trackerResults[t.id]
-      if (!release?.assets) continue
-      for (const asset of release.assets) if (asset.status === 'outdated') jobs.push({ t, release, asset })
-    }
-    if (!jobs.length) return
-    await Promise.all(jobs.map(async ({ t, release, asset }) => {
-      const res = await window.api.downloadRelease({
-        url: asset.downloadUrl,
-        version: release.tagName || asset.name.replace(/\.(zip|tar\.gz)$/i, ''),
-        assetName: asset.name,
-        backendKey: t.folderName,
-        trackedId: t.id
-      })
-      setDownloadProgress(`${t.id}::${asset.name}`, null)
-      return res
-    }))
-    const backendsData = await window.api.listBackends()
-    setBackends(backendsData)
-    const affectedIds = [...new Set(jobs.map(j => j.t.id))]
-    const results = await Promise.all(affectedIds.map(id => window.api.checkTrackedBackend(id)))
+    // One implementation in the main process, shared with the auto-update
+    // switch: release engines re-download their outdated variants, git
+    // engines are updated in place.
+    await window.api.updateTrackedEngines()
+    setBackends(await window.api.listBackends())
+    const results = await Promise.all(trackedBackends.map(t => window.api.checkTrackedBackend(t.id)))
     for (const r of results) if (!('error' in r)) setTrackerResult(r)
   }
 
-  async function handleDeleteBackendType(t: TrackedBackend, asset: { name: string; type?: string }) {
+  // `platform` is set for builds made for another OS than this machine's.
+  async function handleDeleteBackendType(t: TrackedBackend, asset: { name: string; type?: string }, platform?: string) {
     if (!asset.type) return
-    if (!confirm(`Delete the installed "${asset.type}" build of "${t.name}"? This removes it from disk.`)) return
-    const res = await window.api.deleteBackendType(t.folderName, asset.type)
+    const what = platform ? `${platform} build of type "${asset.type}"` : `installed "${asset.type}" build`
+    if (!confirm(`Delete the ${what} of "${t.name}"? This removes it from disk.`)) return
+    const res = await window.api.deleteBackendType(t.folderName, asset.type, platform)
     if (res.success) {
       const backendsData = await window.api.listBackends()
       setBackends(backendsData)
@@ -267,7 +290,7 @@ export default function SettingsView() {
     await changeTheme(t)
   }
 
-  const anyUpdatesDetected = trackedBackends.some(t => trackerResults[t.id]?.assets?.some(a => a.status === 'outdated'))
+  const anyUpdatesDetected = trackedBackends.some(t => trackerResults[t.id]?.assets?.some(a => a.status === 'outdated') || (t.kind === 'git' && trackerResults[t.id]?.git?.updateAvailable))
 
   return (
     <div className="max-w-3xl">
@@ -334,6 +357,118 @@ export default function SettingsView() {
           </div>
         </div>
       </div>
+
+      {/* App behavior */}
+      <div className="settings-section">
+        <div className="settings-section-title"><Layers /> Behavior</div>
+        <div className="settings-row">
+          <div>
+            <div className="settings-row-label">Open Chat UI automatically on Template startup</div>
+            <div className="settings-row-sub">
+              Off by default. "Open Chat" is always available once a Template is running, whether or not this is on.
+            </div>
+          </div>
+          <div className="toggle-wrap">
+            <label className="toggle">
+              <input type="checkbox" checked={modelDefaults.autoOpenChatUI === true} onChange={async (e) => {
+                const d = { ...modelDefaults, autoOpenChatUI: e.target.checked }
+                setModelDefaults(d); try { await window.api?.setModelDefaults?.(d) } catch {}
+              }} />
+              <span className="toggle-track"></span><span className="toggle-thumb"></span>
+            </label>
+          </div>
+        </div>
+        <div className="settings-row" style={{ borderBottom: 'none', flexDirection: 'column', alignItems: 'flex-start', gap: 10 }}>
+          <div>
+            <div className="settings-row-label">Memory calculation basis</div>
+            <div className="settings-row-sub">
+              Which VRAM and RAM figures estimates use: what is free right now (refreshed every 10 s), or the installed total.
+            </div>
+          </div>
+          <SegmentedToggle
+            options={[
+              { value: 'current', label: 'Current free memory' },
+              { value: 'total', label: 'Installed total' }
+            ]}
+            value={modelDefaults.useCurrentMemState === false ? 'total' : 'current'}
+            onChange={async (v) => {
+              const d = { ...modelDefaults, useCurrentMemState: v === 'current' }
+              setModelDefaults(d); try { await window.api?.setModelDefaults?.(d) } catch {}
+            }}
+          />
+          {modelDefaults.useCurrentMemState === false && (
+            <div style={{ fontSize: 11, color: 'var(--warning)', lineHeight: 1.5 }}>
+              With the installed total, estimates ignore what else is using memory. Consider "Current free memory" for stability when using the device alongside a running model.
+            </div>
+          )}
+        </div>
+      </div>
+
+      {/* Strata */}
+      {trackedBackends.some(t => t.kind === 'git') && engineSettings && (
+        <div className="settings-section">
+          <div className="settings-section-title"><Database /> Strata</div>
+          <div className="settings-row">
+            <div>
+              <div className="settings-row-label">Update before launch</div>
+              <div className="settings-row-sub">
+                Runs git fetch and fast-forwards the clone before each Strata launch. A failed update never blocks the launch. Independent of the tracker's automatic update.
+              </div>
+            </div>
+            <div className="toggle-wrap">
+              <label className="toggle">
+                <input type="checkbox" checked={engineSettings.strata.pullBeforeLaunch} onChange={async (e) => {
+                  await window.api.setStrataSettings({ pullBeforeLaunch: e.target.checked })
+                  refreshEngineSettings()
+                }} />
+                <span className="toggle-track"></span><span className="toggle-thumb"></span>
+              </label>
+            </div>
+          </div>
+          <div className="settings-row" style={{ borderBottom: 'none', flexDirection: 'column', alignItems: 'stretch', gap: 10 }}>
+            <div>
+              <div className="settings-row-label">Data folder</div>
+              <div className="settings-row-sub">
+                Where Strata keeps the prepared model and the MTP layer. Global shares one folder with every Strata install on this PC. Isolated keeps a private folder and a private Strata settings file for XLM-Studio only.
+              </div>
+            </div>
+            <SegmentedToggle
+              options={[{ value: 'global', label: 'Global' }, { value: 'isolated', label: 'Isolated' }]}
+              value={engineSettings.strata.data.mode}
+              onChange={async (v) => {
+                await window.api.setStrataSettings({ data: { mode: v as 'global' | 'isolated' } })
+                refreshEngineSettings()
+              }}
+            />
+            <div className="settings-row-sub mono" style={{ wordBreak: 'break-all' }}>{engineSettings.strataDataDir}</div>
+            <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+              <button className="btn btn-secondary btn-sm" onClick={async () => {
+                const picked = await window.api.pickStrataDataFolder()
+                if (!picked) return
+                await window.api.setStrataSettings({ data: engineSettings.strata.data.mode === 'isolated' ? { isolatedDir: picked } : { dataDir: picked } })
+                refreshEngineSettings()
+              }}>Choose folder...</button>
+              <button className="btn btn-ghost btn-sm" onClick={async () => {
+                await window.api.setStrataSettings({ data: engineSettings.strata.data.mode === 'isolated' ? { isolatedDir: null } : { dataDir: null } })
+                refreshEngineSettings()
+              }}>Use default</button>
+              <button className="btn btn-ghost btn-sm" onClick={() => window.api.openFolder(engineSettings.strataDataDir)}>Open folder</button>
+            </div>
+            {engineSettings.strata.data.mode === 'global' && engineSettings.strataRememberedDataDir && engineSettings.strataRememberedDataDir !== engineSettings.strataDataDir && (
+              <div style={{ fontSize: 11, color: 'var(--warning)', lineHeight: 1.5 }}>
+                Another Strata install on this PC uses <span className="mono">{engineSettings.strataRememberedDataDir}</span>. Launching with the folder above makes Strata move that data here when both are on the same drive. On a different drive it is left where it is and the model is prepared again.{' '}
+                <button className="btn btn-ghost btn-sm" onClick={async () => {
+                  await window.api.setStrataSettings({ data: { dataDir: engineSettings.strataRememberedDataDir } })
+                  refreshEngineSettings()
+                }}>Use that folder</button>
+              </div>
+            )}
+            <div style={{ fontSize: 11, color: 'var(--text-muted)', lineHeight: 1.5 }}>
+              Changing the folder does not move existing files. Strata only moves data between folders on the same drive.
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* GitHub access token */}
       <div className="settings-section">
@@ -412,7 +547,10 @@ export default function SettingsView() {
             mainFolder={mainModelFolder}
             onAdd={async () => {
               const res = await window.api.addExternalModelFolder()
-              if (res.success && res.folders) setExternalModelFolders(res.folders)
+              if (res.success && res.folders) {
+                setExternalModelFolders(res.folders)
+                if (res.mainFolder !== undefined) setMainModelFolder(res.mainFolder)
+              }
               return res
             }}
             onRemove={async (folder) => {
@@ -435,14 +573,14 @@ export default function SettingsView() {
         </div>
       </div>
 
-      {/* External Backend Folders (same mechanics) */}
+      {/* External Engines Folders (same mechanics) */}
       <div className="settings-section">
-        <div className="settings-section-title"><Cpu /> External Backends Folders</div>
+        <div className="settings-section-title"><Cpu /> External Engines Folders</div>
         <div className="settings-row" style={{ borderBottom: 'none', flexDirection: 'column', alignItems: 'flex-start', gap: 12 }}>
           <p style={{ fontSize: 13, color: 'var(--text-secondary)', lineHeight: 1.6 }}>
             Add folders that contain pre-built llama.cpp backends (e.g. a folder where you keep several
-            compiled forks). Star one to make it the <strong>main backend folder</strong> — backends
-            downloaded through the Backends Tracker land there, under <code>&lt;fork-name&gt;/&lt;version&gt;/</code>.
+            compiled forks). Star one to make it the <strong>main engines folder</strong>: engines
+            downloaded through the Engine tracker land there, under <code>&lt;fork-name&gt;/&lt;version&gt;/</code>.
             Same star/sort mechanics as model folders.
           </p>
           <ExternalFolderList
@@ -450,7 +588,10 @@ export default function SettingsView() {
             mainFolder={mainBackendFolder}
             onAdd={async () => {
               const res = await window.api.addExternalBackendFolder()
-              if (res.success && res.folders) setExternalBackendFolders(res.folders)
+              if (res.success && res.folders) {
+                setExternalBackendFolders(res.folders)
+                if (res.mainFolder !== undefined) setMainBackendFolder(res.mainFolder)
+              }
               return res
             }}
             onRemove={async (folder) => {
@@ -464,8 +605,8 @@ export default function SettingsView() {
               setMainBackendFolder(mb.isDefault ? null : mb.folder)
               return res
             }}
-            addLabel="Add Backend Folder"
-            emptyText="No external backend folders configured. The default app folder is used."
+            addLabel="Add Engines Folder"
+            emptyText="No external engines folders configured. The default app folder is used."
             onAfterChange={async () => {
               const updated = await window.api.listBackends()
               setBackends(updated)
@@ -526,7 +667,7 @@ export default function SettingsView() {
               mainFolder={kvCacheCheckpoints.mainFolder}
               onAdd={async () => {
                 const res = await window.api.addExternalCheckpointFolder()
-                if (res.success && res.folders) setKvCacheCheckpoints({ ...kvCacheCheckpoints, externalFolders: res.folders })
+                if (res.success && res.folders) setKvCacheCheckpoints({ ...kvCacheCheckpoints, externalFolders: res.folders, mainFolder: res.mainFolder !== undefined ? res.mainFolder : kvCacheCheckpoints.mainFolder })
                 return res
               }}
               onRemove={async (folder) => {
@@ -613,10 +754,10 @@ export default function SettingsView() {
 
       {/* Installed Backends */}
       <div className="settings-section">
-        <div className="settings-section-title"><HardDrive /> Installed Backends</div>
+        <div className="settings-section-title"><HardDrive /> Installed Engines</div>
         {backends.length === 0 ? (
           <div className="text-center py-6 text-sm" style={{ color: 'var(--text-muted)' }}>
-            No backends installed. Download one from the Backends Tracker below.
+            No engines installed. Download one from the Engine tracker below.
           </div>
         ) : (
           <div className="flex flex-col gap-2">
@@ -627,7 +768,10 @@ export default function SettingsView() {
                     <div className="settings-row-label flex items-center gap-2">
                       <Layers size={13} style={{ color: 'var(--text-muted)', flexShrink: 0 }} />
                       <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{b.displayName}</span>
-                      {activeBackend?.id === b.id && <span className="version-badge active-version">Active</span>}
+                      {engineOf(b) !== 'llama.cpp' && <span className="version-badge">{ENGINES[engineOf(b)].label}</span>}
+                      {(engineOf(b) === 'llama.cpp'
+                        ? activeBackend?.id === b.id
+                        : engineGlobals[engineOf(b)]?.backendKey === b.backendKey) && <span className="version-badge active-version">Active</span>}
                       {!b.hasCommands && <span className="version-badge">Fallback Schema</span>}
                       {b.external && <span className="version-badge">External</span>}
                     </div>
@@ -639,7 +783,7 @@ export default function SettingsView() {
                     <button
                       className="btn btn-secondary btn-sm"
                       onClick={() => handleSwitchBackend(b.id)}
-                      disabled={activeBackend?.id === b.id}
+                      disabled={engineOf(b) === 'llama.cpp' ? activeBackend?.id === b.id : engineGlobals[engineOf(b)]?.backendKey === b.backendKey}
                     >
                       Set Active
                     </button>
@@ -671,14 +815,32 @@ export default function SettingsView() {
         )}
       </div>
 
-      {/* Backends Tracker (renamed from "Available Updates") */}
+      {/* Engine tracker (renamed from "Available Updates") */}
       <div className="settings-section">
-        <div className="settings-section-title"><Download /> Backends Tracker</div>
+        <div className="settings-section-title"><Download /> Engine tracker</div>
+
+        <div className="settings-row">
+          <div>
+            <div className="settings-row-label">Update tracked engines automatically</div>
+            <div className="settings-row-sub">
+              After the check at startup, installs the new release of every engine you already have (llama.cpp builds are re-downloaded, Strata is updated with git). Off by default. An engine with a running model is skipped.
+            </div>
+          </div>
+          <div className="toggle-wrap">
+            <label className="toggle">
+              <input type="checkbox" checked={!!engineSettings?.autoUpdateTrackedEngines} onChange={async (e) => {
+                await window.api.setAutoUpdateTrackedEngines(e.target.checked)
+                refreshEngineSettings()
+              }} />
+              <span className="toggle-track"></span><span className="toggle-thumb"></span>
+            </label>
+          </div>
+        </div>
 
         {/* Add custom backend from link */}
         <div className="settings-row" style={{ borderBottom: 'none', flexDirection: 'column', alignItems: 'stretch', gap: 12 }}>
           <p style={{ fontSize: 13, color: 'var(--text-secondary)', lineHeight: 1.6 }}>
-            Track additional llama.cpp forks by their GitHub repository. Paste a link like
+            Track additional engines and forks by their GitHub repository (llama.cpp builds, or a Strata clone: the engine is detected from the repository). Paste a link like
             <code> https://github.com/owner/repo </code> or <code>owner/repo</code>. Backends are
             organised under <code>&lt;fork-name&gt;/&lt;version&gt;/</code> and a resilient search
             locates the <code>llama-server</code> binary — even when it's nested deep in <code>build/bin/</code>.
@@ -693,8 +855,12 @@ export default function SettingsView() {
               onChange={e => setCustomBackendLink(e.target.value)}
               onKeyDown={e => { if (e.key === 'Enter') handleAddTrackedBackend() }}
             />
+            <select className="form-select" style={{ width: 150 }} value={customEngine} onChange={e => setCustomEngine(e.target.value as '' | EngineId)} title="Engine of this repository">
+              <option value="">Detect engine</option>
+              {(Object.keys(ENGINES) as EngineId[]).map(id => <option key={id} value={id}>{ENGINES[id].label}</option>)}
+            </select>
             <button className="btn btn-primary" onClick={handleAddTrackedBackend} disabled={!customBackendLink.trim()}>
-              <Plus size={14} /> Add custom backend from link
+              <Plus size={14} /> Add engine from link
             </button>
           </div>
           {customBackendErr && (
@@ -779,7 +945,32 @@ export default function SettingsView() {
                       {release.isNewer === false && <span className="up-to-date">✓ Up to date</span>}
                       {release.isNewer === true && <span className="new-badge">Update available</span>}
                     </div>
-                    {release.assets.length > 0 && (
+                    {t.kind === 'git' && release.git && (
+                      <div className="tracker-assets-row" style={{ alignItems: 'center', flexWrap: 'wrap', gap: 10 }}>
+                        {release.git.installed ? (
+                          <>
+                            <span style={{ fontSize: 12 }}>Installed: <strong>{release.git.localVersion}</strong></span>
+                            <button
+                              className="btn btn-primary btn-sm"
+                              disabled={!!gitBusy[t.id]}
+                              onClick={() => runGitAction(t, 'update')}
+                              title="git fetch and fast-forward (or reset) to the upstream branch"
+                            >
+                              {gitBusy[t.id] === 'update' ? <Loader2 size={13} className="spin" /> : <RefreshCw size={13} />} Update now
+                            </button>
+                          </>
+                        ) : (
+                          <button className="btn btn-primary btn-sm" disabled={!!gitBusy[t.id]} onClick={() => runGitAction(t, 'install')}>
+                            {gitBusy[t.id] === 'install' ? <Loader2 size={13} className="spin" /> : <Download size={13} />} {gitBusy[t.id] === 'install' ? 'Cloning...' : 'Install (git clone)'}
+                          </button>
+                        )}
+                        {engineSettings && !engineSettings.gitAvailable && (
+                          <span style={{ fontSize: 12, color: 'var(--warning)' }}>git was not found on PATH.</span>
+                        )}
+                        {gitError[t.id] && <span style={{ fontSize: 12, color: 'var(--danger)' }}>{gitError[t.id]}</span>}
+                      </div>
+                    )}
+                    {(release.assets.length > 0 || (release.otherPlatform?.length ?? 0) > 0) && (
                       <div className="tracker-assets-row" style={{ alignItems: 'flex-start', flexWrap: 'wrap' }}>
                         <div className="asset-picker" style={{ position: 'relative' }}>
                           <button
@@ -832,6 +1023,25 @@ export default function SettingsView() {
                                       <Trash size={12} />
                                     </button>
                                   ) : null}
+                                </div>
+                              ))}
+                              {(release.otherPlatform || []).map(o => (
+                                <div
+                                  key={`${o.platform}::${o.type}::${o.version}`}
+                                  title={`Made for ${o.platform}, so it cannot run on this machine. Listed so it can be removed.`}
+                                  style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '8px 10px', borderBottom: '1px solid var(--border)', opacity: 0.75 }}
+                                >
+                                  <span style={{ flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', fontSize: 13 }}>
+                                    {o.type} <span style={{ color: 'var(--text-muted)' }}>({o.platform} build {o.version}, installed)</span>
+                                  </span>
+                                  <button
+                                    className="btn btn-ghost btn-icon text-danger"
+                                    onClick={e => { e.stopPropagation(); handleDeleteBackendType(t, { name: o.type, type: o.type }, o.platform) }}
+                                    title={`Delete the ${o.platform} "${o.type}" build`}
+                                    style={{ flexShrink: 0, padding: 2 }}
+                                  >
+                                    <Trash size={12} />
+                                  </button>
                                 </div>
                               ))}
                             </div>

@@ -2,8 +2,9 @@ import { contextBridge, ipcRenderer } from 'electron'
 import { electronAPI } from '@electron-toolkit/preload'
 import type {
   ModelGroup, BackendVersion, TrackedBackend,
-  TrackedBackendRelease, ThemePref, ReleaseInfo, CpuInfo, SpecDetectionResult
+  TrackedBackendRelease, ThemePref, ReleaseInfo, CpuInfo, SpecDetectionResult, StrataSettings
 } from '../shared/types'
+import type { EngineId } from '../shared/engines'
 
 const api = {
   // ----- Models -----
@@ -32,8 +33,8 @@ const api = {
   // ----- Backends -----
   listBackends: () => ipcRenderer.invoke('list-backends') as Promise<BackendVersion[]>,
   deleteBackend: (backendId: string) => ipcRenderer.invoke('delete-backend', backendId),
-  deleteBackendType: (backendKey: string, backendType: string) => ipcRenderer.invoke('delete-backend-type', { backendKey, backendType }) as Promise<{ success: boolean; deleted?: boolean; error?: string }>,
-  getCommands: (backendKey: string) => ipcRenderer.invoke('get-commands', backendKey),
+  deleteBackendType: (backendKey: string, backendType: string, platform?: string) => ipcRenderer.invoke('delete-backend-type', { backendKey, backendType, platform }) as Promise<{ success: boolean; deleted?: boolean; error?: string }>,
+  getCommands: (backendKey: string, engine?: string) => ipcRenderer.invoke('get-commands', backendKey, engine),
   saveBackendCommands: (backendKey: string, schema: object) => ipcRenderer.invoke('save-backend-commands', backendKey, schema),
 
   // ----- Backend folders (external + main/starred) -----
@@ -45,7 +46,7 @@ const api = {
 
   // ----- Tracked backends (Backends Tracker) -----
   listTrackedBackends: () => ipcRenderer.invoke('list-tracked-backends') as Promise<TrackedBackend[]>,
-  addTrackedBackend: (link: string) => ipcRenderer.invoke('add-tracked-backend', link) as Promise<{ success: boolean; error?: string; tracked?: TrackedBackend }>,
+  addTrackedBackend: (link: string, engine?: string) => ipcRenderer.invoke('add-tracked-backend', link, engine) as Promise<{ success: boolean; error?: string; tracked?: TrackedBackend }>,
   removeTrackedBackend: (trackedId: string) => ipcRenderer.invoke('remove-tracked-backend', trackedId),
   checkAllBackends: () => ipcRenderer.invoke('check-all-backends') as Promise<{ results: TrackedBackendRelease[] }>,
   checkTrackedBackend: (trackedId: string) => ipcRenderer.invoke('check-tracked-backend', trackedId) as Promise<TrackedBackendRelease | { error: string }>,
@@ -188,6 +189,16 @@ const api = {
   getLaunchSettings: () => ipcRenderer.invoke('get-launch-settings') as Promise<{ launchOnStartup: boolean; autostartMainTemplates: boolean }>,
   setLaunchOnStartup: (enabled: boolean) => ipcRenderer.invoke('set-launch-on-startup', enabled) as Promise<{ success: boolean }>,
   setAutostartMainTemplates: (enabled: boolean) => ipcRenderer.invoke('set-autostart-main-templates', enabled) as Promise<{ success: boolean }>,
+  // ----- Engines (git-installed engines, tracker auto-update, Strata) -----
+  updateTrackedEngines: () => ipcRenderer.invoke('update-tracked-engines') as Promise<{ updated: string[]; errors: string[] }>,
+  installGitEngine: (trackedId: string) => ipcRenderer.invoke('install-git-engine', trackedId) as Promise<{ success: boolean; error?: string; path?: string }>,
+  updateGitEngine: (trackedId: string) => ipcRenderer.invoke('update-git-engine', trackedId) as Promise<{ success: boolean; error?: string; updated?: boolean; skipped?: string }>,
+  getEngineSettings: () => ipcRenderer.invoke('get-engine-settings') as Promise<{ autoUpdateTrackedEngines: boolean; strata: StrataSettings; strataDataDir: string; strataRememberedDataDir: string | null; gitAvailable: boolean }>,
+  setAutoUpdateTrackedEngines: (enabled: boolean) => ipcRenderer.invoke('set-auto-update-tracked-engines', enabled) as Promise<{ success: boolean }>,
+  setStrataSettings: (patch: { pullBeforeLaunch?: boolean; parallelOverride?: number | null; data?: Partial<StrataSettings['data']> }) => ipcRenderer.invoke('set-strata-settings', patch) as Promise<{ success: boolean }>,
+  pickStrataDataFolder: () => ipcRenderer.invoke('pick-strata-data-folder') as Promise<string | null>,
+  getGlobalEngineBackends: () => ipcRenderer.invoke('get-global-engine-backends') as Promise<Partial<Record<EngineId, { backendKey: string }>>>,
+  setGlobalEngineBackend: (engine: string, backendKey: string | null) => ipcRenderer.invoke('set-global-engine-backend', engine, backendKey) as Promise<{ success: boolean; error?: string }>,
   getGlobalBackend: () => ipcRenderer.invoke('get-global-backend') as Promise<{ backendKey: string; backendVersion: string; backendType?: string | null } | null>,
   setGlobalBackend: (backend: { backendKey: string; backendVersion: string; backendType?: string | null } | null) => ipcRenderer.invoke('set-global-backend', backend) as Promise<{ success: boolean }>,
   getMcpSettings: () => ipcRenderer.invoke('get-mcp-settings') as Promise<any>,

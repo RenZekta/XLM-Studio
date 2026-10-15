@@ -51,7 +51,23 @@ function createWindow(): void {
     mainWindow.loadFile(join(__dirname, '../renderer/index.html'))
   }
 }
+// One XLM Studio per user-data directory. A second instance would fight the
+// first over the MCP port, llama-server ports and the same settings/template
+// JSON files, so it quits right away and the running one is brought forward.
+const gotSingleInstanceLock = app.requestSingleInstanceLock()
+if (!gotSingleInstanceLock) {
+  app.quit()
+} else {
+  app.on('second-instance', () => {
+    const win = BrowserWindow.getAllWindows()[0]
+    if (!win) return
+    if (win.isMinimized()) win.restore()
+    win.show()
+    win.focus()
+  })
+}
 app.whenReady().then(() => {
+  if (!gotSingleInstanceLock) return
   // Rebrand to XLM Studio — unique app user model id + standalone data dir.
   electronApp.setAppUserModelId('com.renzekta.xlmstudio')
   app.on('browser-window-created', (_, window) => {
@@ -76,7 +92,7 @@ app.on('window-all-closed', () => {
 // to let killProcessTree do its job, then re-quit.
 let _cleaningUp = false
 app.on('before-quit', (event) => {
-  if (_cleaningUp) return
+  if (_cleaningUp || !gotSingleInstanceLock) return
   shutdownMcpLayer().catch(() => {})
   if (getRunningProcessCount() > 0) {
     _cleaningUp = true

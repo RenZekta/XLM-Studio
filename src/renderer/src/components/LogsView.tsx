@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef, useCallback } from 'react'
+import React, { useState, useEffect, useRef, useCallback, useMemo } from 'react'
 import { useStore } from '../store/useStore'
 import { Terminal, Trash, Pause, Play, Upload } from 'lucide-react'
 
@@ -10,7 +10,38 @@ interface LogEntry {
   stream: 'stdout' | 'stderr' | 'app'
   line: string
   ts: number
+  seq?: number
 }
+
+// One log line. Memoized so that appending lines doesn't re-render every row
+// already on screen (the list can hold 10000).
+const LogRow = React.memo(function LogRow({ l, name }: { l: LogEntry; name: string }) {
+  // App-level meta logs (lifecycle / generation / chat-request / errors)
+  // get a subtle highlight (left blue bar + faint blue tint) so the user
+  // can spot "important" events among the raw server output. Text colors
+  // still follow the requested scheme: time=white, name=blue, rest=gray.
+  const isApp = l.stream === 'app'
+  return (
+    <div
+      style={{
+        color: 'var(--text-secondary)',
+        whiteSpace: 'pre-wrap',
+        wordBreak: 'break-all',
+        padding: isApp ? '2px 6px 2px 8px' : '1px 0',
+        margin: isApp ? '2px 0' : 0,
+        borderRadius: isApp ? 4 : 0,
+        borderLeft: isApp ? '3px solid var(--info-blue)' : 'none',
+        background: isApp ? 'rgba(59,130,246,.06)' : 'transparent'
+      }}
+    >
+      <span style={{ color: 'var(--text)', fontSize: 11 }}>
+        [{new Date(l.ts).toLocaleTimeString()}]
+      </span>{' '}
+      <span style={{ color: 'var(--info-blue)', fontSize: 11, fontWeight: 600 }}>[{name}]</span>{' '}
+      {l.line}
+    </div>
+  )
+})
 
 // Logs tab — displays a live streaming window of llama-server stdout/stderr.
 // Logs now live in the global store (populated by a listener
@@ -77,9 +108,9 @@ export default function LogsView() {
   // template's stable ID) never changes. Look up the CURRENT name from
   // `cards` by id at display/export time instead, falling back to the
   // frozen snapshot only if the template no longer exists (e.g. deleted).
+  const templateNames = useMemo(() => new Map(cards.map(c => [c.template.id, c.template.name])), [cards])
   function liveName(l: LogEntry): string {
-    const card = cards.find(c => c.template.id === l.id)
-    return card?.template.name || l.name
+    return templateNames.get(l.id) || l.name
   }
 
   function handleExport() {
@@ -167,34 +198,7 @@ export default function LogsView() {
             No logs yet. Start a model to see server output, generation events, chat messages and lifecycle info here.
           </div>
         ) : (
-          displayed.map((l, i) => {
-            // App-level meta logs (lifecycle / generation / chat-request / errors)
-            // get a subtle highlight (left blue bar + faint blue tint) so the user
-            // can spot "important" events among the raw server output. Text colors
-            // still follow the requested scheme: time=white, name=blue, rest=gray.
-            const isApp = l.stream === 'app'
-            return (
-              <div
-                key={i}
-                style={{
-                  color: 'var(--text-secondary)',
-                  whiteSpace: 'pre-wrap',
-                  wordBreak: 'break-all',
-                  padding: isApp ? '2px 6px 2px 8px' : '1px 0',
-                  margin: isApp ? '2px 0' : 0,
-                  borderRadius: isApp ? 4 : 0,
-                  borderLeft: isApp ? '3px solid var(--info-blue)' : 'none',
-                  background: isApp ? 'rgba(59,130,246,.06)' : 'transparent'
-                }}
-              >
-                <span style={{ color: 'var(--text)', fontSize: 11 }}>
-                  [{new Date(l.ts).toLocaleTimeString()}]
-                </span>{' '}
-                <span style={{ color: 'var(--info-blue)', fontSize: 11, fontWeight: 600 }}>[{liveName(l)}]</span>{' '}
-                {l.line}
-              </div>
-            )
-          })
+          displayed.map((l, i) => <LogRow key={l.seq ?? i} l={l} name={liveName(l)} />)
         )}
       </div>
     </div>

@@ -1,6 +1,8 @@
 import React, { useEffect, useRef, useState } from 'react'
 import { useStore } from '../store/useStore'
 import { Link2, Database, Shield, Copy, Check, Server, Save } from 'lucide-react'
+import SegmentedToggle from './SegmentedToggle'
+import { ENGINES, ENGINE_IDS, type EngineId } from '../../../shared/engines'
 import { formatWithSpaces, parseSpacedNumber, CONTEXT_POWER_OF_TWO_STEPS, snapToNearestPowerOfTwo, indexOnLadder } from '../utils/contextFormat'
 
 
@@ -151,6 +153,23 @@ export default function OverridesView() {
   // "Parallel Sequences override" — draft-input state, keyed per slider
   // (unified/dense/moe) since Separate mode needs two independent drafts.
   const [parallelValueDraft, setParallelValueDraft] = useState<Record<string, string | null> | null>(null)
+  const [engineTab, setEngineTab] = useState<EngineId>('llama.cpp')
+  // Strata's own override (parallel requests); null = off.
+  const [strataParallel, setStrataParallel] = useState<number | null>(null)
+  useEffect(() => {
+    window.api.getEngineSettings().then(e => setStrataParallel(e.strata.parallelOverride)).catch(() => {})
+  }, [])
+  function saveStrataParallel(v: number | null) {
+    setStrataParallel(v)
+    window.api.setStrataSettings({ parallelOverride: v }).catch(() => {})
+  }
+  // How many of an engine's overrides are on, shown on its tab so a setting
+  // on a tab you are not looking at is never invisible.
+  const activeOverrides: Record<EngineId, number> = {
+    'llama.cpp': [kvCacheCheckpoints?.enabled, modelDefaults.parallelOverrideEnabled, modelDefaults.autoFitEnabled,
+      modelDefaults.cpuThreadsOverrideEnabled, modelDefaults.mmprojOffloadToRam].filter(Boolean).length,
+    strata: strataParallel !== null ? 1 : 0
+  }
 
   return (
     <div className="max-w-3xl">
@@ -248,6 +267,81 @@ export default function OverridesView() {
         </div>
       </div>
 
+      <div className="settings-section">
+        <div className="settings-section-title"><Shield /> Model Loading Guardrails</div>
+        <div className="settings-row" style={{ borderBottom: 'none', flexDirection: 'column', alignItems: 'flex-start', gap: 8 }}>
+          {[
+            { mode: 'off', label: 'OFF (Not Recommended)', hint: 'No precautions against system overload' },
+            { mode: 'relaxed', label: 'Relaxed', hint: 'Mild precautions against system overload' },
+            { mode: 'balanced', label: 'Balanced', hint: 'Moderate precautions against system overload' },
+            { mode: 'strict', label: 'Strict', hint: 'Strong precautions against system overload' },
+            { mode: 'custom', label: 'Custom', hint: 'Set your own limit for maximum model size that can be loaded' }
+          ].map(opt => (
+            <label key={opt.mode} style={{ display: 'flex', alignItems: 'flex-start', gap: 8, cursor: 'pointer', width: '100%' }}>
+              <input type="radio" name="guardrail" value={opt.mode} checked={modelDefaults.guardrailMode === opt.mode}
+                onChange={async (e) => {
+                  const d = { ...modelDefaults, guardrailMode: e.target.value }
+                  setModelDefaults(d); try { await window.api?.setModelDefaults?.(d) } catch {}
+                }} style={{ marginTop: 2 }} />
+              <div>
+                <div style={{ fontSize: 13, fontWeight: 600 }}>{opt.label}</div>
+                <div style={{ fontSize: 11, color: 'var(--text-muted)' }}>{opt.hint}</div>
+              </div>
+            </label>
+          ))}
+          {modelDefaults.guardrailMode === 'custom' && (
+            <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginTop: 8 }}>
+              <span style={{ fontSize: 12 }}>Max model size (GB):</span>
+              <input type="number" className="form-input" style={{ width: 100, textAlign: 'center' }} min={0} step={0.5} value={modelDefaults.customMaxSizeGB}
+                onChange={async (e) => {
+                  const d = { ...modelDefaults, customMaxSizeGB: Number(e.target.value) }
+                  setModelDefaults(d); try { await window.api?.setModelDefaults?.(d) } catch {}
+                }} />
+            </div>
+          )}
+          {vramInfo && systemRam && (() => {
+            // Vendor-aware label — no longer hardcodes "NVIDIA GPU" when an AMD /
+            // Intel / unknown GPU is present (fix for RX 9070 XT being reported as
+            // "NVIDIA GPU (0 MB VRAM)").
+            const gpuLabel = vramInfo.gpuName
+              || (vramInfo.vendor ? `${vramInfo.vendor} GPU` : 'GPU not detected')
+            const vram = vramInfo.totalVRAMMB || 0
+            const ram = systemRam.totalRAMMB || 0
+            const total = vram + ram
+            return (
+              <div style={{ fontSize: 11, color: 'var(--text-muted)', marginTop: 8 }}>
+                Detected: <span style={{ color: 'var(--text-secondary)', fontWeight: 600 }}>{gpuLabel}</span>
+                {vram > 0 ? ` (${vram.toLocaleString()} MB VRAM)` : ' (VRAM unavailable)'}
+                {' · '}{ram.toLocaleString()} MB system RAM
+                {' · Total: '}<span style={{ color: 'var(--text-secondary)', fontWeight: 600 }}>{total.toLocaleString()} MB</span>
+                {' (VRAM + RAM)'}
+              </div>
+            )
+          })()}
+        </div>
+      </div>
+
+
+      <div className="settings-section">
+        <div className="settings-section-title"><Server /> Engine settings</div>
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 8, paddingBottom: 6 }}>
+          <SegmentedToggle
+            label="Engine:"
+            options={ENGINE_IDS.map(id => ({
+              value: id,
+              label: `${ENGINES[id].label}${activeOverrides[id] > 0 ? ` (${activeOverrides[id]} active)` : ''}`
+            }))}
+            value={engineTab}
+            onChange={v => setEngineTab(v as EngineId)}
+          />
+          <div className="settings-row-sub">
+            The settings below belong to the selected engine only. API &amp; Network and Guardrails above apply to every engine.
+          </div>
+        </div>
+      </div>
+
+      {engineTab === 'llama.cpp' && (
+      <>
       <div className="settings-section">
         <div className="settings-section-title"><Save /> KV Cache Checkpoints</div>
         <div className="settings-row" style={{ borderBottom: 'none', flexDirection: 'column', alignItems: 'flex-start', gap: 12 }}>
@@ -462,28 +556,6 @@ export default function OverridesView() {
               </div>
             </div>
           )}
-          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', width: '100%', marginTop: 8 }}>
-            <div>
-              <div className="settings-row-label">Use current memory state in memory calculations</div>
-              <div className="settings-row-sub">
-                ON = use the currently-available Free VRAM / Free RAM (polled every 10s). OFF (default) = use the static maximum VRAM / RAM totals — more conservative and stable.
-              </div>
-            </div>
-            <div className="toggle-wrap">
-              <label className="toggle">
-                <input type="checkbox" checked={!!modelDefaults.useCurrentMemState} onChange={async (e) => {
-                  const d = { ...modelDefaults, useCurrentMemState: e.target.checked }
-                  setModelDefaults(d); try { await window.api?.setModelDefaults?.(d) } catch {}
-                }} />
-                <span className="toggle-track"></span><span className="toggle-thumb"></span>
-              </label>
-            </div>
-          </div>
-          {!modelDefaults.useCurrentMemState && (
-            <div style={{ fontSize: 11, color: 'var(--warning)', marginTop: 6, lineHeight: 1.5 }}>
-              Consider turning memory overhead on for system stability when using device alongside running model with full VRAM/RAM utilization.
-            </div>
-          )}
           {/* New: "Enable Multimodal Projector automatically in new Template
               if mmproj was detected" — ON by default. This governs whether a
               brand-new template defaults mmproj ON when the model has one, or
@@ -529,33 +601,10 @@ export default function OverridesView() {
               </label>
             </div>
           </div>
-          {/* Chat UI/API Only was a per-Template switch; removed in favor of
-              always serving the bundled webui and always offering "Open Chat"
-              once a Template is running. This is the only remaining control
-              over whether that window pops open BY ITSELF the moment a
-              Template starts — off by default so nothing opens unless the
-              user explicitly clicks "Open Chat". */}
-          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', width: '100%', marginTop: 8 }}>
-            <div>
-              <div className="settings-row-label">Open Chat UI automatically on Template startup</div>
-              <div className="settings-row-sub">
-                Off by default — "Open Chat" is always available once a Template is running, whether or not this is on.
-              </div>
-            </div>
-            <div className="toggle-wrap">
-              <label className="toggle">
-                <input type="checkbox" checked={modelDefaults.autoOpenChatUI === true} onChange={async (e) => {
-                  const d = { ...modelDefaults, autoOpenChatUI: e.target.checked }
-                  setModelDefaults(d); try { await window.api?.setModelDefaults?.(d) } catch {}
-                }} />
-                <span className="toggle-track"></span><span className="toggle-thumb"></span>
-              </label>
-            </div>
-          </div>
           {/* New: "Recommended CPU Threads override" — controls what
               Template -> CPU Threads defaults to for new templates (normally
-              75% of physical cores). Off by default; when on, defaults to
-              100%. The slider steps in 5% increments; the text input accepts
+              50% of physical cores). Off by default; when on, defaults to
+              50%. The slider steps in 5% increments; the text input accepts
               any %, but always gets snapped to the nearest whole-core-
               equivalent percentage on Enter/blur, so it can never resolve to
               a fractional core count. Existing templates whose --threads
@@ -565,7 +614,7 @@ export default function OverridesView() {
             <div>
               <div className="settings-row-label">Recommended CPU Threads override</div>
               <div className="settings-row-sub">
-                Overrides the default 75% of physical cores used to recommend Template → CPU Threads.
+                Overrides the default 50% of physical cores used to recommend Template → CPU Threads.
               </div>
             </div>
             <div className="toggle-wrap">
@@ -595,7 +644,7 @@ export default function OverridesView() {
               setModelDefaults(d); try { await window.api?.setModelDefaults?.(d) } catch {}
               setCpuThreadsPercentDraft(null)
             }
-            const currentPercent = modelDefaults.cpuThreadsOverridePercent ?? 100
+            const currentPercent = modelDefaults.cpuThreadsOverridePercent ?? 50
             const currentCores = Math.max(1, Math.round((currentPercent / 100) * physicalCores))
             return (
               <div style={{ width: '100%', marginTop: 6 }}>
@@ -665,59 +714,39 @@ export default function OverridesView() {
         </div>
       </div>
 
-      <div className="settings-section">
-        <div className="settings-section-title"><Shield /> Model Loading Guardrails</div>
-        <div className="settings-row" style={{ borderBottom: 'none', flexDirection: 'column', alignItems: 'flex-start', gap: 8 }}>
-          {[
-            { mode: 'off', label: 'OFF (Not Recommended)', hint: 'No precautions against system overload' },
-            { mode: 'relaxed', label: 'Relaxed', hint: 'Mild precautions against system overload' },
-            { mode: 'balanced', label: 'Balanced', hint: 'Moderate precautions against system overload' },
-            { mode: 'strict', label: 'Strict', hint: 'Strong precautions against system overload' },
-            { mode: 'custom', label: 'Custom', hint: 'Set your own limit for maximum model size that can be loaded' }
-          ].map(opt => (
-            <label key={opt.mode} style={{ display: 'flex', alignItems: 'flex-start', gap: 8, cursor: 'pointer', width: '100%' }}>
-              <input type="radio" name="guardrail" value={opt.mode} checked={modelDefaults.guardrailMode === opt.mode}
-                onChange={async (e) => {
-                  const d = { ...modelDefaults, guardrailMode: e.target.value }
-                  setModelDefaults(d); try { await window.api?.setModelDefaults?.(d) } catch {}
-                }} style={{ marginTop: 2 }} />
+      </>
+      )}
+      {engineTab === 'strata' && (
+        <div className="settings-section">
+          <div className="settings-section-title"><Server /> Parallel Requests</div>
+          <div className="settings-row" style={{ borderBottom: 'none', flexDirection: 'column', alignItems: 'stretch', gap: 10 }}>
+            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', width: '100%' }}>
               <div>
-                <div style={{ fontSize: 13, fontWeight: 600 }}>{opt.label}</div>
-                <div style={{ fontSize: 11, color: 'var(--text-muted)' }}>{opt.hint}</div>
+                <div className="settings-row-label">Override --parallel for every Strata Template</div>
+                <div className="settings-row-sub">
+                  Strata decodes one request at a time by default (1). Each extra slot takes VRAM from the expert cache, so speed drops as slots are added. Range 1 to 8.
+                </div>
               </div>
-            </label>
-          ))}
-          {modelDefaults.guardrailMode === 'custom' && (
-            <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginTop: 8 }}>
-              <span style={{ fontSize: 12 }}>Max model size (GB):</span>
-              <input type="number" className="form-input" style={{ width: 100, textAlign: 'center' }} min={0} step={0.5} value={modelDefaults.customMaxSizeGB}
-                onChange={async (e) => {
-                  const d = { ...modelDefaults, customMaxSizeGB: Number(e.target.value) }
-                  setModelDefaults(d); try { await window.api?.setModelDefaults?.(d) } catch {}
-                }} />
+              <div className="toggle-wrap">
+                <label className="toggle">
+                  <input type="checkbox" checked={strataParallel !== null} onChange={e => saveStrataParallel(e.target.checked ? 2 : null)} />
+                  <span className="toggle-track"></span><span className="toggle-thumb"></span>
+                </label>
+              </div>
             </div>
-          )}
-          {vramInfo && systemRam && (() => {
-            // Vendor-aware label — no longer hardcodes "NVIDIA GPU" when an AMD /
-            // Intel / unknown GPU is present (fix for RX 9070 XT being reported as
-            // "NVIDIA GPU (0 MB VRAM)").
-            const gpuLabel = vramInfo.gpuName
-              || (vramInfo.vendor ? `${vramInfo.vendor} GPU` : 'GPU not detected')
-            const vram = vramInfo.totalVRAMMB || 0
-            const ram = systemRam.totalRAMMB || 0
-            const total = vram + ram
-            return (
-              <div style={{ fontSize: 11, color: 'var(--text-muted)', marginTop: 8 }}>
-                Detected: <span style={{ color: 'var(--text-secondary)', fontWeight: 600 }}>{gpuLabel}</span>
-                {vram > 0 ? ` (${vram.toLocaleString()} MB VRAM)` : ' (VRAM unavailable)'}
-                {' · '}{ram.toLocaleString()} MB system RAM
-                {' · Total: '}<span style={{ color: 'var(--text-secondary)', fontWeight: 600 }}>{total.toLocaleString()} MB</span>
-                {' (VRAM + RAM)'}
+            {strataParallel !== null && (
+              <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+                <input
+                  type="range" min={1} max={8} step={1} value={strataParallel}
+                  onChange={e => saveStrataParallel(Number(e.target.value))}
+                  style={{ flex: 1 }}
+                />
+                <span className="mono" style={{ minWidth: 20, textAlign: 'right' }}>{strataParallel}</span>
               </div>
-            )
-          })()}
+            )}
+          </div>
         </div>
-      </div>
+      )}
 
     </div>
   )

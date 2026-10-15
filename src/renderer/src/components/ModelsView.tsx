@@ -96,6 +96,18 @@ function UrlDownloadModal({ onClose }: { onClose: () => void }) {
 
 
 // A single model file row inside a group.
+// Whether Strata can run a file, from the validation cached with its
+// metadata (only present for architectures Strata knows).
+function StrataChip({ path }: { path: string }) {
+  const info = useStore(st => st.ggufMetadata[path]?.strata) as { kind: string; family?: string; model?: string; detail: string } | undefined
+  if (!info) return null
+  const label = info.kind === 'known' ? `Strata ${info.family}/${info.model}`
+    : info.kind === 'layout' ? 'Strata: same layout'
+    : info.kind === 'untested' ? 'Strata: untested' : 'Strata: no'
+  const color = info.kind === 'known' ? 'var(--success)' : info.kind === 'no' ? 'var(--text-muted)' : 'var(--warning)'
+  return <span className="mmproj-chip" style={{ color }} title={info.detail}>{label}</span>
+}
+
 function ModelFileRow({
   name, path, size, group, onDeleted
 }: {
@@ -148,11 +160,13 @@ function ModelFileRow({
           <div className="model-size-breakdown">
             <span className="total-chip">Total: {formatBytes(totalWithMmproj)}</span>
             <span>Model: {formatBytes(size)}</span>
+            <StrataChip path={path} />
             <span className="mmproj-chip">+ mmproj {formatBytes(mmproj.size)}</span>
           </div>
         ) : (
           <div className="model-size-breakdown">
             <span className="total-chip">Model: {formatBytes(size)}</span>
+            <StrataChip path={path} />
           </div>
         )}
       </div>
@@ -270,13 +284,8 @@ export default function ModelsView() {
     setLoading(false)
   }, [setModels])
 
-  // "Reextract model data" — wipes BOTH the persisted (main-process)
-  // and in-memory (renderer store) metadata caches, then re-triggers
-  // extraction for every currently-detected model, exactly like the app-launch
-  // parallel scan does for uncached models (see App.tsx's init effect) — the
-  // only difference is this one is unconditional (every model gets rescanned,
-  // not just ones missing from the cache), and mmproj files are naturally
-  // skipped since they were never included in `g.models` to begin with.
+  // Wipes the persisted and in-memory metadata caches, then relists: the
+  // main process re-extracts every model the cache no longer has.
   const reextractAll = useCallback(async () => {
     if (reextracting) return
     if (!confirm('This deletes all stored model metadata and re-extracts it from scratch for every detected model. This can take a while for large libraries. Continue?')) return
@@ -284,17 +293,7 @@ export default function ModelsView() {
     try {
       await window.api.clearMetadataCache?.()
       clearGgufMetadataAll()
-      const fresh = await window.api.listModels()
-      setModels(fresh)
-      const allPaths: string[] = []
-      for (const g of fresh) for (const m of g.models) allPaths.push(m.path)
-      // Fire-and-forget in parallel, same as the startup scan — the
-      // onMetadataExtracting/onGgufMetadataUpdated listeners registered in
-      // App.tsx handle the notification + populating the store as results
-      // stream back in, so we don't need to await each one here.
-      for (const p of allPaths) {
-        window.api?.getGgufMetadata?.(p).catch(() => {})
-      }
+      setModels(await window.api.listModels())
     } finally {
       setReextracting(false)
     }

@@ -2,7 +2,7 @@ import React, { useState } from 'react'
 import { useStore } from '../store/useStore'
 import { X, Download, Loader2, RefreshCw } from 'lucide-react'
 
-// Mirrors Settings -> Backends Tracker's own "Update (N)" action for the
+// Mirrors Settings -> Engine tracker's own "Update (N)" action for the
 // llama-cpp tracked backend: every already-installed build that's now
 // outdated gets updated in one click, no per-click asset-type choice (that
 // choice was already made whenever each build was originally installed --
@@ -10,7 +10,7 @@ import { X, Download, Loader2, RefreshCw } from 'lucide-react'
 // version of this banner offered a single-type picker + Download button,
 // which is the older single-type-per-backend model this app has since
 // moved away from.
-export default function UpdateBanner() {
+function LlamaUpdateBanner() {
   const {
     releaseInfo, updateDismissed, setUpdateDismissed, downloadProgress, setDownloadProgress,
     setBackends, setTrackerResult
@@ -96,5 +96,69 @@ export default function UpdateBanner() {
         </button>
       )}
     </div>
+  )
+}
+
+// Git-installed engines (Strata) are updated by pulling the clone, so they
+// have no assets to list: the notice names the new release tag and offers the
+// same update the Engine tracker has. Dismissal is per release tag.
+function GitEngineBanner() {
+  const { trackedBackends, trackerResults, setBackends, setTrackerResult } = useStore()
+  const [dismissed, setDismissed] = useState<Record<string, boolean>>({})
+  const [busy, setBusy] = useState<string | null>(null)
+  const [error, setError] = useState<Record<string, string>>({})
+  const notifPref = localStorage.getItem('hexllama_update_notify') || 'banner'
+  if (notifPref === 'manual') return null
+  const pending = trackedBackends.filter(t => {
+    const g = trackerResults[t.id]?.git
+    return t.kind === 'git' && g?.updateAvailable && !dismissed[`${t.id}@${g.latestTag}`]
+  })
+  if (pending.length === 0) return null
+
+  async function update(id: string) {
+    setBusy(id)
+    const res = await window.api.updateGitEngine(id)
+    if (!res.success) setError(e => ({ ...e, [id]: res.error || 'Update failed' }))
+    setBackends(await window.api.listBackends())
+    const checked = await window.api.checkTrackedBackend(id)
+    if (!('error' in checked)) setTrackerResult(checked)
+    setBusy(null)
+  }
+
+  return (
+    <>
+      {pending.map(t => {
+        const g = trackerResults[t.id]!.git!
+        return (
+          <div className="update-banner" key={t.id}>
+            {busy === t.id ? <Loader2 size={14} className="spin" /> : <Download size={14} />}
+            <span>
+              <strong>{t.name} {g.latestTag}</strong> is available (installed {g.localVersion}) |{' '}
+              <button onClick={() => window.api.openExternal(trackerResults[t.id]!.url)}>View release</button>
+              {' '}|{' '}
+              {busy === t.id ? <span style={{ opacity: 0.8 }}>Updating...</span> : (
+                <button onClick={() => update(t.id)} title="git fetch and fast-forward to the upstream branch">
+                  <RefreshCw size={12} style={{ verticalAlign: -2, marginRight: 4 }} />
+                  Update
+                </button>
+              )}
+              {error[t.id] && <span style={{ color: 'var(--danger)', marginLeft: 8 }}>{error[t.id]}</span>}
+            </span>
+            <button className="dismiss" onClick={() => setDismissed(d => ({ ...d, [`${t.id}@${g.latestTag}`]: true }))} title="Dismiss">
+              <X size={14} />
+            </button>
+          </div>
+        )
+      })}
+    </>
+  )
+}
+
+export default function UpdateBanner() {
+  return (
+    <>
+      <LlamaUpdateBanner />
+      <GitEngineBanner />
+    </>
   )
 }

@@ -5,10 +5,17 @@ import { StarIcon as StarShape } from '../utils/format'
 import type { BackendVersion } from '../../../shared/types'
 import { backendTypeGroupLabel } from '../../../shared/backendType'
 import DownloadsMenu from './DownloadsMenu'
+import SelectMenu from './SelectMenu'
+import { engineOf, ENGINES, modelSpecificEngines, type EngineId } from '../../../shared/engines'
+import { backendsOfEngine, globalBackendOf } from '../utils/engineBackends'
 
 export default function Sidebar() {
-  const { view, setView, backends, activeBackend, switchBackend: storeSwitchBackend, paths, compactSidebarEnabled,
-          mainModelFolder, mainBackendFolder } = useStore()
+  const { view, setView, backends: allBackends, activeBackend, switchBackend: storeSwitchBackend, paths, compactSidebarEnabled,
+          mainModelFolder, mainBackendFolder, engineGlobals, setEngineGlobals } = useStore()
+  // This section is llama.cpp's: backends are grouped by GPU backend type
+  // and one build is the global selection. Other engines get their own
+  // section further down, each with an independent selection.
+  const backends = React.useMemo(() => allBackends.filter(b => engineOf(b) === 'llama.cpp'), [allBackends])
 
   // Distinct, detected-only backend-type groups (see backendTypeGroupLabel)
   // -- e.g. if the user only has Vulkan and ROCm builds installed, this is
@@ -55,6 +62,11 @@ export default function Sidebar() {
   // name-based lookup here would be ambiguous whenever two forks share a
   // version tag (see ModelCard's targetBackend resolution for the same
   // concern on the run-model path).
+  async function selectEngineRepo(engine: EngineId, backendKey: string) {
+    setEngineGlobals({ ...engineGlobals, [engine]: { backendKey } })
+    window.api.setGlobalEngineBackend(engine, backendKey).catch(() => {})
+  }
+
   async function switchBackend(b: BackendVersion) {
     window.api.setGlobalBackend({ backendKey: b.backendKey, backendVersion: b.name, backendType: b.backendType ?? null }).catch(() => {})
     await storeSwitchBackend(b)
@@ -166,6 +178,50 @@ export default function Sidebar() {
            nav-item's own text label already does. */
         .sidebar-compact .nav-item-row .downloads-menu-btn { display: none; }
         .sidebar-compact:hover .nav-item-row .downloads-menu-btn { display: inline-flex; }
+        /* The collapsed rail has 44px of content: one arrow, centered, with
+           the same square footprint as a nav-item. The label returns with the
+           expanded rail. */
+        .sidebar-compact .select-menu-sidebar {
+          width: 44px;
+          margin: 0 0 4px;
+        }
+        .sidebar-compact .select-menu-sidebar .select-menu-btn {
+          justify-content: center;
+          padding: 0;
+          height: 36px;
+        }
+        .sidebar-compact .select-menu-sidebar .select-menu-label {
+          position: absolute;
+          opacity: 0;
+          visibility: hidden;
+        }
+        .sidebar-compact:hover .select-menu-sidebar {
+          width: calc(100% - 20px);
+          margin: 0 10px 4px;
+        }
+        .sidebar-compact:hover .select-menu-sidebar .select-menu-btn {
+          justify-content: space-between;
+          padding: 8px 16px;
+          height: auto;
+        }
+        .sidebar-compact:hover .select-menu-sidebar .select-menu-label {
+          position: static;
+          opacity: 1;
+          visibility: visible;
+        }
+        /* Folder buttons hold a name plus a caption: when the rail expands they
+           must wrap and grow like they do in the full sidebar, not inherit the
+           rail's single-line, fixed-height rules. */
+        .sidebar-compact:hover .sidebar-folder-btn .nav-item {
+          height: auto !important;
+          min-height: 38px;
+          white-space: normal;
+        }
+        .sidebar-compact:hover .sidebar-folder-btn .nav-item-text {
+          white-space: normal;
+          min-width: 0;
+          overflow-wrap: anywhere;
+        }
         .sidebar-compact .folder-triggers-container {
           display: flex;
           flex-direction: column;
@@ -242,7 +298,7 @@ export default function Sidebar() {
 
       {backends.length > 0 && (
         <>
-          <span className="nav-section-label" style={{ marginTop: 12 }}>Backend</span>
+          <span className="nav-section-label" style={{ marginTop: 12 }}>{ENGINES['llama.cpp'].label}</span>
           {backendGroups.length > 1 && (
             <div className="theme-segmented backend-type-switch" style={{ margin: '0 10px 6px', width: 'auto', display: 'flex' }}>
               {backendGroups.map(g => (
@@ -258,7 +314,15 @@ export default function Sidebar() {
               ))}
             </div>
           )}
-          {visibleBackends.map((b) => (
+          {visibleBackends.length > 1 ? (
+            <SelectMenu
+              options={visibleBackends.map(b => ({ value: b.id, label: b.displayName }))}
+              value={visibleBackends.some(b => b.id === activeBackend?.id) ? activeBackend!.id : ''}
+              onChange={id => { const b = visibleBackends.find(x => x.id === id); if (b) switchBackend(b) }}
+              placeholder="Select a backend"
+              title={activeBackend?.displayName}
+            />
+          ) : visibleBackends.map((b) => (
             <button
               key={b.id}
               className={`nav-item ${activeBackend?.id === b.id ? 'active' : ''}`}
@@ -274,11 +338,38 @@ export default function Sidebar() {
         </>
       )}
 
-      {backends.length === 0 && (
+      {/* One section per model-specific engine that has an install. */}
+      {modelSpecificEngines().map(e => {
+        const list = backendsOfEngine(allBackends, e.id)
+        if (list.length === 0) return null
+        const selected = globalBackendOf(e.id, allBackends, activeBackend, engineGlobals)
+        return (
+          <React.Fragment key={e.id}>
+            <span className="nav-section-label" style={{ marginTop: 12 }}>{e.label}</span>
+            {list.length > 1 ? (
+              <SelectMenu
+                options={list.map(b => ({ value: b.backendKey, label: b.displayName }))}
+                value={selected?.backendKey || ''}
+                onChange={key => selectEngineRepo(e.id, key)}
+                title={selected?.displayName}
+              />
+            ) : (
+              <div className="nav-item active" title={list[0].displayName} style={{ cursor: 'default' }}>
+                <HardDrive size={16} />
+                <span className="nav-item-text" style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', flex: 1, textAlign: 'left' }}>
+                  {list[0].displayName}
+                </span>
+              </div>
+            )}
+          </React.Fragment>
+        )
+      })}
+
+      {allBackends.length === 0 && (
         <>
-          <span className="nav-section-label" style={{ marginTop: 12 }}>Backend</span>
+          <span className="nav-section-label" style={{ marginTop: 12 }}>Engines</span>
           <div className="nav-item-text" style={{ padding: '8px 10px', fontSize: 11, color: 'var(--text-muted)', lineHeight: 1.5 }}>
-            No backend found.<br />Download one in Settings.
+            No engine found.<br />Download one in Settings.
           </div>
         </>
       )}
@@ -298,8 +389,8 @@ export default function Sidebar() {
                 )}
                 Open /{backendLabel}
               </span>
-              {!mainBackendFolder && <span className="folder-sub">Default Backends Folder</span>}
-              {mainBackendFolder && <span className="folder-sub">Main Backends Folder</span>}
+              {!mainBackendFolder && <span className="folder-sub">Default Engines Folder</span>}
+              {mainBackendFolder && <span className="folder-sub">Main Engines Folder</span>}
             </span>
           </button>
           <button

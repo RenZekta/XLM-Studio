@@ -22,6 +22,8 @@ import { join } from 'path'
 import { randomUUID } from 'crypto'
 import * as http from 'http'
 import { BrowserWindow, ipcMain, dialog } from 'electron'
+import type { EngineId } from '../shared/engines'
+import { parseStrataMetrics } from './strataMetrics'
 
 export interface PerfGenPoint { ts: number; contextTokens: number; genTps: number }
 export interface PerfPrefillPoint { ts: number; promptSize: number; promptTps: number; cached: boolean }
@@ -49,6 +51,7 @@ let onSessionEnded: ((templateId: string, summary: { firstTps: number | null; av
 const active = new Map<string, {
   session: PerfSessionData
   port: number
+  engine: EngineId
   timer: NodeJS.Timeout
   // Last raw counters read from /metrics, for delta computation.
   lastPromptTokens: number
@@ -108,14 +111,17 @@ function parsePrometheusMetrics(text: string): Record<string, number> {
   return out
 }
 
-function fetchMetrics(port: number): Promise<Record<string, number> | null> {
+function fetchMetrics(port: number, engine: EngineId): Promise<Record<string, number> | null> {
   return new Promise((resolve) => {
-    const req = http.get({ host: '127.0.0.1', port, path: '/metrics', timeout: 3000 }, (res) => {
+    // Strata answers /metrics with Prometheus text when Accept mentions
+    // text/plain, so asking for both would never return the JSON it parses.
+    const accept = engine === 'strata' ? 'application/json' : 'text/plain'
+    const req = http.get({ host: '127.0.0.1', port, path: '/metrics', timeout: 3000, headers: { Accept: accept } }, (res) => {
       let data = ''
       res.on('data', (chunk) => { data += chunk })
       res.on('end', () => {
         if (res.statusCode !== 200) { resolve(null); return }
-        resolve(parsePrometheusMetrics(data))
+        resolve(engine === 'strata' ? parseStrataMetrics(data) : parsePrometheusMetrics(data))
       })
     })
     req.on('error', () => resolve(null))
@@ -126,7 +132,7 @@ function fetchMetrics(port: number): Promise<Record<string, number> | null> {
 function poll(templateId: string) {
   const entry = active.get(templateId)
   if (!entry) return
-  fetchMetrics(entry.port).then((m) => {
+  fetchMetrics(entry.port, entry.engine).then((m) => {
     if (!m) return
     const stillActive = active.get(templateId)
     if (!stillActive) return  // stopped mid-flight
@@ -218,7 +224,7 @@ export function initPerfMonitor(appRoot: string, opts: {
   if (!existsSync(SESSIONS_DIR)) { try { mkdirSync(SESSIONS_DIR, { recursive: true }) } catch {} }
 }
 
-export function startTracking(templateId: string, port: number, templateName: string) {
+export function startTracking(templateId: string, port: number, templateName: string, engine: EngineId = 'llama.cpp') {
   if (active.has(templateId)) stopTracking(templateId)  // shouldn't happen, but stay safe
   const session: PerfSessionData = {
     id: randomUUID(),
@@ -231,7 +237,7 @@ export function startTracking(templateId: string, port: number, templateName: st
   }
   const timer = setInterval(() => poll(templateId), POLL_INTERVAL_MS)
   active.set(templateId, {
-    session, port, timer,
+    session, port, engine, timer,
     lastPromptTokens: 0, lastPromptSeconds: 0, lastPredTokens: 0, lastPredSeconds: 0,
     coldThroughputSamples: []
   })

@@ -9,7 +9,7 @@
 
 <br/>
 
-XLM Studio is a fast, native desktop interface for discovering, downloading, configuring, and serving local Large Language Models with llama.cpp-compatible backends. It strips away the friction of command-line execution and manual VRAM math, giving you a single workspace that goes from "found a GGUF on Hugging Face" to "running server with sane defaults" in a couple of clicks.
+XLM Studio is a fast, native desktop interface for discovering, downloading, configuring, and serving local Large Language Models with llama.cpp-compatible engines (and Strata, a model-specific engine). It strips away the friction of command-line execution and manual VRAM math, giving you a single workspace that goes from "found a GGUF on Hugging Face" to "running server with sane defaults" in a couple of clicks.
 
 XLM Studio is a fork of [Hexllama](https://github.com/andersondanieln/hexllama), heavily extended with many features, including a memory-aware configuration engine: it reads a model's actual GGUF metadata (architecture, layer count, KV-cache geometry, MoE expert layout, quantization, speculative-decoding tensors, native chat template) and uses it to compute real VRAM/RAM budgets and recommend settings, instead of making you guess loading parameters.
 
@@ -65,10 +65,10 @@ MoE:
 
 **Three-Way Configuration Presets**
 
-Every template has a **Quick** / **FULL AUTO** / **Clear** switch:
+Every template has a **Quick** / **FULL AUTO** / **Manual** switch:
 - **Quick** applies good fast-starting engine baseline (threads, batch sizes, flash attention, KV cache quantization, speculative decoding drafting parameters) and, for Dense models max GPU layers so llama.cpp will offload as much as it can; MoE models are left on llama.cpp's auto offloading (it's good for MoE). Context defaults to the model's native context (capped at 32K for Dense for a reasoble baseline; for MoE set to max, since MoE tolerates RAM-resident layers well).
 - **FULL AUTO** starts from the same baseline but hands context and GPU-layer placement over to llama.cpp's own `--fit` auto-sizing. If you need more space for context or GPU offloading, turn off Multimodal Projector and Speculative Decoding, and you'll get the most out of your available VRAM.
-- **Clear** wipes engine settings back to nothing, without touching your sampling parameters (temperature, top-p, top-k, min-p, penalties) — those are considered separate, per-preference settings that no engine preset should ever silently overwrite.
+- **Manual** wipes engine settings back to nothing, without touching your sampling parameters (temperature, top-p, top-k, min-p, penalties) — those are considered separate, per-preference settings that no engine preset should ever silently overwrite.
 
 Common parameters shows only the most impactful parameters (LM Studio style), Full shows all menu control supported parameters.
 
@@ -79,7 +79,7 @@ Parameters that differ from the currently-selected preset (or, for sampling valu
 
 **Visual Command Editor**
 
-No need to memorize execution flags or save your commands in an endless unreadable diary. Edit backend-specific commands through a structured user interface, with a "Common" view for everyday parameters and a "Full" view for all supported parameters. Toggle booleans, set limits on numerical inputs, and define default parameter values. You can still input commands directly in the Import section.
+No need to memorize execution flags or save your commands in an endless unreadable diary. Edit engine-specific commands through a structured user interface, with a "Common" view for everyday parameters and a "Full" view for all supported parameters. Toggle booleans, set limits on numerical inputs, and define default parameter values. You can still input commands directly in the Import section.
 
 <img width="480" height="712" alt="image" src="https://github.com/user-attachments/assets/b6c514ea-b6cd-46ee-bd2e-e1fba93e74c0" />
 
@@ -149,13 +149,27 @@ Every template shows a live preview of the exact `llama-server` command that wil
 
 
 
-**Version and Backend Management**
+**Version and Engine Management**
 
-Running cutting-edge models sometimes requires different builds of llama.cpp (or compatible with extra feature forks, e.g. TurboQuant-enabled builds). XLM Studio lets you maintain and seamlessly switch between multiple backend binaries, and can check upstream repositories for new releases and download/extract them straight from the settings panel.
+Running cutting-edge models sometimes requires different builds of llama.cpp (or compatible with extra feature forks, e.g. TurboQuant-enabled builds). XLM Studio lets you maintain and seamlessly switch between multiple engine builds, and can check upstream repositories for new releases and download/extract them straight from the settings panel.
 
 [atomic-llama-cpp-turboquant](https://github.com/AtomicBot-ai/atomic-llama-cpp-turboquant) and [BeeLlama.cpp](https://github.com/Anbeeld/beellama.cpp) are built in. Their fork-only parameters (KVarN and extra low-bit KV cache types, KV precision tail, DFlash depth controller, reasoning loop guard) appear only for templates running on that fork, and are dropped automatically if a template moves to a backend that doesn't support them.
 
 <img width="2553" height="1388" alt="image" src="https://github.com/user-attachments/assets/128c738d-de86-4906-8752-f5a7f255820d" />
+
+**Strata (model-specific engine)**
+
+[Strata](https://github.com/Niko1221/Strata) runs Qwen3.8-Flash-Next on consumer GPUs by keeping the mixture-of-experts weights in system RAM. It is installed as a `git clone` (Settings > Engine tracker), updated with git, and driven through its own launcher scripts, so XLM Studio never needs to know how it prepares a model.
+
+- **Engine, Repo, Backend.** Every template picks an **Engine** (llama.cpp or Strata) and then a repo and, for engines with several builds, a GPU backend. "Follow global" templates use the engine's selection in the sidebar; each engine has its own. Values you set for an engine are kept if you switch the template away and back.
+- **Automatic model validation.** While reading a GGUF's metadata, XLM Studio fingerprints its routed experts the way Strata's own `strata_inspect.py` does. The Models tab shows the match type (a file Strata installs, the same layout, untested, or not runnable), and new templates for a recognised file start on Strata. Fingerprints come from the installed Strata, with a bundled snapshot as fallback.
+- **Presets and editor.** The Strata editor works like the llama.cpp one: FULL AUTO sends only the model's identity and leaves every value to Strata's own recommendation, Quick carries over context size, KV precision and image input (there is no Manual preset, since there is little to set). Fields show the value Strata will actually use (for example the recommended context for your GPU and RAM), not a placeholder, and are highlighted when they differ from the selected preset's own values. There is a Common / Full parameters switch, the same context slider with optional 2x steps and automatic YaRN scaling, and a selectable launch preview with the global overrides applied. A memory panel estimates KV cache, the share of experts on the GPU and the RAM needed, using the same rules as Strata's setup.
+- **Updates.** "Update tracked engines automatically" (off by default) updates installed llama.cpp builds and Strata after the startup check. "Update before launch" is a separate Strata switch that fast-forwards the clone before each launch; a failed update never blocks the launch.
+- **Data folder.** Strata's prepared data lives in one global folder (default `<engines folder>/Strata-data`), or in an isolated folder with its own Strata settings. Strata only moves data between folders on the same drive, so changing the folder does not move existing files.
+- **Overrides.** The API and Network block (port, local network, API key) and the loading guardrails apply to every engine; the rest of the Overrides page is per engine.
+
+Windows and Linux only; Strata does not support macOS.
+
 
 
 
@@ -208,7 +222,7 @@ cd (X:\your\chosen\destination)\XLM-Studio && npm install && npm run build && np
 - [x] **Integrated Model Hub**: Hugging Face search & download direct from the app.
 - [x] **Smart Download Manager**: Pause/resume/cancel, paste direct GGUF links. Downloads never create Templates on their own.
 - [x] **Template-Based Execution**: Run multiple models on different ports, reusable configuration templates.
-- [x] **Version and Backend Management**: Download and switch between different versions of `llama.cpp`-compatible binaries directly.
+- [x] **Version and Engine Management**: Download and switch between different versions of `llama.cpp`-compatible binaries directly.
 - [x] **Visual Command Editor**: Graphical UI for configuring server parameters instead of terminal flags.
 
 ### Phase 2: Memory-Aware Configuration (Completed)
@@ -219,7 +233,7 @@ cd (X:\your\chosen\destination)\XLM-Studio && npm install && npm run build && np
 - [x] **mmproj RAM Offload**: per-Template Follow global / Disabled / Enabled control (and a global Overrides switch, on by default) for `--no-mmproj-offload`; nothing is emitted when the projector stays on the GPU.
 - [x] **Draft Model KV Cache Types**: `--spec-draft-type-k/-v` dropdowns in Speculative Decoding, offering the same types as the target KV cache and defaulting to each fork's own KV default.
 - [x] **Unified KV Cache**: `--kv-unified` on by default, so `--parallel` sequences share a single KV buffer instead of splitting the context window between them.
-- [x] **Three-Way Presets**: Quick / FULL AUTO / Clear, with preset-relative diff highlighting that never touches sampling parameters.
+- [x] **Three-Way Presets**: Quick / FULL AUTO / Manual, with preset-relative diff highlighting that never touches sampling parameters.
 - [x] **YaRN Context Scaling**: Automatic RoPE/YaRN scaling to extend usable context past a model's native window.
 - [x] **Command Preview**: Live, launch-accurate preview of the actual command that will run, with a stacked (one-flag-per-line) view option.
 - [x] **Monitoring**: Real-time and historical generation-speed/prefill-speed tracking per session, with comparison, export/import, and configurable history retention.
@@ -229,10 +243,11 @@ cd (X:\your\chosen\destination)\XLM-Studio && npm install && npm run build && np
 - [ ] **Built-in Chat Interface**: Native chat client to interact with models directly within XLM Studio without launching external browser tabs — would also let Monitoring see real per-request data instead of polling `/metrics`. Optional goal, it works just fine with a separate chat window too.
 - [ ] **Multi-Language Support**: Complete internationalization (i18n) to support languages beyond English.
 - [X] MCP control over XLM Studio
-- [X] Persistent KV Cache for quick conversation resume after switching or restarting templates (tested, broken for hybrid attention architectures until https://github.com/ggml-org/llama.cpp/issues/25913 is fixed or https://github.com/ggml-org/llama.cpp/pull/26004 is merged, + will depend on the individual fork after that)
+- [X] Persistent KV Cache for quick conversation resume after switching or restarting templates. Support for Hybrid models was merged only recently, so whether it works or not depends on the individual fork.
 
-### Phase 4: Multi-Backend & Advanced Engines (Long-Term)
-- [ ] Optional **Alternative Backend Integration**: Expand support beyond `llama.cpp` to include:
+### Phase 4: Multi-Engine & Advanced Engines (Long-Term)
+- [x] **Strata Support (v2.2.0)**: First model-specific engine. Git-clone install and update, automatic GGUF validation, per-engine Template values with an Engine / Repo / Backend selector, Strata presets and memory estimate, and a shared API & Network override.
+- [ ] Optional **Alternative Engine Integration**: Expand support beyond `llama.cpp` and Strata to include:
   - **MLX**: Native backend for Apple Silicon optimized performance.
   - **vLLM / ExLlamaV2**: Support for high-throughput and GPU-optimized engines.
   - Planned: [PicoLM](https://github.com/whoreson/picolm) support as llama.cpp alternative

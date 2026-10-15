@@ -1,6 +1,6 @@
 {
   "name": "xlm-studio",
-  "version": "2.1.0",
+  "version": "2.2.0",
   "description": "XLM Studio — a GUI for llama.cpp (fork of Hexllama)",
   "main": "out/main/index.js",
   "homepage": "./",
@@ -13,32 +13,32 @@
     "package": "electron-vite build && electron-builder"
   },
   "dependencies": {
-    "@modelcontextprotocol/sdk": "^1.30.0",
-    "electron-updater": "^6.3.9",
+    "@modelcontextprotocol/sdk": "^1.32.1",
+    "electron-updater": "^6.8.9",
     "pidusage": "^4.0.1",
     "recharts": "^3.10.1",
-    "systeminformation": "^5.31.6",
+    "systeminformation": "^5.33.15",
     "yauzl": "^3.4.0",
-    "zod": "^3.25.0",
-    "zustand": "^4.5.2"
+    "zod": "^4.6.6",
+    "zustand": "^5.0.15"
   },
   "devDependencies": {
-    "@electron-toolkit/preload": "^3.0.1",
+    "@electron-toolkit/preload": "^3.0.2",
     "@electron-toolkit/tsconfig": "^2.0.0",
-    "@electron-toolkit/utils": "^3.0.0",
-    "@types/node": "^24.19.1",
-    "@types/react": "^18.3.3",
-    "@types/react-dom": "^18.3.0",
+    "@electron-toolkit/utils": "^4.0.0",
+    "@types/node": "^24.19.2",
+    "@types/react": "^19.3.0",
+    "@types/react-dom": "^19.3.0",
     "@types/yauzl": "^3.4.0",
     "@vitejs/plugin-react": "^4.7.0",
-    "electron": "^44.5.1",
+    "electron": "^44.7.0",
     "electron-builder": "^26.17.0",
     "electron-vite": "^5.0.0",
-    "lucide-react": "^0.400.0",
-    "react": "^18.3.1",
-    "react-dom": "^18.3.1",
-    "typescript": "^5.5.2",
-    "vite": "^7.3.6"
+    "lucide-react": "^1.55.0",
+    "react": "^19.3.0",
+    "react-dom": "^19.3.0",
+    "typescript": "^7.0.2",
+    "vite": "^7.3.7"
   },
   "overrides": {
     "app-builder-lib": {

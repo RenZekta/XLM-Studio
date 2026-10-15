@@ -1,8 +1,14 @@
 import React, { useState, useEffect, useRef } from 'react'
 import { useStore } from '../store/useStore'
 import { FolderOpen, ChevronDown, Terminal } from 'lucide-react'
-import type { Template, CommandsSchema } from '../../../shared/types'
+import type { Template, CommandsSchema, BackendVersion, EngineValues } from '../../../shared/types'
+import { ENGINES, ENGINE_IDS, engineOf, engineAcceptsModel, modelSpecificEngines, type EngineId } from '../../../shared/engines'
+import { buildStrataQuickBaseline } from '../../../shared/strata'
+import { backendTypeGroupLabel } from '../../../shared/backendType'
+import { backendsOfEngine, globalBackendOf, resolveEngineBackend, autoEngineFor, missingEngineFor } from '../utils/engineBackends'
 import CmdParamsEditor from './CmdParamsEditor'
+import EngineParamsEditor from './EngineParamsEditor'
+import SelectMenu from './SelectMenu'
 import { buildQuickEngineBaseline, seedSamplingArgsFromPreset } from '../../../shared/presetBaselines'
 import { useOverlayClose } from '../hooks/useOverlayClose'
 import { normalizeImportedArgs } from '../../../shared/importCommand'
@@ -39,14 +45,51 @@ function parseCommand(cmd: string): {
   }
   return { modelPath, serverPort, args }
 }
+// Starting values of a new Template for an engine: llama.cpp gets the starred
+// sampling preset plus the Quick baseline, Strata the Quick baseline of the
+// few settings it shares (context, KV precision, image input).
+function seedArgsFor(engine: EngineId, activeBackend: BackendVersion | null, samplingPresets: any, meta: any, hasVision: boolean): Record<string, any> {
+  if (engine === 'strata') {
+    return { ...buildStrataQuickBaseline({ contextLength: meta?.contextLength, hasVision }), __lastPreset: 'quick' }
+  }
+  const seeded: Record<string, any> = seedSamplingArgsFromPreset(samplingPresets)
+  Object.assign(seeded, buildQuickEngineBaseline({
+    cpuInfo: useStore.getState().cpuInfo,
+    backendKey: activeBackend?.backendKey,
+    backendInfo: activeBackend,
+    cpuThreadsOverridePercent: useStore.getState().modelDefaults.cpuThreadsOverrideEnabled
+      ? useStore.getState().modelDefaults.cpuThreadsOverridePercent
+      : null
+  }))
+  // Mark this as Quick explicitly, matching handleQuickPreset's own marker --
+  // see derivedPresetMode's comment in CmdParamsEditor.tsx.
+  seeded['__lastPreset'] = 'quick'
+  return seeded
+}
+
+const STRATA_VERDICT_TEXT: Record<string, string> = {
+  known: 'A file Strata installs',
+  layout: 'Same layout as a Strata file (a fine-tune, not tested)',
+  untested: 'Not a file Strata installs; untested',
+  no: 'Strata cannot run this file'
+}
+
 export default function CreateModal() {
-  const { setShowCreateModal, editingTemplate, backends, activeBackend, addCard, updateCard, models, prefillModelPath, setPrefillModelPath, cards, baseUrlOverride, samplingPresets } = useStore()
+  const { setShowCreateModal, editingTemplate, backends, activeBackend, addCard, updateCard, models, prefillModelPath, setPrefillModelPath, cards, baseUrlOverride, samplingPresets, ggufMetadata, engineGlobals } = useStore()
   const overlayClose = useOverlayClose(() => setShowCreateModal(false))
   const [name, setName] = useState('')
   const [description, setDescription] = useState('')
   const [backendVersion, setBackendVersion] = useState('')
   const [backendKey, setBackendKey] = useState('')
   const [backendType, setBackendType] = useState<string | null>(null)
+  // The engine is picked once, when the form opens for a model: the first
+  // model-specific engine that is installed and accepts it, else llama.cpp.
+  // Later model changes never switch it (a hint offers the switch instead).
+  const [engine, setEngine] = useState<EngineId>(() =>
+    editingTemplate ? engineOf(editingTemplate) : autoEngineFor(prefillModelPath ? useStore.getState().ggufMetadata[prefillModelPath] : undefined, backends))
+  // Values of engines this Template was switched away from, restored when
+  // one is picked again.
+  const [parked, setParked] = useState<Partial<Record<EngineId, EngineValues>>>(() => ({ ...(editingTemplate?.engineValues || {}) }))
   const [modelPath, setModelPath] = useState('')
   const [serverPort, setServerPort] = useState(8080)
   // Anchor DOM node for CmdParamsEditor's header
@@ -67,20 +110,9 @@ export default function CreateModal() {
     // possibly not being mounted yet. buildQuickEngineBaseline is the same
     // pure function the Quick button uses, so this can never drift from
     // what clicking Quick manually would produce.
-    const seeded: Record<string, any> = seedSamplingArgsFromPreset(samplingPresets)
-    Object.assign(seeded, buildQuickEngineBaseline({
-      cpuInfo: useStore.getState().cpuInfo,
-      backendKey: activeBackend?.backendKey,
-      backendInfo: activeBackend,
-      cpuThreadsOverridePercent: useStore.getState().modelDefaults.cpuThreadsOverrideEnabled
-        ? useStore.getState().modelDefaults.cpuThreadsOverridePercent
-        : null
-    }))
-    // Mark this as Quick
-    // explicitly, matching handleQuickPreset's own marker — see
-    // derivedPresetMode's comment in CmdParamsEditor.tsx.
-    seeded['__lastPreset'] = 'quick'
-    return seeded
+    const startEngine: EngineId = autoEngineFor(prefillModelPath ? useStore.getState().ggufMetadata[prefillModelPath] : undefined, backends)
+    const startMeta = prefillModelPath ? useStore.getState().ggufMetadata[prefillModelPath] : undefined
+    return seedArgsFor(startEngine, activeBackend, samplingPresets, startMeta, false)
   })
   const [tagsStr, setTagsStr] = useState('')
   const [showAdvanced, setShowAdvanced] = useState(false)
@@ -115,6 +147,8 @@ export default function CreateModal() {
       setBackendVersion(editingTemplate.backendVersion || '')
       setBackendKey(editingTemplate.backendKey || '')
       setBackendType(editingTemplate.backendType ?? null)
+      setEngine(engineOf(editingTemplate))
+      setParked({ ...(editingTemplate.engineValues || {}) })
       setModelPath(editingTemplate.modelPath || '')
       setServerPort(editingTemplate.serverPort || 8080)
       setArgs(editingTemplate.args || {})
@@ -132,19 +166,9 @@ export default function CreateModal() {
       // of this effect (a real transition back to "new template" while the
       // modal stays open, if that ever happens).
       if (!isFirstRun) {
-        const seeded: Record<string, any> = seedSamplingArgsFromPreset(samplingPresets)
         // Stay consistent with the lazy initializer above — a real reseed
         // should also reapply the Quick engine baseline, not just sampling.
-        Object.assign(seeded, buildQuickEngineBaseline({
-          cpuInfo: useStore.getState().cpuInfo,
-          backendKey: activeBackend?.backendKey,
-          backendInfo: activeBackend,
-          cpuThreadsOverridePercent: useStore.getState().modelDefaults.cpuThreadsOverrideEnabled
-            ? useStore.getState().modelDefaults.cpuThreadsOverridePercent
-            : null
-        }))
-        seeded['__lastPreset'] = 'quick'
-        setArgs(seeded)
+        setArgs(seedArgsFor(engine, activeBackend, samplingPresets, undefined, false))
         setTagsStr('')
       }
       if (prefillModelPath) {
@@ -183,7 +207,7 @@ export default function CreateModal() {
     // Normalize against the schema of the backend this Template will use, so
     // short flags/aliases (-ctkd, -c, ...) land under the keys the editor reads.
     let schema: CommandsSchema | null = null
-    try { schema = await window.api.getCommands(backendKey || activeBackend?.backendKey || '') } catch {}
+    try { schema = await window.api.getCommands(backendKey || activeBackend?.backendKey || '', engine) } catch {}
     const normalized = normalizeImportedArgs(parsed.args, schema)
     if (parsed.modelPath) setModelPath(parsed.modelPath)
     if (parsed.serverPort) setServerPort(parsed.serverPort)
@@ -191,6 +215,43 @@ export default function CreateModal() {
     setShowImport(false)
     setImportCmd('')
   }
+  const engineBuilds = backendsOfEngine(backends, engine)
+  // With no pin the Template follows the engine's global selection.
+  const follow = !backendKey
+  const shownBuild = follow
+    ? globalBackendOf(engine, backends, activeBackend, engineGlobals)
+    : resolveEngineBackend(engine, { backendKey, backendType, backendVersion }, backends, activeBackend, engineGlobals)
+  const repoKeys = Array.from(new Set(engineBuilds.map(b => b.backendKey)))
+  const typesInRepo = Array.from(new Set(engineBuilds.filter(b => b.backendKey === shownBuild?.backendKey).map(b => b.backendType ?? '')))
+  function pinTo(b: BackendVersion | undefined) {
+    setBackendKey(b?.backendKey || '')
+    setBackendVersion(b?.name || '')
+    setBackendType(b?.backendType ?? null)
+  }
+  function switchEngine(next: EngineId) {
+    if (next === engine) return
+    const meta = modelPath ? ggufMetadata[modelPath] : undefined
+    const restored = parked[next]
+    setParked(p => {
+      const q = { ...p, [engine]: { args, backendKey, backendVersion, backendType } as EngineValues }
+      delete q[next]
+      return q
+    })
+    setEngine(next)
+    if (restored) {
+      setArgs(restored.args)
+      setBackendKey(restored.backendKey || '')
+      setBackendVersion(restored.backendVersion || '')
+      setBackendType(restored.backendType ?? null)
+    } else {
+      setArgs(seedArgsFor(next, activeBackend, samplingPresets, meta, false))
+      pinTo(undefined)
+    }
+  }
+  // Model-specific engines that accept the chosen model, shown as a hint.
+  const modelMeta = modelPath ? ggufMetadata[modelPath] : undefined
+  const suggested = modelSpecificEngines().find(e => engineAcceptsModel(e.id, modelMeta))
+  const missingEngine = missingEngineFor(modelMeta, backends)
   async function handleSubmit(e: React.FormEvent) {
     e.preventDefault()
     // No field on this form should block Save with a validation popup --
@@ -202,6 +263,8 @@ export default function CreateModal() {
       backendVersion,
       backendKey,
       backendType,
+      engine,
+      engineValues: Object.keys(parked).length ? parked : undefined,
       modelPath,
       serverPort,
       args,
@@ -220,6 +283,8 @@ export default function CreateModal() {
         backendVersion,
         backendKey,
         backendType,
+        engine,
+        engineValues: Object.keys(parked).length ? parked : undefined,
         modelPath,
         serverPort,
         args,
@@ -242,8 +307,7 @@ export default function CreateModal() {
         </div>
         <form onSubmit={handleSubmit} className="flex flex-col flex-1 overflow-hidden">
           <div className="modal-body">
-            {}
-            <div className="collapsible-section" style={{ marginBottom: 16 }}>
+            {engine === 'llama.cpp' && <div className="collapsible-section" style={{ marginBottom: 16 }}>
               <button
                 type="button"
                 className="collapsible-toggle"
@@ -279,7 +343,7 @@ export default function CreateModal() {
                   </button>
                 </div>
               )}
-            </div>
+            </div>}
             {}
             <div className="form-group">
               <label className="form-label">Template Name</label>
@@ -316,31 +380,16 @@ export default function CreateModal() {
             {}
             <div className="form-row">
               <div className="form-group">
-                <label className="form-label">Backend Version</label>
-                <select
-                  className="form-select"
-                  // The option value is the backend's unique id (fork + type + version +
-                  // root), not just its version name -- two forks (or two type variants
-                  // of the same fork+version, e.g. a vulkan and a rocm build of the same
-                  // release) can legitimately share a version tag, and matching on the
-                  // tag alone would silently resolve to whichever one happens to sort
-                  // first. The id only has to be unique among the currently-listed
-                  // options, so its rootIndex component being positional is fine here;
-                  // backendKey + version + type is what actually gets persisted onto the
-                  // template below.
-                  value={backends.find(b => b.backendKey === backendKey && b.name === backendVersion && (b.backendType ?? null) === backendType)?.id || ''}
-                  onChange={e => {
-                    const b = backends.find(x => x.id === e.target.value)
-                    setBackendVersion(b?.name || '')
-                    setBackendKey(b?.backendKey || '')
-                    setBackendType(b?.backendType ?? null)
-                  }}
-                >
-                  <option value="">Default (Active)</option>
-                  {backends.map(b => (
-                    <option key={b.id} value={b.id}>{b.displayName}</option>
-                  ))}
-                </select>
+                <label className="form-label">Engine</label>
+                <SelectMenu
+                  variant="field"
+                  value={engine}
+                  onChange={id => switchEngine(id as EngineId)}
+                  options={ENGINE_IDS.map(id => ({
+                    value: id,
+                    label: `${ENGINES[id].label}${ENGINES[id].kind === 'model-specific' ? ' (model-specific)' : ''}${backendsOfEngine(backends, id).length === 0 ? ' - not installed' : ''}`
+                  }))}
+                />
               </div>
               <div className="form-group">
                 <label className="form-label">
@@ -371,7 +420,50 @@ export default function CreateModal() {
                 })()}
               </div>
             </div>
-            {}
+            <div className="form-group">
+              <label style={{ display: 'flex', alignItems: 'center', gap: 8, cursor: 'pointer' }}>
+                <input type="checkbox" checked={follow} onChange={e => pinTo(e.target.checked ? undefined : shownBuild)} />
+                <span style={{ fontSize: 13, fontWeight: 600 }}>{ENGINES[engine].followLabel}</span>
+              </label>
+              <div className="form-hint">
+                {engineBuilds.length === 0
+                  ? `${ENGINES[engine].label} is not installed. Install it from Settings > Engine tracker.`
+                  : follow
+                    ? `Uses ${shownBuild?.displayName || ENGINES[engine].label}, the engine's selection in the sidebar. Choosing a repo or backend below pins this Template to it.`
+                    : 'Pinned: this Template keeps using the repo below when the global selection changes.'}
+              </div>
+            </div>
+            {engineBuilds.length > 0 && (
+              <div className="form-row">
+                <div className="form-group">
+                  <label className="form-label">Repo</label>
+                  <SelectMenu
+                    variant="field"
+                    value={shownBuild?.backendKey || ''}
+                    onChange={key => {
+                      const inRepo = engineBuilds.filter(b => b.backendKey === key)
+                      pinTo(inRepo.find(b => (b.backendType ?? null) === (shownBuild?.backendType ?? null)) ?? inRepo[0])
+                    }}
+                    options={repoKeys.map(k => ({ value: k, label: k }))}
+                  />
+                </div>
+                {ENGINES[engine].caps.backendSelection === 'builds' && (
+                  <div className="form-group">
+                    <label className="form-label">Backend</label>
+                    <SelectMenu
+                      variant="field"
+                      disabled={typesInRepo.length < 2}
+                      value={shownBuild?.backendType ?? ''}
+                      onChange={t => pinTo(engineBuilds.find(b => b.backendKey === shownBuild?.backendKey && (b.backendType ?? '') === t))}
+                      options={typesInRepo.map(t => ({
+                        value: t,
+                        label: `${backendTypeGroupLabel(t || null)}${t && backendTypeGroupLabel(t).toLowerCase() !== t.toLowerCase() ? ` (${t})` : ''}`
+                      }))}
+                    />
+                  </div>
+                )}
+              </div>
+            )}
             <div className="form-group mb-0">
               <label className="form-label">Model File</label>
               <div className="file-picker">
@@ -398,6 +490,19 @@ export default function CreateModal() {
                 </button>
               </div>
               <div className="form-hint">Models are grouped by folder. mmproj files are auto-detected and shared within each folder.</div>
+              {modelPath && engine === 'strata' && modelMeta?.strata && (
+                <div className="form-hint" style={modelMeta.strata.kind === 'known' || modelMeta.strata.kind === 'layout' ? undefined : { color: 'var(--warning)' }}>
+                  Strata: {STRATA_VERDICT_TEXT[modelMeta.strata.kind]}{modelMeta.strata.family ? ` (${modelMeta.strata.family} / ${modelMeta.strata.model})` : ''}. {modelMeta.strata.detail}
+                </div>
+              )}
+              {modelPath && engine !== 'strata' && suggested && (
+                <div className="form-hint">
+                  {suggested.label} can run this model ({STRATA_VERDICT_TEXT[modelMeta?.strata?.kind || 'known'].toLowerCase()}).{' '}
+                  {missingEngine === suggested.id
+                    ? `It is not installed: install it from Settings > Engine tracker.`
+                    : <button type="button" className="btn btn-ghost btn-sm" onClick={() => switchEngine(suggested.id)}>Use {suggested.label}</button>}
+                </div>
+              )}
             </div>
             {/* Settings/Parameters toggle + CPU/model/Free-VRAM info render
                 here (via CmdParamsEditor's header portal) so they're always
@@ -424,16 +529,28 @@ export default function CreateModal() {
                   Hidden visually via CSS when collapsed instead of being
                   unmounted. */}
               <div className="collapsible-body" style={showAdvanced ? undefined : { display: 'none' }}>
-                <CmdParamsEditor
-                  args={args}
-                  onChange={setArgs}
-                  modelPathFallback={modelPath}
-                  serverPortFallback={serverPort}
-                  backendKey={backendKey}
-                  backendVersionName={backendVersion}
-                  backendType={backendType}
-                  headerPortalTarget={headerAnchor}
-                />
+                {engine === 'llama.cpp' ? (
+                  <CmdParamsEditor
+                    args={args}
+                    onChange={setArgs}
+                    modelPathFallback={modelPath}
+                    serverPortFallback={serverPort}
+                    backendKey={backendKey}
+                    backendVersionName={backendVersion}
+                    backendType={backendType}
+                    headerPortalTarget={headerAnchor}
+                  />
+                ) : (
+                  <EngineParamsEditor
+                    engine={engine}
+                    args={args}
+                    onChange={setArgs}
+                    modelPathFallback={modelPath}
+                    serverPortFallback={serverPort}
+                    backendKey={backendKey}
+                    headerPortalTarget={headerAnchor}
+                  />
+                )}
               </div>
             </div>
           </div>

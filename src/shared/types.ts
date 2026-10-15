@@ -2,6 +2,10 @@
 // Shared types used by main process, preload and renderer.
 // ============================================================================
 
+import type { EngineId, InstallKind } from './engines'
+import type { StrataVerdictKind } from './strata'
+import type { BuildPlatform } from './assetPlatform'
+
 export interface ModelFile {
   name: string
   path: string
@@ -66,6 +70,10 @@ export interface BackendVersion {
   // where this is the authoritative signal for detectBackendRuntimeType.
   runtimeLibs?: string[]
   hasCommands: boolean    // whether a commands.json exists for backendKey
+  // Which engine this install belongs to. Absent on llama.cpp installs. For a
+  // git-installed engine (Strata) `path` is the clone, `exe` the launcher
+  // script and `version` the `git describe` label.
+  engine?: EngineId
   rootDir: string         // backend root folder (default BACKEND_DIR or external)
   external: boolean       // true when discovered inside an external backend folder
 }
@@ -100,6 +108,8 @@ export interface CommandParam {
   // a value preference, it's "never pass this flag", because older backend
   // builds don't recognize it and reject the argument outright.
   emptyLabel?: string
+  // Display text for select options whose stored value is cryptic.
+  optionLabels?: Record<string, string>
 }
 export interface CommandCategory {
   name: string
@@ -109,6 +119,12 @@ export interface CommandCategory {
 export interface CommandsSchema {
   version: string
   categories: CommandCategory[]
+}
+export interface EngineValues {
+  args: Record<string, string | number | boolean | null>
+  backendKey?: string
+  backendVersion?: string
+  backendType?: string | null
 }
 export interface Template {
   id: string
@@ -133,6 +149,12 @@ export interface Template {
   // matched backend has no explicit type (legacy single-type install) —
   // both fall back to a backendKey+version-only match.
   backendType?: string | null
+  // The engine this template launches with. Absent means llama.cpp. The
+  // fields above and `args` always hold the CURRENT engine's values; the
+  // values of an engine the template switched away from are parked in
+  // engineValues and restored when it is picked again.
+  engine?: EngineId
+  engineValues?: Partial<Record<EngineId, EngineValues>>
   modelPath?: string
   serverPort: number
   args: Record<string, string | number | boolean | null>
@@ -278,12 +300,59 @@ export interface TrackedBackend {
   // Parameters only this fork's llama-server accepts. Merged into the base
   // schema by category name (a missing category is appended).
   extraCommands?: CommandCategory[]
+  // Absent means a llama.cpp-style release engine.
+  engine?: EngineId
+  kind?: InstallKind
+  // Git engines: branch to follow (default: the repo's default branch).
+  branch?: string
+}
+
+// Update state of a git-installed engine (compared by release tag).
+export interface GitEngineStatus {
+  trackedId: string
+  folderName: string
+  installed: boolean
+  localVersion: string | null
+  latestTag: string | null
+  updateAvailable: boolean
+  error?: string
 }
 
 // Result of checking a single tracked backend for updates.
 export interface TrackedBackendRelease extends ReleaseInfo {
   trackedId: string
   folderName: string
+  // Set for git-installed engines, whose state is the clone, not assets.
+  git?: GitEngineStatus
+  // Builds installed here that were made for another operating system (a
+  // shared engines folder on a dual-boot PC). They are not counted as
+  // installed for this machine's assets, but can still be listed and removed.
+  otherPlatform?: InstalledOtherPlatform[]
+}
+
+export interface InstalledOtherPlatform {
+  type: string
+  version: string
+  platform: BuildPlatform
+}
+
+// Where Strata keeps its data (packs, MTP layer, models it downloads).
+// 'global' shares one folder (and Strata's own user-wide settings) with every
+// Strata install; 'isolated' gives XLM-Studio a private folder and settings.
+export interface StrataDataSettings {
+  mode: 'global' | 'isolated'
+  // Global mode: explicit folder, or null for <engines folder>/Strata-data.
+  dataDir: string | null
+  // Isolated mode: the folder holding the data and Strata's private settings.
+  isolatedDir: string | null
+}
+export interface StrataSettings {
+  // git-update the clone before each launch (independent of the tracker).
+  pullBeforeLaunch: boolean
+  data: StrataDataSettings
+  // Overrides page: forces --parallel (1-8) on every Strata Template. Null
+  // leaves each Template's own value.
+  parallelOverride: number | null
 }
 
 // Aggregated result of the global "Check for updates" action.
@@ -358,7 +427,19 @@ export interface GgufMetadata {
   // file, extracted once as part of this same metadata parse/cache — never
   // re-scanned separately by the Speculative Decoding widget.
   hasNativeMtp: boolean
+  // Strata validation of this file, computed once for architectures Strata
+  // can run and cached with the rest of the metadata.
+  strata?: StrataModelInfo
   error?: string
+}
+
+export interface StrataModelInfo {
+  kind: StrataVerdictKind
+  family?: string
+  model?: string
+  detail: string
+  // Hash of the fingerprint table the verdict was computed against.
+  tableHash: string
 }
 
 // VRAM telemetry returned by the main process for the budgeting algorithm.

@@ -1,8 +1,9 @@
 import type {
   Template, BackendVersion, CommandsSchema, ReleaseInfo,
   ModelGroup, TrackedBackend, TrackedBackendRelease, ThemePref,
-  CpuInfo, SpeculationMode, KvCacheCheckpointSettings, RedundantCheckpoint, CheckpointMode
+  CpuInfo, SpeculationMode, KvCacheCheckpointSettings, RedundantCheckpoint, CheckpointMode, StrataSettings
 } from '../../shared/types'
+import type { EngineId } from '../../shared/engines'
 
 interface ModelDownloadInfo {
   id: string
@@ -39,7 +40,7 @@ interface LlamaCppApi {
 
   // Model folders
   listExternalModelFolders: () => Promise<string[]>
-  addExternalModelFolder: () => Promise<{ success: boolean; folders?: string[] }>
+  addExternalModelFolder: () => Promise<{ success: boolean; folders?: string[]; mainFolder?: string | null }>
   removeExternalModelFolder: (folder: string) => Promise<{ success: boolean; folders: string[] }>
   getMainModelFolder: () => Promise<{ folder: string; isDefault: boolean }>
   setMainModelFolder: (folder: string) => Promise<{ success: boolean; mainModelFolder: string | null }>
@@ -48,20 +49,20 @@ interface LlamaCppApi {
   // Backends
   listBackends: () => Promise<BackendVersion[]>
   deleteBackend: (backendId: string) => Promise<{ success: boolean; error?: string }>
-  deleteBackendType: (backendKey: string, backendType: string) => Promise<{ success: boolean; deleted?: boolean; error?: string }>
-  getCommands: (backendKey: string) => Promise<CommandsSchema | null>
+  deleteBackendType: (backendKey: string, backendType: string, platform?: string) => Promise<{ success: boolean; deleted?: boolean; error?: string }>
+  getCommands: (backendKey: string, engine?: string) => Promise<CommandsSchema | null>
   saveBackendCommands: (backendKey: string, schema: object) => Promise<{ success: boolean; error?: string }>
 
   // Backend folders
   listExternalBackendFolders: () => Promise<string[]>
-  addExternalBackendFolder: () => Promise<{ success: boolean; folders?: string[] }>
+  addExternalBackendFolder: () => Promise<{ success: boolean; folders?: string[]; mainFolder?: string | null }>
   removeExternalBackendFolder: (folder: string) => Promise<{ success: boolean; folders: string[] }>
   getMainBackendFolder: () => Promise<{ folder: string; isDefault: boolean }>
   setMainBackendFolder: (folder: string) => Promise<{ success: boolean; mainBackendFolder: string | null }>
 
   // Tracked backends
   listTrackedBackends: () => Promise<TrackedBackend[]>
-  addTrackedBackend: (link: string) => Promise<{ success: boolean; error?: string; tracked?: TrackedBackend }>
+  addTrackedBackend: (link: string, engine?: string) => Promise<{ success: boolean; error?: string; tracked?: TrackedBackend }>
   removeTrackedBackend: (trackedId: string) => Promise<{ success: boolean; error?: string }>
   checkAllBackends: () => Promise<{ results: TrackedBackendRelease[] }>
   checkTrackedBackend: (trackedId: string) => Promise<TrackedBackendRelease | { error: string }>
@@ -84,7 +85,7 @@ interface LlamaCppApi {
   pickAnyFile: () => Promise<string | null>
 
   // Run model
-  runModel: (opts: { id: string; name: string; backendPath: string; exe: string; args: string[]; openBrowser: boolean; port: number; ignoreBaseUrlOverride?: boolean; skipCheckpoint?: boolean; checkpointMode?: CheckpointMode }) => Promise<{ success: boolean; pid?: number; error?: string; port?: number }>
+  runModel: (opts: { id: string; name: string; backendPath: string; exe: string; args: string[]; openBrowser: boolean; port: number; ignoreBaseUrlOverride?: boolean; skipCheckpoint?: boolean; checkpointMode?: CheckpointMode; engine?: EngineId; modelPath?: string }) => Promise<{ success: boolean; pid?: number; error?: string; port?: number }>
   stopModel: (id: string, opts?: { skipCheckpoint?: boolean }) => Promise<{ success: boolean; error?: string; alreadyStopped?: boolean }>
   onModelError: (cb: (data: { id: string; error: string }) => void) => void
   onModelExited: (cb: (data: { id: string }) => void) => void
@@ -160,6 +161,15 @@ interface LlamaCppApi {
   getLaunchSettings: () => Promise<{ launchOnStartup: boolean; autostartMainTemplates: boolean }>
   setLaunchOnStartup: (enabled: boolean) => Promise<{ success: boolean }>
   setAutostartMainTemplates: (enabled: boolean) => Promise<{ success: boolean }>
+  updateTrackedEngines: () => Promise<{ updated: string[]; errors: string[] }>
+  installGitEngine: (trackedId: string) => Promise<{ success: boolean; error?: string; path?: string }>
+  updateGitEngine: (trackedId: string) => Promise<{ success: boolean; error?: string; updated?: boolean; skipped?: string }>
+  getEngineSettings: () => Promise<{ autoUpdateTrackedEngines: boolean; strata: StrataSettings; strataDataDir: string; strataRememberedDataDir: string | null; gitAvailable: boolean }>
+  setAutoUpdateTrackedEngines: (enabled: boolean) => Promise<{ success: boolean }>
+  setStrataSettings: (patch: { pullBeforeLaunch?: boolean; parallelOverride?: number | null; data?: Partial<StrataSettings['data']> }) => Promise<{ success: boolean }>
+  pickStrataDataFolder: () => Promise<string | null>
+  getGlobalEngineBackends: () => Promise<Partial<Record<EngineId, { backendKey: string }>>>
+  setGlobalEngineBackend: (engine: string, backendKey: string | null) => Promise<{ success: boolean; error?: string }>
   getGlobalBackend: () => Promise<{ backendKey: string; backendVersion: string; backendType?: string | null } | null>
   setGlobalBackend: (backend: { backendKey: string; backendVersion: string; backendType?: string | null } | null) => Promise<{ success: boolean }>
   getMcpSettings: () => Promise<any>
@@ -171,7 +181,7 @@ interface LlamaCppApi {
   getKvCacheCheckpoints: () => Promise<KvCacheCheckpointSettings>
   setKvCacheCheckpoints: (opts: Partial<KvCacheCheckpointSettings>) => Promise<{ success: boolean }>
   listExternalCheckpointFolders: () => Promise<string[]>
-  addExternalCheckpointFolder: () => Promise<{ success: boolean; folders?: string[] }>
+  addExternalCheckpointFolder: () => Promise<{ success: boolean; folders?: string[]; mainFolder?: string | null }>
   removeExternalCheckpointFolder: (folder: string) => Promise<{ success: boolean; folders: string[] }>
   getMainCheckpointFolder: () => Promise<{ folder: string; isDefault: boolean }>
   setMainCheckpointFolder: (folder: string) => Promise<{ success: boolean; mainFolder: string | null }>
