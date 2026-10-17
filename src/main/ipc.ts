@@ -3666,6 +3666,12 @@ export function registerIpcHandlers(): void {
       try { unlinkSync(archivePath) } catch (e) { console.error('Failed to cleanup temp file', e) }
       q.resolve({ success: false, error: String(err) })
     } finally {
+      // Terminal event: tells the renderer to drop this download's progress
+      // entry whatever the outcome. Not every download is started by a
+      // renderer call that waits on it and clears the entry afterwards (the
+      // "Update all" button and auto-update run entirely here), and without
+      // this their last event, 'extracting', would stay on screen forever.
+      sendDownloadProgress(sender, { percent: 100, phase: 'done', trackedId: opts.trackedId || null, assetName: opts.assetName })
       cancelBackendDl = null
       activeDownloadTrackedId = null
       activeDownloadAssetName = null
@@ -3872,6 +3878,7 @@ export function registerIpcHandlers(): void {
       const idx = downloadQueue.findIndex(q => q.opts.trackedId === trackedId && (!assetName || q.opts.assetName === assetName))
       if (idx !== -1) {
         const [removed] = downloadQueue.splice(idx, 1)
+        sendDownloadProgress(removed.sender, { percent: 0, phase: 'done', trackedId: removed.opts.trackedId || null, assetName: removed.opts.assetName })
         removed.resolve({ success: false, error: 'Cancelled' })
         broadcastQueuePositions()
         return { success: true }

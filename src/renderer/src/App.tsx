@@ -280,7 +280,9 @@ export default function App() {
   useEffect(() => {
     window.api.onDownloadProgress((data) => {
       const key = `${data.trackedId || 'llama-cpp'}::${data.assetName || ''}`
-      useStore.getState().setDownloadProgress(key, { percent: data.percent, phase: data.phase, queuePosition: data.queuePosition })
+      // 'done' is the main process saying this download is over (finished,
+      // failed or cancelled): drop its entry instead of keeping the last phase.
+      useStore.getState().setDownloadProgress(key, data.phase === 'done' ? null : { percent: data.percent, phase: data.phase, queuePosition: data.queuePosition })
     })
     return () => window.api.removeDownloadListener()
   }, [])
