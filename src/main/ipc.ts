@@ -3946,6 +3946,18 @@ export function registerIpcHandlers(): void {
     BrowserWindow.getAllWindows().forEach(win => {
       if (!win.isDestroyed()) win.webContents.send('backends-changed', { deleted: [] })
     })
+    // The renderer's tracker results still describe the state from BEFORE
+    // these updates (the startup check ran first), so the update banners and
+    // "update available" badges would stay until a manual check. Re-check and
+    // broadcast, through the same channel the startup check uses.
+    if (updated.length > 0 || errors.length > 0) {
+      try {
+        const results = await Promise.all(s.trackedBackends.map(t => fetchTrackedRelease(t)))
+        BrowserWindow.getAllWindows().forEach(win => {
+          if (!win.isDestroyed()) win.webContents.send('backends-checked-silent', { results })
+        })
+      } catch {}
+    }
     return { updated, errors }
   }
   ipcMain.handle('update-tracked-engines', (e) => updateTrackedEnginesImpl(e.sender))
