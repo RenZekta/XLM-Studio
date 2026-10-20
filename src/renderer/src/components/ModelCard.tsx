@@ -6,7 +6,7 @@ import { applyMmprojOffloadFlag } from '../../../shared/mmprojOffload'
 import CmdParamsEditor from './CmdParamsEditor'
 import EngineParamsEditor from './EngineParamsEditor'
 import { ENGINES, engineOf } from '../../../shared/engines'
-import { buildStrataArgv, strataGgufDir } from '../../../shared/strata'
+import { buildStrataArgv, strataGgufDir, strataInfoFor } from '../../../shared/strata'
 import { resolveEngineBackend } from '../utils/engineBackends'
 import { effectiveTemplatePort, starColorForPort } from '../utils/templatePort'
 interface Props {
@@ -137,7 +137,7 @@ export default function ModelCard({ card, dragHandleProps }: Props) {
       // Template, like the llama.cpp parallel override does for its own.
       const forcedParallel = (await window.api.getEngineSettings().catch(() => null))?.strata.parallelOverride
       const built = buildStrataArgv({
-        ggufDir: strataGgufDir(modelPath), family: meta?.strata?.family, model: meta?.strata?.model,
+        ggufDir: strataGgufDir(modelPath), family: strataInfoFor(meta, build.backendKey)?.family, model: strataInfoFor(meta, build.backendKey)?.model,
         port: card.template.serverPort || 8080,
         args: forcedParallel ? { ...card.template.args, '--parallel': forcedParallel } : card.template.args
       })

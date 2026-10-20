@@ -7,7 +7,7 @@ import {
   Image as ImageIcon, RotateCcw, Gauge, Sparkles, Layers, AlertTriangle,
   MessageSquare, Check, ChevronDown, Repeat
 } from 'lucide-react'
-import type { CommandParam, SpecMethod, CheckpointMode } from '../../../shared/types'
+import type { CommandParam, SpecMethod, CheckpointMode, Template } from '../../../shared/types'
 import HybridSlider from './HybridSlider'
 import CommandPreview, { type PreviewToken } from './CommandPreview'
 import SegmentedToggle from './SegmentedToggle'
@@ -19,6 +19,8 @@ import { COMMON_PARAM_FLAGS as COMMON_VISIBLE } from '../../../shared/commonPara
 import { applyNgramModifierToggle } from '../../../shared/specToggles'
 import { FORK_ONLY_ARGS } from '../../../shared/backendForks'
 import { markTemplateSavePending, markTemplateSaveDone } from '../utils/templateSync'
+import { activeServerOverrides, findPortConflict } from '../utils/templatePort'
+import ServerParamsBlock from './ServerParamsBlock'
 import { MMPROJ_OFFLOAD_MODE_KEY, getMmprojOffloadMode, resolveMmprojOffloadToRam } from '../../../shared/mmprojOffload'
 import { SPEC_DRAFT_K_ARG, SPEC_DRAFT_V_ARG, isSpecDraftActive, resolveKvBackfill, applySpecDraftKvDefaults } from '../../../shared/specDraftKv'
 import type { MmprojOffloadMode } from '../../../shared/types'
@@ -38,6 +40,8 @@ const CUSTOM_PARAMS = ['--model', '--port', '--host', '--api-key', '--mmproj', '
   '--spec-ngram-mod-n-match', '--spec-ngram-mod-n-min', '--spec-ngram-mod-n-max',
   // Rendered inside the Speculative Decoding widget, next to the other draft settings.
   '--spec-draft-type-k', '--spec-draft-type-v']
+// Server parameters kept in `args`; the port is the Template's own field.
+const SERVER_ARGS = ['--host', '--api-key']
 // Sampling values are per-model/user-preferred, set once
 // at template creation from the starred sampling preset, and must NEVER be
 // touched by the Quick/FullAuto/Clear engine presets. Shared list so every
@@ -69,6 +73,10 @@ interface Props {
   onChange?: (args: Record<string, any>) => void
   modelPathFallback?: string
   serverPortFallback?: number
+  // Receives the Server block's port edits when the Template is not saved yet
+  // (CreateModal keeps the port in its own state); a card's editor writes the
+  // port to the Template itself.
+  onServerPortChange?: (port: number) => void
   disabled?: boolean
   // The Template's own pinned backend selection (its Backend Version
   // dropdown), when known before it's saved to a Template on disk --
@@ -167,7 +175,7 @@ function NgramModifierBlock({ title, flagPrefix, enabled, onToggle, disabled, fi
   )
 }
 
-export default function CmdParamsEditor({ templateId, args, onChange, modelPathFallback, serverPortFallback, disabled: disabledProp, backendKey: backendKeyProp, backendVersionName: backendVersionProp, backendType: backendTypeProp, headerPortalTarget }: Props) {
+export default function CmdParamsEditor({ templateId, args, onChange, modelPathFallback, serverPortFallback, onServerPortChange, disabled: disabledProp, backendKey: backendKeyProp, backendVersionName: backendVersionProp, backendType: backendTypeProp, headerPortalTarget }: Props) {
   const {
     commandsSchema: activeCommandsSchema, updateCard, cards, models, cpuInfo,
     detectedSpeculation, setDetectedSpeculation, markSpeculationApplied,
@@ -640,7 +648,7 @@ export default function CmdParamsEditor({ templateId, args, onChange, modelPathF
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [detectedMmproj, disabled, mmprojOn, mmprojManuallyToggled])
 
-  function commit(newArgs: Record<string, any>, opts?: { silent?: boolean }) {
+  function commit(newArgs: Record<string, any>, opts?: { silent?: boolean; patch?: Partial<Template> }) {
     // Multiple mount-time auto-apply effects (mmproj detection,
     // MTP/speculation detection, Jinja auto-enable, etc.) can become ready
     // and fire within the same synchronous effect flush. Each one calls
@@ -655,7 +663,7 @@ export default function CmdParamsEditor({ templateId, args, onChange, modelPathF
     argsRef.current = newArgs
     if (onChange) onChange(newArgs)
     else if (templateId) {
-      updateCard(templateId, { args: newArgs })
+      updateCard(templateId, { args: newArgs, ...opts?.patch })
       // This `templateId` branch backs the live editor embedded directly in
       // an expanded card (ModelCard passes `templateId`, not `onChange` —
       // CreateModal's Save button handles its own persistence separately via
@@ -1319,6 +1327,11 @@ export default function CmdParamsEditor({ templateId, args, onChange, modelPathF
     const newArgs: Record<string, any> = {}
     if (args['--mmproj'] !== undefined) newArgs['--mmproj'] = args['--mmproj']
     if (args[MMPROJ_OFFLOAD_MODE_KEY] !== undefined) newArgs[MMPROJ_OFFLOAD_MODE_KEY] = args[MMPROJ_OFFLOAD_MODE_KEY]
+    // Host and API key describe where the server is reachable, not how the
+    // engine is tuned.
+    for (const k of SERVER_ARGS) {
+      if (args[k] !== undefined) newArgs[k] = args[k]
+    }
     // Clear must preserve sampling values too — it wipes the engine args
     // (everything else), not the model's/user's sampling setup.
     for (const k of SAMPLING_KEYS) {
@@ -1429,13 +1442,12 @@ export default function CmdParamsEditor({ templateId, args, onChange, modelPathF
   // regardless of what's in the template's args — see run-model's "ALWAYS
   // update the --port argument" comment); host/api-key only apply when their
   // own sub-toggle is also on.
-  const baseUrlOverrideActive = !!baseUrlOverride?.enabled && !ignoreBaseUrlOverride
-  const previewEffectivePort = baseUrlOverrideActive
-    ? (baseUrlOverride.port || 1234)
-    : (card?.template.serverPort || serverPortFallback || 8080)
-  const portOverriddenInPreview = baseUrlOverrideActive
-  const hostOverrideActive = baseUrlOverrideActive && !!baseUrlOverride.serveOnLocalNetwork
-  const apiKeyOverrideActive = baseUrlOverrideActive && !!baseUrlOverride.apiKeyEnabled && !!baseUrlOverride.apiKey
+  const serverOverrides = activeServerOverrides(baseUrlOverride, ignoreBaseUrlOverride)
+  const templatePort = card?.template.serverPort || serverPortFallback || 8080
+  const previewEffectivePort = serverOverrides.port ?? templatePort
+  const portOverriddenInPreview = serverOverrides.port !== null
+  const hostOverrideActive = serverOverrides.host !== null
+  const apiKeyOverrideActive = serverOverrides.apiKey !== null
 
   // Shared by all three preview builders below: takes the raw args, strips
   // out whatever's being override-controlled, and injects the effective
@@ -1463,8 +1475,8 @@ export default function CmdParamsEditor({ templateId, args, onChange, modelPathF
     runtimeArgs['--parallel'] = previewEffectiveParallel !== null ? previewEffectiveParallel : (args['--parallel'] ?? args['-np'])
     if (runtimeArgs['--parallel'] === undefined || runtimeArgs['--parallel'] === null) delete runtimeArgs['--parallel']
     runtimeArgs['--port'] = previewEffectivePort
-    if (hostOverrideActive) runtimeArgs['--host'] = '0.0.0.0'
-    if (apiKeyOverrideActive) runtimeArgs['--api-key'] = baseUrlOverride.apiKey
+    if (serverOverrides.host !== null) runtimeArgs['--host'] = serverOverrides.host
+    if (serverOverrides.apiKey !== null) runtimeArgs['--api-key'] = serverOverrides.apiKey
     // Same rule as the real launch (ModelCard.tsx / mcpControl.ts): only with
     // a projector in use, and never --mmproj-offload (GPU offload is the default).
     if ((runtimeArgs['--mmproj'] || runtimeArgs['-mm']) && mmprojOffloadToRam) runtimeArgs['--no-mmproj-offload'] = true
@@ -1493,7 +1505,7 @@ export default function CmdParamsEditor({ templateId, args, onChange, modelPathF
         : key === '--parallel' && isOverridden
           ? `Set by the global Parallel Inference override (was ${args['--parallel'] ?? args['-np'] ?? 'unset'} in this preset)`
           : key === '--port' && isOverridden
-            ? `Set by the global Base URL Override (was ${card?.template.serverPort || serverPortFallback || 8080} for this preset)`
+            ? `Set by the global Base URL Override (was ${templatePort} for this preset)`
             : key === '--host' && isOverridden
               ? 'Added by the global Base URL Override -> "Serve on local network"'
               : key === '--api-key' && isOverridden
@@ -2138,6 +2150,24 @@ export default function CmdParamsEditor({ templateId, args, onChange, modelPathF
     </div>
   )
 
+  // ----- Server block (--port / --host / --api-key) -----
+  const renderServerBlock = () => (
+    <ServerParamsBlock
+      port={templatePort}
+      host={String(args['--host'] ?? '')}
+      apiKey={String(args['--api-key'] ?? '')}
+      overrides={serverOverrides}
+      conflict={onServerPortChange ? null : findPortConflict(cards, templatePort, templateId)}
+      disabled={disabled}
+      onPortChange={p => {
+        if (onServerPortChange) onServerPortChange(p)
+        else commit(args, { patch: { serverPort: p } })
+      }}
+      onHostChange={v => handleUpdate('--host', v)}
+      onApiKeyChange={v => handleUpdate('--api-key', v)}
+    />
+  )
+
   // ----- Base URL Override block -----
   const renderBaseUrlOverrideBlock = () => (
     <div className="spec-widget">
@@ -2613,6 +2643,7 @@ export default function CmdParamsEditor({ templateId, args, onChange, modelPathF
       {headerPortalTarget ? createPortal(headerContent, headerPortalTarget) : headerContent}
       {renderMemoryEngineBlock()}
       {renderContextBlock()}
+      {renderServerBlock()}
       {renderBaseUrlOverrideBlock()}
       {renderAutoCheckpointBlock()}
       <SamplingPresets

@@ -8,31 +8,16 @@
         {
           "arg": "--family",
           "label": "Model Family",
-          "description": "Which file family this GGUF belongs to. Detected from the file; set it by hand only for a fine-tune Strata does not recognise.",
-          "type": "select",
-          "options": [
-            "qwen",
-            "swift",
-            "coder",
-            "unsloth"
-          ],
-          "emptyLabel": "Not detected - pick one"
+          "description": "Which file family this GGUF belongs to (the engine's --family). Detected from the file when the engine's table knows it; the list is what the engine this Template runs on offers.",
+          "type": "string",
+          "placeholder": "Pick one"
         },
         {
           "arg": "--model",
           "label": "Model Variant",
-          "description": "Which quantization variant of the family this GGUF is. Detected from the file.",
-          "type": "select",
-          "options": [
-            "Q2_0",
-            "IQ2_XS",
-            "IQ3_XXS",
-            "IQ3_S",
-            "IQ1_M",
-            "UD-IQ4_XS",
-            "UD-Q4_K_XL"
-          ],
-          "emptyLabel": "Not detected - pick one"
+          "description": "Which variant of the family this GGUF is (the engine's --model, e.g. its quantization). Detected from the file when the engine's table knows it; the list follows the family.",
+          "type": "string",
+          "placeholder": "Pick one"
         },
         {
           "arg": "--vision",

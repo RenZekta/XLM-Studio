@@ -35,6 +35,7 @@ const S = bundle('src/shared/strata.ts', 'strata')
 const G = bundle('src/main/ggufTensors.ts', 'gguf')
 const L = bundle('src/main/lineAssembler.ts', 'lines')
 const E = bundle('src/shared/engines.ts', 'engines')
+const C = bundle('src/main/strataCatalog.ts', 'catalog')
 
 // -- engine registry ---------------------------------------------------------
 check('engineOf defaults legacy records to llama.cpp', E.engineOf({}) === 'llama.cpp' && E.engineOf(undefined) === 'llama.cpp' && E.engineOf('bogus') === 'llama.cpp')
@@ -241,6 +242,67 @@ make(d+'/m-00002-of-00002.gguf','qwen4exp',[('blk.1.ffn_up_exps.weight',[256,64,
 make(d+'/lone-00001-of-00002.gguf','qwen4exp',[('blk.0.ffn_down_exps.weight',[256,64,8],21,1000)])
 make(d+'/other.gguf','llama',[('blk.0.ffn_down.weight',[256,256],12,144*256*256//256)])
 `)
+// -- per-engine verdicts: no architecture is assumed ------------------------------
+{
+  const entry = (arch, expert, bytes = 1000, tensors = 10) => ({ arch, tensors, bytes, expert_bytes: expert })
+  const table = {
+    'qwen/A': entry('qwen4exp', { IQ3_S: 500 }),
+    'qwen/B': entry('qwen4exp', { Q2_0: 300 }),
+    'glm/S': entry('glm5-next', { IQ2_S: 700 }, 2000, 20),
+    _roles: {}
+  }
+  const fp = (arch, expertBytes, bytes = 1000, tensors = 10) => ({ arch, tensors, bytes, expertBytes })
+  const v = (f, t = table) => S.strataVerdict(f, t)
+  check('an exact file of any listed architecture is known', v(fp('glm5-next', { IQ2_S: 700 }, 2000, 20)).kind === 'known' && v(fp('glm5-next', { IQ2_S: 700 }, 2000, 20)).family === 'glm')
+  check('the same experts with another size is a layout match', v(fp('qwen4exp', { IQ3_S: 500 }, 1234, 11)).kind === 'layout')
+  check('an architecture the table does not list is unverified, never refused', v(fp('qwen35moe', { Q4_K: 9 })).kind === 'unverified' && v(fp(null, {})).kind === 'unverified')
+  check('the unverified note names what the table lists', v(fp('x', {})).detail.includes('glm5-next, qwen4exp'))
+  check('entries of other architectures are not compared with', v(fp('glm5-next', { Q2_0: 300 }, 2000, 20)).kind !== 'layout')
+  check('an expert quantization no listed file uses is a no, within the architecture', v(fp('qwen4exp', { Q8_0: 1 })).kind === 'no')
+  check('only the listed quantizations of that architecture is untested', v(fp('qwen4exp', { IQ3_S: 7 })).kind === 'untested')
+  check('a table with no entries leaves everything unverified', S.strataVerdict(fp('qwen4exp', {}), { _roles: {} }).kind === 'unverified')
+  check('the table hash follows the architecture of an entry', S.strataTableHash(table) !== S.strataTableHash({ ...table, 'glm/S': entry('other', { IQ2_S: 700 }, 2000, 20) }))
+  check('the engine without a table is unverified', S.STRATA_NO_TABLE.kind === 'unverified')
+  const by = { Strata: { kind: 'unverified' }, Fork: { kind: 'known', family: 'glm' }, Third: { kind: 'no' } }
+  check('the best verdict across engines wins', S.bestStrataInfo(by).key === 'Fork' && S.bestStrataInfo({}) === null)
+  check('a pinned engine answers for itself', S.strataInfoFor({ strata: by.Fork, strataEngines: by }, 'Strata').kind === 'unverified' && S.strataInfoFor({ strata: by.Fork, strataEngines: by }, 'Missing').kind === 'known' && S.strataInfoFor({ strata: by.Fork, strataEngines: by }, null).kind === 'known')
+  check('a model nobody can run is not accepted by the engine', E.engineAcceptsModel('strata', { strata: { kind: 'unverified' } }) === false && E.engineAcceptsModel('strata', { strata: { kind: 'known' } }) === true)
+}
+
+// -- family and variant dropdowns ---------------------------------------------------
+{
+  const setup = [
+    'MODELS = {',
+    '    # a comment with "quotes": { and braces',
+    '    "Q1": {"about": "plain", "ram_gb": 4},',
+    '    "Z": {"about": "only for other", "families": ("other",)},',
+    '}',
+    'FAMILIES = {',
+    '    "qwen": {"title": "Qwen", "hf": hf("a/b") + "{q}/"},',
+    '    "other": {"title": "Other"},',
+    '}',
+    'OWN_PATH_FAMILIES = {',
+    '    "own": {"title": "Own", "models": {"A": {"about": "a"}, "B": {"ram_gb": 1}}, "tag": "own-"},',
+    '}',
+    'x = MODELS[m].get("families", ("qwen", "swift"))'
+  ].join('\n')
+  const tbl = { 'qwen/T1': { arch: 'a' }, 'qwen/T2': { arch: 'a' }, _roles: {} }
+  const c = C.parseStrataCatalog(setup, tbl).families
+  check('catalog: the table gives the variants of the families it lists', eq2(c.qwen, ['T1', 'T2']))
+  check('catalog: setup.py adds the other families, variants by its own default and "families" rules', eq2(c.other, ['Z']) && !('Q1' in c.other))
+  check('catalog: an own-path family brings its models', eq2(c.own, ['A', 'B']))
+  check('catalog: setup.py alone is enough, and a table alone', eq2(C.parseStrataCatalog(setup, null).families.qwen, ['Q1']) && eq2(C.parseStrataCatalog(null, tbl).families, { qwen: ['T1', 'T2'] }))
+  check('catalog: nothing to read gives an empty catalog', eq2(C.parseStrataCatalog(null, null).families, {}) && eq2(C.parseStrataCatalog('garbage {', {}).families, {}))
+  if (strataDir) {
+    const real = C.parseStrataCatalog(fs.readFileSync(path.join(strataDir, 'setup.py'), 'utf8'), JSON.parse(fs.readFileSync(path.join(strataDir, 'data', 'gguf_fingerprints.json'), 'utf8'))).families
+    check('catalog: the real Strata offers every family its --family takes', ['qwen', 'swift', 'coder', 'unsloth', 'gyro', 'qwen36'].every(f => f in real), Object.keys(real).join())
+    check('catalog: own-path variants are listed', real.qwen36 && real.qwen36.includes('Q8_0'))
+  } else {
+    console.log('SKIP  catalog against the real setup.py (no Strata clone)')
+  }
+}
+function eq2(a, b) { return JSON.stringify(a) === JSON.stringify(b) }
+
 let pythonOk = true
 try { execFileSync('python3', [gen, tmp]) } catch { pythonOk = false }
 if (!pythonOk) {
@@ -252,7 +314,7 @@ if (!pythonOk) {
       multi.arch === 'qwen4exp' && multi.tensors === 6 && multi.expertBytes.IQ3_S === 56320 && multi.expertBytes.Q2_0 === 33792, JSON.stringify(multi))
     check('incomplete shard set yields null', (await G.fingerprintGguf(path.join(tmp, 'lone-00001-of-00002.gguf'))) === null)
     const other = await G.fingerprintGguf(path.join(tmp, 'other.gguf'))
-    check('non-Strata architecture is reported', other.arch === 'llama' && S.strataVerdict(other, {}).kind === 'no')
+    check('another architecture is read, not refused', other.arch === 'llama' && S.strataVerdict(other, {}).kind === 'unverified')
     if (hasStrata) {
       const py = JSON.parse(execFileSync('python3', ['-c', `
 import sys, json, os

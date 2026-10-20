@@ -3,6 +3,33 @@ import type { Template } from '../../../shared/types'
 interface BaseUrlOverrideLike {
   enabled: boolean
   port: number
+  serveOnLocalNetwork?: boolean
+  apiKeyEnabled?: boolean
+  apiKey?: string
+}
+
+// The server parameters the global Base URL Override forces on a launch, each
+// null when it leaves that parameter to the Template. Port wins whenever the
+// override is on; host and API key also need their own sub-switch. Mirrors
+// the launch code in ipc.ts.
+export interface ServerOverrides {
+  port: number | null
+  host: string | null
+  apiKey: string | null
+}
+
+export function activeServerOverrides(baseUrlOverride: BaseUrlOverrideLike | null | undefined, ignore: boolean): ServerOverrides {
+  if (!baseUrlOverride?.enabled || ignore) return { port: null, host: null, apiKey: null }
+  return {
+    port: baseUrlOverride.port || 1234,
+    host: baseUrlOverride.serveOnLocalNetwork ? '0.0.0.0' : null,
+    apiKey: baseUrlOverride.apiKeyEnabled && baseUrlOverride.apiKey ? baseUrlOverride.apiKey : null
+  }
+}
+
+// The name of another Template saved on the same port, if any.
+export function findPortConflict(cards: { template: Pick<Template, 'id' | 'name' | 'serverPort'> }[], port: number, selfId?: string): string | null {
+  return cards.find(c => c.template.id !== selfId && c.template.serverPort === port)?.template.name ?? null
 }
 
 // The port a Template actually serves on. Mirrors effectiveTemplatePort in

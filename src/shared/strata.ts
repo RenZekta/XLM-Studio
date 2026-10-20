@@ -7,9 +7,17 @@
 // Model validation
 // ---------------------------------------------------------------------------
 
-export const STRATA_ARCH = 'qwen4exp'
-
-export type StrataVerdictKind = 'known' | 'layout' | 'untested' | 'no'
+// What an installed engine says about a model file. No architecture is
+// assumed here: every GGUF is read, and each installed engine (Strata and its
+// forks) answers from the data its own clone ships.
+//   known       a file the engine installs, under any name
+//   layout      the same routed experts as one of them (a fine-tune)
+//   untested    only quantizations the engine runs, but not a file it installs
+//   no          the engine's data shows it cannot run the file
+//   unverified  the engine has nothing to compare this file with (an
+//               architecture its table does not list, or no table at all):
+//               it checks the file itself when it starts
+export type StrataVerdictKind = 'known' | 'layout' | 'untested' | 'unverified' | 'no'
 
 export interface StrataFingerprint {
   arch: string | null
@@ -29,6 +37,8 @@ export interface StrataVerdict {
 
 // One entry of data/gguf_fingerprints.json, keyed "<family>/<model>".
 export interface StrataTableEntry {
+  // The GGUF architecture of the files this entry was made from.
+  arch?: string
   tensors: number
   bytes: number
   expert_bytes: Record<string, number>
@@ -80,18 +90,31 @@ function knownEntries(table: StrataTable): Array<[string, StrataTableEntry]> {
   return Object.entries(table).filter(([k]) => !k.startsWith('_')) as Array<[string, StrataTableEntry]>
 }
 
-// Same decision as tools/strata_inspect.py: 'known' is a file setup installs
-// (under any name), 'layout' has the same routed experts as one, 'untested'
-// uses only expert quantizations Strata runs, 'no' cannot run.
+// The architectures an engine's table has entries for.
+export function strataTableArchs(table: StrataTable): string[] {
+  const archs = new Set<string>()
+  for (const [, v] of knownEntries(table)) if (v.arch) archs.add(v.arch)
+  return [...archs].sort()
+}
+
+// Same decision as tools/strata_inspect.py, taken over the entries of the
+// file's own architecture: 'known' is a file setup installs (under any name),
+// 'layout' has the same routed experts as one, 'untested' uses only expert
+// quantizations the engine runs, 'no' cannot run. An architecture with no
+// entry is not refused: the table says nothing about it ('unverified').
 export function strataVerdict(fp: StrataFingerprint, table: StrataTable): StrataVerdict {
-  if (fp.arch !== STRATA_ARCH) {
-    return { kind: 'no', detail: `Not Qwen3.8-Flash-Next (architecture ${fp.arch ?? 'unknown'}); Strata runs only that model.` }
+  const known = knownEntries(table).filter(([, v]) => !!fp.arch && v.arch === fp.arch)
+  if (known.length === 0) {
+    const archs = strataTableArchs(table)
+    return {
+      kind: 'unverified',
+      detail: `This engine's file table has no ${fp.arch ?? 'unknown'} model${archs.length ? ` (it lists ${archs.join(', ')})` : ''}, so it checks the file itself when it starts.`
+    }
   }
-  const known = knownEntries(table)
   const exact = known.find(([, v]) => sameBytes(v.expert_bytes, fp.expertBytes) && v.bytes === fp.bytes && v.tensors === fp.tensors)
   if (exact) {
     const [family, model] = exact[0].split('/')
-    return { kind: 'known', family, model, detail: `A file Strata installs: ${family} / ${model}.` }
+    return { kind: 'known', family, model, detail: `A file the engine installs: ${family} / ${model}.` }
   }
   const same = known.filter(([, v]) => sameBytes(v.expert_bytes, fp.expertBytes)).map(([k]) => k)
   if (same.length) {
@@ -105,15 +128,46 @@ export function strataVerdict(fp: StrataFingerprint, table: StrataTable): Strata
   for (const [, v] of known) for (const t of Object.keys(v.expert_bytes)) runs.add(t)
   const other = Object.keys(fp.expertBytes).filter(t => !runs.has(t)).sort()
   if (other.length) {
-    return { kind: 'no', detail: `Routed experts use ${other.join(', ')}, which no file Strata runs uses.` }
+    return { kind: 'no', detail: `Routed experts use ${other.join(', ')}, which no file this engine runs uses.` }
   }
-  return { kind: 'untested', detail: 'Routed experts use only quantizations Strata runs, but the file is not one setup installs.' }
+  return { kind: 'untested', detail: 'Routed experts use only quantizations the engine runs, but the file is not one setup installs.' }
+}
+
+// The verdict of an engine that ships no file table.
+export const STRATA_NO_TABLE: StrataVerdict = {
+  kind: 'unverified',
+  detail: 'This engine ships no file table to compare with, so it checks the file itself when it starts.'
+}
+
+// Best answer first: what the model list and the engine suggestion show when
+// several installed engines each have their own verdict.
+const KIND_RANK: Record<StrataVerdictKind, number> = { known: 4, layout: 3, untested: 2, unverified: 1, no: 0 }
+
+export function bestStrataInfo<T extends { kind: StrataVerdictKind }>(byEngine: Record<string, T>): { key: string; info: T } | null {
+  let best: { key: string; info: T } | null = null
+  for (const [key, info] of Object.entries(byEngine)) {
+    if (!best || KIND_RANK[info.kind] > KIND_RANK[best.info.kind]) best = { key, info }
+  }
+  return best
+}
+
+// The verdict that applies to one engine (a repo's backend key) when the
+// Template names it, else the best one.
+export interface StrataInfoLike extends StrataVerdict { tableHash?: string; engineKey?: string }
+
+export function strataInfoFor(
+  meta: { strata?: StrataInfoLike; strataEngines?: Record<string, StrataInfoLike> } | null | undefined,
+  backendKey?: string | null
+): StrataInfoLike | undefined {
+  if (!meta) return undefined
+  if (backendKey && meta.strataEngines?.[backendKey]) return meta.strataEngines[backendKey]
+  return meta.strata
 }
 
 // Cheap content hash of the known entries, used to notice when a newer
 // Strata ships a different table so cached verdicts can be recomputed.
 export function strataTableHash(table: StrataTable): string {
-  const s = JSON.stringify(knownEntries(table).map(([k, v]) => [k, v.tensors, v.bytes, v.expert_bytes]))
+  const s = JSON.stringify(knownEntries(table).map(([k, v]) => [k, v.arch, v.tensors, v.bytes, v.expert_bytes]))
   let h = 5381
   for (let i = 0; i < s.length; i++) h = ((h << 5) + h + s.charCodeAt(i)) | 0
   return (h >>> 0).toString(16)

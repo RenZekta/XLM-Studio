@@ -41,7 +41,7 @@ function diskCopyIsStale(id: string, readToken: number): boolean {
 
 // Merges the on-disk template list into the store by id, so a running card's
 // live status/expanded/tempPort survive, and a card whose own edit is newer
-// than the disk read keeps its in-memory args.
+// than the disk read keeps its in-memory args and server port.
 export function reconcileTemplatesFromDisk(templates: Template[], readToken: number): void {
   const { cards, addCard, updateCard, removeCard } = useStore.getState()
   const onDiskIds = new Set(templates.map(t => t.id))
@@ -52,7 +52,7 @@ export function reconcileTemplatesFromDisk(templates: Template[], readToken: num
   for (const t of templates) {
     if (!cardIds.has(t.id)) { addCard(t); continue }
     if (diskCopyIsStale(t.id, readToken)) {
-      const { args: _staleArgs, ...rest } = t
+      const { args: _staleArgs, serverPort: _stalePort, ...rest } = t
       updateCard(t.id, rest)
     } else {
       updateCard(t.id, t)

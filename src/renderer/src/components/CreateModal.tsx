@@ -11,40 +11,9 @@ import EngineParamsEditor from './EngineParamsEditor'
 import SelectMenu from './SelectMenu'
 import { buildQuickEngineBaseline, seedSamplingArgsFromPreset } from '../../../shared/presetBaselines'
 import { useOverlayClose } from '../hooks/useOverlayClose'
-import { normalizeImportedArgs } from '../../../shared/importCommand'
-function parseCommand(cmd: string): {
-  modelPath: string
-  serverPort: number
-  args: Record<string, string | number | boolean>
-} {
-  const parts: string[] = []
-  const regex = /(?:[^\s"']+|"[^"]*"|'[^']*')+/g
-  let m: RegExpExecArray | null
-  while ((m = regex.exec(cmd)) !== null) {
-    parts.push(m[0].replace(/^['"]|['"]$/g, ''))
-  }
-  let modelPath = ''
-  let serverPort = 8080
-  const args: Record<string, string | number | boolean> = {}
-  for (let i = 0; i < parts.length; i++) {
-    const p = parts[i]
-    if (p === '-m' || p === '--model') {
-      modelPath = parts[++i] || ''
-    } else if (p === '--port') {
-      serverPort = parseInt(parts[++i] || '8080', 10)
-    } else if (p.startsWith('--') || p.startsWith('-')) {
-      const next = parts[i + 1]
-      if (next && !next.startsWith('-')) {
-        const numVal = Number(next)
-        args[p] = isNaN(numVal) ? next : numVal
-        i++
-      } else {
-        args[p] = true
-      }
-    }
-  }
-  return { modelPath, serverPort, args }
-}
+import { normalizeImportedArgs, parseServerCommand, parseStrataCommand } from '../../../shared/importCommand'
+import { activeServerOverrides, findPortConflict } from '../utils/templatePort'
+import { strataInfoFor } from '../../../shared/strata'
 // Starting values of a new Template for an engine: llama.cpp gets the starred
 // sampling preset plus the Quick baseline, Strata the Quick baseline of the
 // few settings it shares (context, KV precision, image input).
@@ -71,6 +40,7 @@ const STRATA_VERDICT_TEXT: Record<string, string> = {
   known: 'A file Strata installs',
   layout: 'Same layout as a Strata file (a fine-tune, not tested)',
   untested: 'Not a file Strata installs; untested',
+  unverified: 'Not checked ahead: the engine checks this file when it starts',
   no: 'Strata cannot run this file'
 }
 
@@ -118,6 +88,8 @@ export default function CreateModal() {
   const [showAdvanced, setShowAdvanced] = useState(false)
   const [showImport, setShowImport] = useState(false)
   const [importCmd, setImportCmd] = useState('')
+  // What the last import did that the form does not show by itself.
+  const [importNote, setImportNote] = useState('')
   // Effects fire AFTER every
   // render, regardless of dependency array contents — dependencies only decide
   // whether to SKIP a re-run, not whether the very first run happens. So the
@@ -203,18 +175,52 @@ export default function CreateModal() {
   }
   async function handleImportCmd() {
     if (!importCmd.trim()) return
-    const parsed = parseCommand(importCmd)
+    if (engine === 'strata') { await importStrataCmd(); return }
+    const parsed = parseServerCommand(importCmd)
     // Normalize against the schema of the backend this Template will use, so
     // short flags/aliases (-ctkd, -c, ...) land under the keys the editor reads.
     let schema: CommandsSchema | null = null
     try { schema = await window.api.getCommands(backendKey || activeBackend?.backendKey || '', engine) } catch {}
     const normalized = normalizeImportedArgs(parsed.args, schema)
     if (parsed.modelPath) setModelPath(parsed.modelPath)
-    if (parsed.serverPort) setServerPort(parsed.serverPort)
+    if (parsed.serverPort !== null) setServerPort(parsed.serverPort)
     setArgs((prev) => ({ ...prev, ...normalized }))
+    // Host and API key are edited in the Server block of the parameters.
+    if (normalized['--host'] !== undefined || normalized['--api-key'] !== undefined) setShowAdvanced(true)
+    setImportNote('')
     setShowImport(false)
     setImportCmd('')
   }
+  async function importStrataCmd() {
+    const parsed = parseStrataCommand(importCmd)
+    let schema: CommandsSchema | null = null
+    try { schema = await window.api.getCommands(shownBuild?.backendKey || '', engine) } catch {}
+    const known = new Set((schema?.categories || []).flatMap(c => c.commands.map(x => x.arg)))
+    const unlisted = Object.keys(parsed.args).filter(k => !known.has(k) && k !== '--host' && k !== '--api-key')
+    if (parsed.serverPort !== null) setServerPort(parsed.serverPort)
+    setArgs(prev => ({ ...prev, ...parsed.args }))
+    if (parsed.args['--host'] !== undefined || parsed.args['--api-key'] !== undefined) setShowAdvanced(true)
+    // Strata is given a folder; a Template names a file in it.
+    const notes: string[] = []
+    if (parsed.ggufDir) {
+      const same = (a: string, b: string) => a.replace(/[\\/]+$/, '').replace(/\\/g, '/').toLowerCase() === b.replace(/[\\/]+$/, '').replace(/\\/g, '/').toLowerCase()
+      const files = models.filter(g => same(g.folderPath, parsed.ggufDir)).flatMap(g => g.models)
+      const variant = String(parsed.args['--model'] ?? '').toLowerCase()
+      const pick = (variant && files.find(f => f.name.toLowerCase().includes(variant))) || files[0]
+      if (pick) {
+        if (!modelPath || !same(modelPath.replace(/[^\\/]+$/, ''), parsed.ggufDir)) setModelPath(pick.path)
+      } else if (!modelPath) {
+        notes.push(`Pick the model file inside ${parsed.ggufDir}: it is not in your model folders.`)
+      }
+    }
+    if (parsed.ignored.length) notes.push(`${parsed.ignored.join(', ')} left out: they are added on every launch.`)
+    if (unlisted.length) notes.push(`${unlisted.join(', ')} not in this engine's parameter list: passed on as written.`)
+    setImportNote(notes.join(' '))
+    setShowImport(false)
+    setImportCmd('')
+  }
+  const portOverride = activeServerOverrides(baseUrlOverride, args['__ignoreBaseUrlOverride'] === true).port
+  const portConflict = findPortConflict(cards, serverPort, editingTemplate?.id)
   const engineBuilds = backendsOfEngine(backends, engine)
   // With no pin the Template follows the engine's global selection.
   const follow = !backendKey
@@ -252,6 +258,16 @@ export default function CreateModal() {
   const modelMeta = modelPath ? ggufMetadata[modelPath] : undefined
   const suggested = modelSpecificEngines().find(e => engineAcceptsModel(e.id, modelMeta))
   const missingEngine = missingEngineFor(modelMeta, backends)
+  // The verdict of the engine this Template would run on.
+  const engineInfo = strataInfoFor(modelMeta, shownBuild?.backendKey)
+  // Another installed Strata engine that runs this file when the one this
+  // Template follows does not.
+  const betterBuild = engine === 'strata' && engineInfo && engineInfo.kind !== 'known' && engineInfo.kind !== 'layout'
+    ? engineBuilds.find(b => {
+        const k = modelMeta?.strataEngines?.[b.backendKey ?? '']?.kind
+        return b.backendKey !== shownBuild?.backendKey && (k === 'known' || k === 'layout')
+      })
+    : undefined
   async function handleSubmit(e: React.FormEvent) {
     e.preventDefault()
     // No field on this form should block Save with a validation popup --
@@ -307,7 +323,7 @@ export default function CreateModal() {
         </div>
         <form onSubmit={handleSubmit} className="flex flex-col flex-1 overflow-hidden">
           <div className="modal-body">
-            {engine === 'llama.cpp' && <div className="collapsible-section" style={{ marginBottom: 16 }}>
+            <div className="collapsible-section" style={{ marginBottom: importNote ? 6 : 16 }}>
               <button
                 type="button"
                 className="collapsible-toggle"
@@ -323,14 +339,18 @@ export default function CreateModal() {
               {showImport && (
                 <div className="collapsible-body">
                   <p className="form-hint" style={{ marginBottom: 8 }}>
-                    Paste a <code>llama-server</code> command and the form will be filled automatically.
+                    {engine === 'strata'
+                      ? <>Paste a Strata launch command (<code>START-HERE.bat</code>, <code>./setup.sh</code> or <code>python setup.py</code> with its flags) and the form will be filled automatically.</>
+                      : <>Paste a <code>llama-server</code> command and the form will be filled automatically.</>}
                   </p>
                   <textarea
                     className="form-textarea mono"
                     rows={3}
                     value={importCmd}
                     onChange={e => setImportCmd(e.target.value)}
-                    placeholder="llama-server -m /models/model.gguf --port 8080 --ctx-size 4096 ..."
+                    placeholder={engine === 'strata'
+                      ? 'START-HERE.bat --family qwen --model IQ3_S --gguf-dir D:\\models\\qwen --port 8080 --context 65536 ...'
+                      : 'llama-server -m /models/model.gguf --port 8080 --ctx-size 4096 ...'}
                     style={{ fontSize: 12, fontFamily: "var(--font-mono)" }}
                   />
                   <button
@@ -343,8 +363,8 @@ export default function CreateModal() {
                   </button>
                 </div>
               )}
-            </div>}
-            {}
+            </div>
+            {importNote && <div className="form-hint" style={{ marginBottom: 16 }}>{importNote}</div>}
             <div className="form-group">
               <label className="form-label">Template Name</label>
               <input
@@ -392,8 +412,7 @@ export default function CreateModal() {
                 />
               </div>
               <div className="form-group">
-                <label className="form-label">
-                  Server Port {baseUrlOverride?.enabled && <span style={{ color: 'var(--warning)', fontSize: 12, fontWeight: 600 }}>(Overridden — using port {baseUrlOverride.port})</span>}</label>
+                <label className="form-label">Server Port</label>
                 <input
                   type="number"
                   className="form-input"
@@ -402,22 +421,16 @@ export default function CreateModal() {
                   min={1024}
                   max={65535}
                 />
-                {baseUrlOverride?.enabled && (
+                {portOverride !== null && (
                   <div className="form-hint" style={{ color: 'var(--warning)' }}>
-                    Base URL Override is enabled. The server will use port {baseUrlOverride.port} instead of {serverPort}. You can still change this port — it will be used when override is disabled. Disable override in Settings to use this port.
+                    Overridden by the global Base URL Override: runs on port {portOverride}.
                   </div>
                 )}
-                {(() => {
-                  const conflict = cards.find(c =>
-                    c.template.id !== editingTemplate?.id &&
-                    c.template.serverPort === serverPort
-                  )
-                  return conflict ? (
-                    <div className="form-hint" style={{ color: 'var(--warning)' }}>
-                      Port {serverPort} is already used by &ldquo;{conflict.template.name}&rdquo;. They cannot run at the same time.
-                    </div>
-                  ) : null
-                })()}
+                {portConflict && (
+                  <div className="form-hint" style={{ color: 'var(--warning)' }}>
+                    Port {serverPort} is already used by &ldquo;{portConflict}&rdquo;. They cannot run at the same time.
+                  </div>
+                )}
               </div>
             </div>
             <div className="form-group">
@@ -490,9 +503,14 @@ export default function CreateModal() {
                 </button>
               </div>
               <div className="form-hint">Models are grouped by folder. mmproj files are auto-detected and shared within each folder.</div>
-              {modelPath && engine === 'strata' && modelMeta?.strata && (
-                <div className="form-hint" style={modelMeta.strata.kind === 'known' || modelMeta.strata.kind === 'layout' ? undefined : { color: 'var(--warning)' }}>
-                  Strata: {STRATA_VERDICT_TEXT[modelMeta.strata.kind]}{modelMeta.strata.family ? ` (${modelMeta.strata.family} / ${modelMeta.strata.model})` : ''}. {modelMeta.strata.detail}
+              {modelPath && engine === 'strata' && engineInfo && (
+                <div className="form-hint" style={engineInfo.kind === 'known' || engineInfo.kind === 'layout' ? undefined : { color: 'var(--warning)' }}>
+                  {shownBuild?.backendKey || 'Strata'}: {STRATA_VERDICT_TEXT[engineInfo.kind]}{engineInfo.family ? ` (${engineInfo.family} / ${engineInfo.model})` : ''}. {engineInfo.detail}
+                  {betterBuild && (
+                    <> {betterBuild.backendKey} can run this file.{' '}
+                      <button type="button" className="btn btn-secondary btn-sm" onClick={() => pinTo(betterBuild)}>Use {betterBuild.backendKey}</button>
+                    </>
+                  )}
                 </div>
               )}
               {modelPath && engine !== 'strata' && suggested && (
@@ -535,6 +553,7 @@ export default function CreateModal() {
                     onChange={setArgs}
                     modelPathFallback={modelPath}
                     serverPortFallback={serverPort}
+                    onServerPortChange={setServerPort}
                     backendKey={backendKey}
                     backendVersionName={backendVersion}
                     backendType={backendType}
@@ -547,6 +566,7 @@ export default function CreateModal() {
                     onChange={setArgs}
                     modelPathFallback={modelPath}
                     serverPortFallback={serverPort}
+                    onServerPortChange={setServerPort}
                     backendKey={backendKey}
                     headerPortalTarget={headerAnchor}
                   />

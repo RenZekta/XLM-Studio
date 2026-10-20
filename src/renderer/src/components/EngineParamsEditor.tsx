@@ -5,7 +5,8 @@ import { useStore } from '../store/useStore'
 import SegmentedToggle from './SegmentedToggle'
 import HybridSlider from './HybridSlider'
 import CommandPreview, { type PreviewToken } from './CommandPreview'
-import type { CommandParam, CommandsSchema, StrataSettings } from '../../../shared/types'
+import { strataInfoFor } from '../../../shared/strata'
+import type { CommandParam, CommandsSchema, StrataSettings, Template } from '../../../shared/types'
 import { ENGINES, type EngineId } from '../../../shared/engines'
 import {
   buildStrataArgv, buildStrataQuickBaseline, estimateStrataMemory, strataDefaults, strataGgufDir,
@@ -14,6 +15,8 @@ import {
 import { resolveEngineBackend } from '../utils/engineBackends'
 import { formatWithSpaces, CONTEXT_POWER_OF_TWO_STEPS, snapToNearestPowerOfTwo } from '../utils/contextFormat'
 import { markTemplateSavePending, markTemplateSaveDone } from '../utils/templateSync'
+import { activeServerOverrides, findPortConflict } from '../utils/templatePort'
+import ServerParamsBlock from './ServerParamsBlock'
 
 // Parameter editor for engines whose settings are a short, flat list (Strata).
 // llama.cpp keeps CmdParamsEditor, which carries a lot of llama-only logic
@@ -35,6 +38,8 @@ interface Props {
   onChange?: (args: Record<string, any>) => void
   modelPathFallback?: string
   serverPortFallback?: number
+  // Receives the Server block's port edits when the Template is not saved yet.
+  onServerPortChange?: (port: number) => void
   disabled?: boolean
   backendKey?: string | null
   headerPortalTarget?: HTMLElement | null
@@ -46,6 +51,9 @@ const CATEGORY_ICONS: Record<string, React.ReactNode> = {
   Box: <Box size={14} />, Cpu: <Cpu size={14} />, Zap: <Zap size={14} />, Database: <Database size={14} />,
   Wind: <Wind size={14} />, Server: <Server size={14} />, GitBranch: <GitBranch size={14} />
 }
+
+// Server parameters kept in `args`; the port is the Template's own field.
+const SERVER_ARGS = ['--host', '--api-key']
 
 // Slider ceiling while Automatic YaRN scaling control is on, as in the llama.cpp
 // editor.
@@ -61,7 +69,7 @@ function same(a: unknown, b: unknown): boolean {
 }
 
 export default function EngineParamsEditor({
-  engine, templateId, args, onChange, modelPathFallback, serverPortFallback,
+  engine, templateId, args, onChange, modelPathFallback, serverPortFallback, onServerPortChange,
   disabled: disabledProp, backendKey: backendKeyProp, headerPortalTarget
 }: Props) {
   const {
@@ -73,13 +81,14 @@ export default function EngineParamsEditor({
   const modelPath = modelPathFallback ?? card?.template.modelPath ?? ''
   const port = serverPortFallback ?? card?.template.serverPort ?? 8080
   const meta = modelPath ? ggufMetadata[modelPath] : undefined
-  const verdict = meta?.strata as { kind: string; family?: string; model?: string } | undefined
 
   const build = useMemo(() => resolveEngineBackend(
     engine,
     { backendKey: backendKeyProp !== undefined ? backendKeyProp : card?.template.backendKey },
     backends, activeBackend, engineGlobals
   ), [engine, backendKeyProp, card?.template.backendKey, backends, activeBackend, engineGlobals])
+  // What the engine this Template runs on says about the file.
+  const verdict = strataInfoFor(meta, build?.backendKey)
 
   const [schema, setSchema] = useState<CommandsSchema | null>(null)
   useEffect(() => {
@@ -90,6 +99,16 @@ export default function EngineParamsEditor({
 
   // What the launch will add on top of the template: the data folder and the
   // Strata-wide parallel override.
+  // The families and variants of the engine this Template runs on, for the
+  // Model Family and Variant dropdowns.
+  const [catalog, setCatalog] = useState<Record<string, string[]>>({})
+  useEffect(() => {
+    let cancelled = false
+    window.api.getStrataCatalog(build?.backendKey || '')
+      .then(c => { if (!cancelled) setCatalog(c?.families ?? {}) })
+      .catch(() => { if (!cancelled) setCatalog({}) })
+    return () => { cancelled = true }
+  }, [build?.backendKey])
   const [strataCfg, setStrataCfg] = useState<{ strata: StrataSettings; strataDataDir: string } | null>(null)
   useEffect(() => {
     let cancelled = false
@@ -100,10 +119,10 @@ export default function EngineParamsEditor({
   const argsRef = useRef(args)
   argsRef.current = args
   const saveTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null)
-  function commit(next: Record<string, any>) {
+  function commit(next: Record<string, any>, patch?: Partial<Template>) {
     if (onChange) { onChange(next); return }
     if (!templateId) return
-    updateCard(templateId, { args: next })
+    updateCard(templateId, { args: next, ...patch })
     // Same debounced write-through as the llama.cpp editor: one disk write
     // per burst of edits, tracked so an unsaved edit is never lost on quit.
     if (saveTimeoutRef.current) clearTimeout(saveTimeoutRef.current)
@@ -143,8 +162,14 @@ export default function EngineParamsEditor({
 
   // FULL AUTO sends only the model's identity; everything is left to the
   // engine's own recommendation. Quick is the shared baseline.
-  function applyFullAuto() { commit({ __lastPreset: 'fullauto' }) }
-  function applyQuick() { commit({ ...quickArgs, __lastPreset: 'quick' }) }
+  // Host and API key say where the server is reachable, so presets keep them.
+  const serverArgs = () => {
+    const kept: Record<string, any> = {}
+    for (const k of SERVER_ARGS) if (args[k] !== undefined) kept[k] = args[k]
+    return kept
+  }
+  function applyFullAuto() { commit({ ...serverArgs(), __lastPreset: 'fullauto' }) }
+  function applyQuick() { commit({ ...serverArgs(), ...quickArgs, __lastPreset: 'quick' }) }
 
   function update(arg: string, value: any) {
     const next = { ...args }
@@ -216,10 +241,11 @@ export default function EngineParamsEditor({
 
   // ----- Preview: the command the launch really runs, overrides applied -----
   const ignoreBaseUrlOverride = args['__ignoreBaseUrlOverride'] === true
-  const overrideOn = !!baseUrlOverride?.enabled && !ignoreBaseUrlOverride
-  const effectivePort = overrideOn ? (baseUrlOverride.port || 1234) : port
-  const hostOverride = overrideOn && !!baseUrlOverride.serveOnLocalNetwork ? '0.0.0.0' : null
-  const apiKeyOverride = overrideOn && !!baseUrlOverride.apiKeyEnabled && !!baseUrlOverride.apiKey ? baseUrlOverride.apiKey : null
+  const serverOverrides = activeServerOverrides(baseUrlOverride, ignoreBaseUrlOverride)
+  const overrideOn = serverOverrides.port !== null
+  const effectivePort = serverOverrides.port ?? port
+  const hostOverride = serverOverrides.host
+  const apiKeyOverride = serverOverrides.apiKey
   const parallelOverride = strataCfg?.strata.parallelOverride ?? null
 
   const preview = useMemo((): { tokens: PreviewToken[]; error?: string } => {
@@ -250,7 +276,29 @@ export default function EngineParamsEditor({
   }, [args, modelPath, verdict?.family, verdict?.model, effectivePort, port, overrideOn, hostOverride, apiKeyOverride, parallelOverride, strataCfg?.strataDataDir])
 
   // ----- Rows -----
-  const renderRow = (cmd: CommandParam) => {
+  // Family and Variant offer what the engine lists. The variants follow the
+  // family in use (picked, else detected from the file). With no catalog they
+  // stay text fields.
+  const familyInUse = String(args['--family'] ?? defaults['--family'] ?? '')
+  const catalogOptions = (arg: string): string[] | null => {
+    const families = Object.keys(catalog)
+    if (families.length === 0) return null
+    if (arg === '--family') return families
+    if (arg === '--model') return catalog[familyInUse] ?? Array.from(new Set(Object.values(catalog).flat()))
+    return null
+  }
+  // A new family drops a variant it does not have.
+  function changeFamily(family: string) {
+    const next: Record<string, any> = { ...args }
+    if (family) next['--family'] = family; else delete next['--family']
+    if (next['--model'] && catalog[family] && !catalog[family].includes(String(next['--model']))) delete next['--model']
+    commit(next)
+  }
+  const renderRow = (cmdIn: CommandParam) => {
+    const options = catalogOptions(cmdIn.arg)
+    const cmd: CommandParam = options
+      ? { ...cmdIn, type: 'select', options, emptyLabel: 'Pick one (not detected from the file)' }
+      : cmdIn
     const raw = args[cmd.arg]
     const val = raw ?? defaults[cmd.arg] ?? ''
     const changed = isChanged(cmd.arg)
@@ -326,7 +374,7 @@ export default function EngineParamsEditor({
             />
           )}
           {!isCtx && cmd.type === 'select' && (
-            <select className="cmd-select" value={val} onChange={e => update(cmd.arg, e.target.value)} disabled={rowDisabled}>
+            <select className="cmd-select" value={val} onChange={e => cmd.arg === '--family' ? changeFamily(e.target.value) : update(cmd.arg, e.target.value)} disabled={rowDisabled}>
               {val === '' && <option value="">{cmd.emptyLabel || 'Not set'}</option>}
               {cmd.options?.map(opt => <option key={opt} value={opt}>{cmd.optionLabels?.[opt] ?? opt}</option>)}
               {val !== '' && cmd.options && !cmd.options.includes(String(val)) && <option value={String(val)}>{String(val)}</option>}
@@ -343,7 +391,7 @@ export default function EngineParamsEditor({
   }
 
   const visibleCategories = (schema?.categories || [])
-    .map(cat => ({ ...cat, commands: cat.commands.filter(c => paramViewMode === 'full' || STRATA_COMMON_FLAGS.has(c.arg)) }))
+    .map(cat => ({ ...cat, commands: cat.commands.filter(c => !SERVER_ARGS.includes(c.arg) && (paramViewMode === 'full' || STRATA_COMMON_FLAGS.has(c.arg))) }))
     .filter(cat => cat.commands.length > 0)
 
   const header = (
@@ -401,6 +449,20 @@ export default function EngineParamsEditor({
           This file is not one Strata is known to run. Launching it may be refused by Strata's setup.
         </div>
       )}
+      <ServerParamsBlock
+        port={port}
+        host={String(args['--host'] ?? '')}
+        apiKey={String(args['--api-key'] ?? '')}
+        overrides={serverOverrides}
+        conflict={onServerPortChange ? null : findPortConflict(cards, port, templateId)}
+        disabled={disabled}
+        onPortChange={p => {
+          if (onServerPortChange) onServerPortChange(p)
+          else commit(args, { serverPort: p })
+        }}
+        onHostChange={v => update('--host', v)}
+        onApiKeyChange={v => update('--api-key', v)}
+      />
       {!schema ? (
         <div className="text-muted text-sm">No commands schema loaded. Ensure an engine is installed.</div>
       ) : visibleCategories.map(cat => (

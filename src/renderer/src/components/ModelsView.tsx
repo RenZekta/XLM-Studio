@@ -97,10 +97,12 @@ function UrlDownloadModal({ onClose }: { onClose: () => void }) {
 
 // A single model file row inside a group.
 // Whether Strata can run a file, from the validation cached with its
-// metadata (only present for architectures Strata knows).
+// metadata: the best answer of the installed engines.
 function StrataChip({ path }: { path: string }) {
   const info = useStore(st => st.ggufMetadata[path]?.strata) as { kind: string; family?: string; model?: string; detail: string } | undefined
-  if (!info) return null
+  // 'unverified' is what most models get (the engine has nothing to compare
+  // them with), so it shows nothing.
+  if (!info || info.kind === 'unverified') return null
   const label = info.kind === 'known' ? `Strata ${info.family}/${info.model}`
     : info.kind === 'layout' ? 'Strata: same layout'
     : info.kind === 'untested' ? 'Strata: untested' : 'Strata: no'

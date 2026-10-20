@@ -51,6 +51,7 @@ interface LlamaCppApi {
   deleteBackend: (backendId: string) => Promise<{ success: boolean; error?: string }>
   deleteBackendType: (backendKey: string, backendType: string, platform?: string) => Promise<{ success: boolean; deleted?: boolean; error?: string }>
   getCommands: (backendKey: string, engine?: string) => Promise<CommandsSchema | null>
+  getStrataCatalog: (backendKey: string) => Promise<{ families: Record<string, string[]> }>
   saveBackendCommands: (backendKey: string, schema: object) => Promise<{ success: boolean; error?: string }>
 
   // Backend folders

@@ -35,6 +35,7 @@ const api = {
   deleteBackend: (backendId: string) => ipcRenderer.invoke('delete-backend', backendId),
   deleteBackendType: (backendKey: string, backendType: string, platform?: string) => ipcRenderer.invoke('delete-backend-type', { backendKey, backendType, platform }) as Promise<{ success: boolean; deleted?: boolean; error?: string }>,
   getCommands: (backendKey: string, engine?: string) => ipcRenderer.invoke('get-commands', backendKey, engine),
+  getStrataCatalog: (backendKey: string) => ipcRenderer.invoke('get-strata-catalog', backendKey),
   saveBackendCommands: (backendKey: string, schema: object) => ipcRenderer.invoke('save-backend-commands', backendKey, schema),
 
   // ----- Backend folders (external + main/starred) -----

@@ -29,8 +29,9 @@ import { randomBytes } from 'crypto'
 import { engineOf, type EngineId } from '../shared/engines'
 import { assetMatchesHost } from '../shared/assetPlatform'
 import { NATIVE_PLATFORM, platformOfBuildDir, installVersionName } from './buildPlatform'
-import { STRATA_ARCH, strataTableHash, strataVerdict, type StrataTable } from '../shared/strata'
+import { strataTableHash, strataVerdict, bestStrataInfo, STRATA_NO_TABLE, type StrataTable, type StrataFingerprint } from '../shared/strata'
 import { fingerprintGguf } from './ggufTensors'
+import { parseStrataCatalog, type StrataCatalog } from './strataCatalog'
 import { LineAssembler } from './lineAssembler'
 import {
   STRATA_DATA_DIRNAME, DEFAULT_STRATA_DATA, strataLauncherName, looksLikeStrataClone, gitAvailable,
@@ -3920,7 +3921,7 @@ export function registerIpcHandlers(): void {
         if (!st.updateAvailable) continue
         const r = await updateGitEngine(clone)
         if (r.error) errors.push(`${t.name}: ${r.error}`)
-        else if (r.updated) updated.push(t.name)
+        else if (r.updated) { updated.push(t.name); void refreshStrataVerdicts() }
         continue
       }
       if (!sender || sender.isDestroyed()) continue
@@ -3974,6 +3975,7 @@ export function registerIpcHandlers(): void {
     BrowserWindow.getAllWindows().forEach(win => {
       if (!win.isDestroyed()) win.webContents.send('backends-changed', { deleted: [] })
     })
+    if (r.ok) void refreshStrataVerdicts()
     return r.ok ? { success: true, path: dest } : { success: false, error: r.error }
   })
 
@@ -3988,6 +3990,7 @@ export function registerIpcHandlers(): void {
     BrowserWindow.getAllWindows().forEach(win => {
       if (!win.isDestroyed()) win.webContents.send('backends-changed', { deleted: [] })
     })
+    if (!r.error) void refreshStrataVerdicts()
     return r.error ? { success: false, error: r.error } : { success: true, updated: r.updated, skipped: r.skipped }
   })
 
@@ -4749,48 +4752,135 @@ export function registerIpcHandlers(): void {
     }
   }
   // ----- Strata model validation -----
-  // The fingerprint table of the installed Strata when there is one (it
-  // tracks which files that version runs), else the snapshot we ship.
-  let strataTableCache: { key: string; table: StrataTable; hash: string } | null = null
-  async function currentStrataTable(): Promise<{ table: StrataTable; hash: string }> {
-    let file: string | null = null
+  // Every model file is tested against every installed git engine (Strata and
+  // its forks), each by the data its own clone ships: its file table when it
+  // has one. No architecture is assumed, so a fork that runs other models
+  // needs nothing here. While no engine is installed the snapshot we ship
+  // stands in for the default Strata, so a model still shows what Strata
+  // would say about it.
+  interface StrataEngineData { key: string; table: StrataTable | null; hash: string }
+  const strataTableCache = new Map<string, { stamp: number; table: StrataTable; hash: string }>()
+  function readStrataTable(file: string): { table: StrataTable; hash: string } | null {
+    try {
+      const stamp = statSync(file).mtimeMs
+      const hit = strataTableCache.get(file)
+      if (hit && hit.stamp === stamp) return hit
+      const table = JSON.parse(readFileSync(file, 'utf-8')) as StrataTable
+      const entry = { stamp, table, hash: strataTableHash(table) }
+      strataTableCache.set(file, entry)
+      return entry
+    } catch {
+      return null
+    }
+  }
+  async function installedStrataEngines(): Promise<StrataEngineData[]> {
+    const bundled = app.isPackaged
+      ? join(process.resourcesPath, 'resources', 'strata-fingerprints.json')
+      : join(process.cwd(), 'resources', 'strata-fingerprints.json')
+    const engines: StrataEngineData[] = []
     const s = await loadSettings()
     for (const t of s.trackedBackends) {
       if (t.kind !== 'git') continue
       const clone = await findGitEngineClone(t)
-      const candidate = clone ? join(clone, 'data', 'gguf_fingerprints.json') : null
-      if (candidate && existsSync(candidate)) { file = candidate; break }
+      if (!clone) continue
+      const own = join(clone, 'data', 'gguf_fingerprints.json')
+      // Only the default Strata falls back to the snapshot: another fork's
+      // models are not the ones the snapshot lists.
+      const file = existsSync(own) ? own : t.id === 'strata' ? bundled : null
+      const read = file ? readStrataTable(file) : null
+      engines.push({ key: t.folderName, table: read?.table ?? null, hash: read?.hash ?? 'none' })
     }
-    if (!file) {
-      file = app.isPackaged
-        ? join(process.resourcesPath, 'resources', 'strata-fingerprints.json')
-        : join(process.cwd(), 'resources', 'strata-fingerprints.json')
+    if (engines.length === 0) {
+      const read = readStrataTable(bundled)
+      engines.push({ key: '', table: read?.table ?? null, hash: read?.hash ?? 'none' })
     }
-    const key = `${file}|${statSync(file).mtimeMs}`
-    if (strataTableCache?.key === key) return strataTableCache
-    const table = JSON.parse(readFileSync(file, 'utf-8')) as StrataTable
-    strataTableCache = { key, table, hash: strataTableHash(table) }
-    return strataTableCache
+    return engines
   }
 
-  // Adds (or refreshes) meta.strata for a model whose architecture Strata
-  // can run. Cheap for everything else: the architecture is already cached.
-  async function withStrataInfo(modelPath: string, meta: any): Promise<any> {
-    if (!modelPath || !meta || meta.error || meta.architecture !== STRATA_ARCH) return meta
+  // One model at a time: each reads every tensor header of its shards.
+  let strataQueue: Promise<unknown> = Promise.resolve()
+  const strataFingerprints = new Map<string, { stamp: string; fp: StrataFingerprint | null }>()
+  async function fingerprintCached(modelPath: string): Promise<StrataFingerprint | null> {
+    const st = statSync(modelPath)
+    const stamp = `${st.size}:${st.mtimeMs}`
+    const hit = strataFingerprints.get(modelPath)
+    if (hit && hit.stamp === stamp) return hit.fp
+    const fp = await fingerprintGguf(modelPath)
+    // An incomplete set (null) is not kept: its missing shards may arrive.
+    if (fp) strataFingerprints.set(modelPath, { stamp, fp })
+    return fp
+  }
+
+  // The families and variants one installed engine offers (its Template's
+  // Model Family and Variant dropdowns), from its own file table and setup.py.
+  const strataCatalogCache = new Map<string, { stamp: string; catalog: StrataCatalog }>()
+  async function strataCatalogFor(backendKey: string): Promise<StrataCatalog> {
+    const bundled = app.isPackaged
+      ? join(process.resourcesPath, 'resources', 'strata-fingerprints.json')
+      : join(process.cwd(), 'resources', 'strata-fingerprints.json')
+    const s = await loadSettings()
+    let clone: string | null = null
+    let isDefault = false
+    for (const t of s.trackedBackends) {
+      if (t.kind !== 'git' || t.folderName !== backendKey) continue
+      clone = await findGitEngineClone(t)
+      isDefault = t.id === 'strata'
+    }
+    const own = clone ? join(clone, 'data', 'gguf_fingerprints.json') : null
+    const tableFile = own && existsSync(own) ? own : (!clone || isDefault) ? bundled : null
+    const setupFile = clone ? join(clone, 'setup.py') : null
+    const mtime = (f: string | null) => { try { return f ? String(statSync(f).mtimeMs) : '-' } catch { return '-' } }
+    const stamp = `${clone}|${mtime(tableFile)}|${mtime(setupFile)}`
+    const hit = strataCatalogCache.get(backendKey)
+    if (hit && hit.stamp === stamp) return hit.catalog
+    let setupPy: string | null = null
+    try { if (setupFile) setupPy = readFileSync(setupFile, 'utf-8') } catch {}
+    const catalog = parseStrataCatalog(setupPy, tableFile ? readStrataTable(tableFile)?.table ?? null : null)
+    strataCatalogCache.set(backendKey, { stamp, catalog })
+    return catalog
+  }
+  ipcMain.handle('get-strata-catalog', async (_e, backendKey: string) => strataCatalogFor(backendKey || ''))
+
+  // Adds (or refreshes) meta.strataEngines / meta.strata for a model: one
+  // verdict per installed engine, recomputed only for an engine whose table
+  // changed since (a Strata update) and for engines installed since.
+  function withStrataInfo(modelPath: string, meta: any, engines?: StrataEngineData[]): Promise<any> {
+    if (!modelPath || !meta || meta.error || isMmprojFile(basename(modelPath))) return Promise.resolve(meta)
+    const run = strataQueue.then(() => computeStrataInfo(modelPath, meta, engines))
+    strataQueue = run.catch(() => {})
+    return run
+  }
+
+  async function computeStrataInfo(modelPath: string, meta: any, given?: StrataEngineData[]): Promise<any> {
     try {
-      const { table, hash } = await currentStrataTable()
-      if (meta.strata && meta.strata.tableHash === hash) return meta
-      const fp = await fingerprintGguf(modelPath)
-      const info: StrataModelInfo = fp
-        ? { ...strataVerdict(fp, table), tableHash: hash }
-        : { kind: 'no', detail: 'Some shards of this model are missing next to this file.', tableHash: hash }
-      meta.strata = info
+      const engines = given ?? await installedStrataEngines()
+      const have: Record<string, StrataModelInfo> = meta.strataEngines ?? {}
+      const upToDate = engines.length === Object.keys(have).length && engines.every(e => have[e.key]?.tableHash === e.hash)
+      if (upToDate && meta.strata) return meta
+      const next: Record<string, StrataModelInfo> = {}
+      let fp: StrataFingerprint | null | undefined
+      for (const e of engines) {
+        if (have[e.key]?.tableHash === e.hash) { next[e.key] = have[e.key]; continue }
+        if (!e.table) { next[e.key] = { ...STRATA_NO_TABLE, tableHash: e.hash }; continue }
+        if (fp === undefined) fp = await fingerprintCached(modelPath)
+        next[e.key] = fp
+          ? { ...strataVerdict(fp, e.table), tableHash: e.hash }
+          // The marker makes the next request look again: the shards may have arrived.
+          : { kind: 'unverified', detail: 'Some shards of this model are missing next to this file, so it cannot be checked.', tableHash: `${e.hash}:incomplete` }
+      }
+      const best = bestStrataInfo(next)
+      const changed = JSON.stringify(have) !== JSON.stringify(next)
+      meta.strataEngines = next
+      meta.strata = best ? { ...best.info, engineKey: best.key } : undefined
       metadataCache[modelPath] = meta
-      saveMetadataCache()
-      BrowserWindow.getAllWindows().forEach(win => {
-        if (!win.isDestroyed()) win.webContents.send('gguf-metadata-updated', { modelPath, meta })
-      })
+      if (changed) {
+        saveMetadataCache()
+        BrowserWindow.getAllWindows().forEach(win => {
+          if (!win.isDestroyed()) win.webContents.send('gguf-metadata-updated', { modelPath, meta })
+        })
+      }
     } catch (err) {
+      // A file that is not a readable GGUF simply has no verdict.
       console.error('[strata] could not fingerprint', modelPath, err)
     }
     return meta
@@ -4800,15 +4890,17 @@ export function registerIpcHandlers(): void {
     return withStrataInfo(modelPath, await extractGgufMetadataImpl(modelPath))
   }
 
-  // Brings every cached Strata-capable model up to date with the current
-  // table (entries cached before this existed, or after Strata updated it).
+  // Brings every cached model up to date with the installed engines' tables
+  // (entries cached before this existed, a Strata update, an engine installed
+  // or removed).
   let strataRefreshRunning = false
   async function refreshStrataVerdicts(): Promise<void> {
     if (strataRefreshRunning) return
     strataRefreshRunning = true
     try {
+      const engines = await installedStrataEngines()
       for (const path of Object.keys(metadataCache)) {
-        if (metadataCache[path]?.architecture === STRATA_ARCH && existsSync(path)) await withStrataInfo(path, metadataCache[path])
+        if (existsSync(path)) await withStrataInfo(path, metadataCache[path], engines)
       }
     } finally {
       strataRefreshRunning = false

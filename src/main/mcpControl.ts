@@ -14,7 +14,7 @@ import type { Template, CheckpointMode } from '../shared/types'
 import { applyMmprojOffloadFlag, MMPROJ_OFFLOAD_MODE_KEY, getMmprojOffloadMode, resolveMmprojOffloadToRam } from '../shared/mmprojOffload'
 import { applySpecDraftKvDefaults } from '../shared/specDraftKv'
 import { engineOf, ENGINES, type EngineId } from '../shared/engines'
-import { buildStrataArgv, buildStrataQuickBaseline, strataGgufDir } from '../shared/strata'
+import { buildStrataArgv, buildStrataQuickBaseline, strataGgufDir, strataInfoFor } from '../shared/strata'
 
 // Speculative-decoding tier table — mirrors src/main/ipc.ts's own
 // SPEC_TIER_DEFS/classifySidecarFilename (and CmdParamsEditor.tsx's
@@ -236,8 +236,9 @@ async function buildStrataLaunchArgs(template: Template): Promise<{ args: string
   let model: string | undefined
   try {
     const meta = await D().getGgufMetadata(template.modelPath)
-    family = meta?.strata?.family
-    model = meta?.strata?.model
+    const info = strataInfoFor(meta, template.backendKey)
+    family = info?.family
+    model = info?.model
   } catch {}
   const forcedParallel = (await D().loadSettings()).strata?.parallelOverride
   const built = buildStrataArgv({

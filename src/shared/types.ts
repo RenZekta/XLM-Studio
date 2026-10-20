@@ -427,9 +427,13 @@ export interface GgufMetadata {
   // file, extracted once as part of this same metadata parse/cache — never
   // re-scanned separately by the Speculative Decoding widget.
   hasNativeMtp: boolean
-  // Strata validation of this file, computed once for architectures Strata
-  // can run and cached with the rest of the metadata.
+  // Strata validation of this file by each installed engine, cached with the
+  // rest of the metadata.
   strata?: StrataModelInfo
+  // One verdict per installed engine, keyed by the repo's backend key (''
+  // while none is installed and the bundled snapshot answers). `strata` is
+  // the best of them.
+  strataEngines?: Record<string, StrataModelInfo>
   error?: string
 }
 
@@ -440,6 +444,8 @@ export interface StrataModelInfo {
   detail: string
   // Hash of the fingerprint table the verdict was computed against.
   tableHash: string
+  // Backend key of the engine that gave this verdict (set on `strata`).
+  engineKey?: string
 }
 
 // VRAM telemetry returned by the main process for the budgeting algorithm.
