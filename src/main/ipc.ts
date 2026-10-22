@@ -3924,6 +3924,20 @@ export function registerIpcHandlers(): void {
     const s = await loadSettings()
     const updated: string[] = []
     const errors: string[] = []
+    // An engine that is done tells the window right away: the backend list is
+    // refreshed and that engine alone is re-checked, so its "update available"
+    // badge clears at once instead of waiting for the rest of the run.
+    const settled = async (t: TrackedBackend) => {
+      BrowserWindow.getAllWindows().forEach(win => {
+        if (!win.isDestroyed()) win.webContents.send('backends-changed', { deleted: [] })
+      })
+      try {
+        const result = await fetchTrackedRelease(t)
+        BrowserWindow.getAllWindows().forEach(win => {
+          if (!win.isDestroyed()) win.webContents.send('backends-checked-silent', { results: [result] })
+        })
+      } catch {}
+    }
     // Two lanes that run at the same time: every git engine is pulled in
     // parallel with the others, and none of them waits for the (one at a
     // time) binary downloads.
@@ -3935,6 +3949,7 @@ export function registerIpcHandlers(): void {
       const r = await updateGitEngineOnce(clone)
       if (r.error) errors.push(`${t.name}: ${r.error}`)
       else if (r.updated) { updated.push(t.name); void refreshStrataVerdicts() }
+      if (r.error || r.updated) await settled(t)
     }))
     const binaryLane = (async () => {
       if (!sender || sender.isDestroyed()) return
@@ -3956,6 +3971,7 @@ export function registerIpcHandlers(): void {
           })
           if (res.success) updated.push(`${t.name} (${asset.type || asset.name})`)
           else errors.push(`${t.name}: ${res.error}`)
+          await settled(t)
         }
       }
     })()
@@ -3963,18 +3979,6 @@ export function registerIpcHandlers(): void {
     BrowserWindow.getAllWindows().forEach(win => {
       if (!win.isDestroyed()) win.webContents.send('backends-changed', { deleted: [] })
     })
-    // The renderer's tracker results still describe the state from BEFORE
-    // these updates (the startup check ran first), so the update banners and
-    // "update available" badges would stay until a manual check. Re-check and
-    // broadcast, through the same channel the startup check uses.
-    if (updated.length > 0 || errors.length > 0) {
-      try {
-        const results = await Promise.all(s.trackedBackends.map(t => fetchTrackedRelease(t)))
-        BrowserWindow.getAllWindows().forEach(win => {
-          if (!win.isDestroyed()) win.webContents.send('backends-checked-silent', { results })
-        })
-      } catch {}
-    }
     return { updated, errors }
   }
   ipcMain.handle('update-tracked-engines', (e) => updateTrackedEnginesImpl(e.sender))
