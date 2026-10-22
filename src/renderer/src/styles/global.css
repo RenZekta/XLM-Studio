@@ -1,20 +1,4 @@
 *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
-/* Chromium's native <select> popup (used for every <select> in this app,
-   e.g. the Model Hub sort dropdown) doesn't pick up --surface/--text on its
-   own -- it defaults to the OS light popup regardless of the app's theme,
-   so a dark-themed page gets barely-legible light-on-light option text.
-   color-scheme tells Chromium which native palette to draw the popup's own
-   chrome (scrollbar, etc.) in; the explicit background/color below make
-   sure the option text itself follows the theme too, since Chromium (unlike
-   Firefox) honors plain color/background-color set directly on <option>. */
-select {
-  background-color: var(--surface);
-  color: var(--text);
-}
-select option {
-  background-color: var(--surface);
-  color: var(--text);
-}
 :root {
   color-scheme: light;
   --bg: #f5f5f5;
@@ -335,16 +319,15 @@ input[type="number"] {
   transition: transform var(--transition);
 }
 .toggle input:checked ~ .toggle-thumb { transform: translateX(18px); }
-.cmd-input, .cmd-select, .cmd-textarea {
+.cmd-input, .cmd-textarea {
   font-family: var(--font); font-size: 14px; color: var(--text);
   background: var(--surface); border: 1.5px solid var(--border);
   border-radius: var(--radius-sm); outline: none;
   transition: border-color var(--transition);
 }
-.cmd-input:focus, .cmd-select:focus, .cmd-textarea:focus { border-color: var(--accent); }
+.cmd-input:focus, .cmd-textarea:focus { border-color: var(--accent); }
 .cmd-input { padding: 6px 10px; width: 240px; }
 .cmd-input[type="number"] { width: 120px; }
-.cmd-select { padding: 5px 24px 5px 9px; appearance: none; cursor: pointer; min-width: 160px; background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='6'%3E%3Cpath d='M0 0l5 6 5-6z' fill='%236b6b6b'/%3E%3C/svg%3E"); background-repeat: no-repeat; background-position: right 8px center; }
 .cmd-textarea { padding: 8px 10px; width: 100%; resize: vertical; min-height: 60px; font-size: 13px; margin-top: 6px; display: block; }
 .cmd-row-full { grid-template-columns: 1fr; }
 /* num-btn retained for clipboard/browse buttons in string inputs */
@@ -382,15 +365,14 @@ input[type="number"] {
 .collapsible-body { padding: 12px 14px; border-top: 1px solid var(--border); background: var(--surface); }
 .form-group { margin-bottom: 16px; }
 .form-label { font-size: 14px; font-weight: 600; color: var(--text); margin-bottom: 6px; display: block; }
-.form-input, .form-select, .form-textarea {
+.form-input, .form-textarea {
   width: 100%; padding: 9px 12px;
   background: var(--bg); border: 1.5px solid var(--border);
   border-radius: var(--radius-sm); font-family: var(--font);
   font-size: 13px; color: var(--text); outline: none;
   transition: border-color var(--transition), box-shadow var(--transition);
 }
-.form-input:focus, .form-select:focus, .form-textarea:focus { border-color: var(--accent); box-shadow: 0 0 0 3px rgba(10,10,10,.08); }
-.form-select { appearance: none; cursor: pointer; background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='6'%3E%3Cpath d='M0 0l5 6 5-6z' fill='%236b6b6b'/%3E%3C/svg%3E"); background-repeat: no-repeat; background-position: right 12px center; background-color: var(--bg); padding-right: 32px; }
+.form-input:focus, .form-textarea:focus { border-color: var(--accent); box-shadow: 0 0 0 3px rgba(10,10,10,.08); }
 .form-textarea { resize: vertical; min-height: 72px; font-size: 13px; }
 /* SelectMenu: a dropdown whose arrow flips while open. 'sidebar' is the narrow
    menu in the sidebar sections, 'field' fills a form column like an input. */
@@ -403,13 +385,30 @@ input[type="number"] {
 .select-menu-field.open .select-menu-btn { border-color: var(--accent); box-shadow: 0 0 0 3px rgba(10,10,10,.08); }
 .select-menu-label { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; text-align: left; }
 .select-menu-panel {
-  position: absolute; top: 100%; left: 0; right: 0; margin-top: 4px; z-index: 50; max-height: 280px; overflow-y: auto;
+  /* Placed from the button's position by SelectMenu, above everything. */
+  position: fixed; z-index: 3000; overflow-y: auto; box-sizing: border-box;
   background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius-sm); box-shadow: var(--shadow-md);
 }
 .select-menu-option { padding: 8px 12px; cursor: pointer; font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.select-menu-field .select-menu-option { font-size: 13px; }
+.select-menu-panel-field .select-menu-option { font-size: 13px; }
 .select-menu-option:hover { background: var(--surface-hover); }
 .select-menu-option.selected { background: var(--surface-2, rgba(59,130,246,.1)); }
+.select-menu-group { padding: 7px 12px 3px; font-size: 11px; font-weight: 700; color: var(--text-muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.select-menu-mono .select-menu-btn, .select-menu-mono .select-menu-option { font-family: var(--font-mono); }
+/* Parameter rows and filter bars: the field look at the size of the inputs around it. */
+.select-menu-compact .select-menu-btn { padding: 5px 10px; font-size: 13px; font-weight: 400; background: var(--bg); border-color: var(--border); }
+.select-menu-compact .select-menu-btn:hover:not(:disabled) { border-color: var(--border-strong); }
+.select-menu-compact.open .select-menu-btn { border-color: var(--accent); }
+.select-menu-panel-compact .select-menu-option, .select-menu-panel-bare .select-menu-option { font-size: 13px; }
+/* A menu inside a toolbar or search bar has no border of its own. */
+.select-menu-bare { display: inline-block; }
+.select-menu-bare .select-menu-btn { width: auto; border: none; background: transparent; padding: 5px 8px; font-size: 13px; font-weight: 500; color: var(--text-secondary); }
+.select-menu-bare .select-menu-btn:hover:not(:disabled) { color: var(--text); background: transparent; }
+/* A parameter row with a dropdown: the dropdown column shrinks with the row
+   (never wider than 240px or a little over half of it) instead of keeping its
+   width and covering the label. */
+.cmd-row:has(.select-menu-compact) { grid-template-columns: minmax(0, 1fr) minmax(0, min(240px, 55%)); }
+.cmd-row .cmd-input-group { min-width: 0; }
 
 .form-hint { font-size: 13px; color: var(--text-muted); margin-top: 4px; }
 .form-row { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
@@ -603,26 +602,6 @@ input[type="number"] {
   background: var(--border);
   flex-shrink: 0;
   margin: 0 4px;
-}
-.hub-sort-select {
-  border: none;
-  background: transparent;
-  padding: 5px 20px 5px 8px;
-  font-size: 13px;
-  font-family: var(--font);
-  font-weight: 500;
-  color: var(--text-secondary);
-  cursor: pointer;
-  outline: none;
-  appearance: none;
-  min-width: 110px;
-  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='6'%3E%3Cpath d='M0 0l5 6 5-6z' fill='%236b6b6b'/%3E%3C/svg%3E");
-  background-repeat: no-repeat;
-  background-position: right 4px center;
-  pointer-events: auto;
-}
-.hub-sort-select:hover {
-  color: var(--text);
 }
 .hub-search-input {
   flex: 1; border: none; background: transparent;

@@ -1,10 +1,10 @@
 import React, { useState, useEffect, useCallback, useRef } from 'react'
+import SelectMenu from './SelectMenu'
 import { useStore } from '../store/useStore'
 import {
   HardDrive, Download, Trash, RefreshCw, Loader2, ChevronDown, Terminal,
   Bell, BellOff, Folder, Monitor, Moon, Sun, Plus, Link2,
-  AlertCircle, ExternalLink, Cpu, Layers, Database, Key
-} from 'lucide-react'
+  AlertCircle, ExternalLink, Cpu, Layers, Database, Key, ChevronUp } from 'lucide-react'
 import CommandsEditor from './CommandsEditor'
 import ExternalFolderList from './ExternalFolderList'
 import McpSettingsSection from './McpSettingsSection'
@@ -855,10 +855,14 @@ export default function SettingsView() {
               onChange={e => setCustomBackendLink(e.target.value)}
               onKeyDown={e => { if (e.key === 'Enter') handleAddTrackedBackend() }}
             />
-            <select className="form-select" style={{ width: 150 }} value={customEngine} onChange={e => setCustomEngine(e.target.value as '' | EngineId)} title="Engine of this repository">
-              <option value="">Detect engine</option>
-              {(Object.keys(ENGINES) as EngineId[]).map(id => <option key={id} value={id}>{ENGINES[id].label}</option>)}
-            </select>
+            <SelectMenu
+              variant="field"
+              style={{ width: 170, flexShrink: 0 }}
+              value={customEngine}
+              onChange={v => setCustomEngine(v as '' | EngineId)}
+              title="Engine of this repository"
+              options={[{ value: '', label: 'Detect engine' }, ...(Object.keys(ENGINES) as EngineId[]).map(id => ({ value: id, label: ENGINES[id].label }))]}
+            />
             <button className="btn btn-primary" onClick={handleAddTrackedBackend} disabled={!customBackendLink.trim()}>
               <Plus size={14} /> Add engine from link
             </button>
@@ -972,17 +976,16 @@ export default function SettingsView() {
                     )}
                     {(release.assets.length > 0 || (release.otherPlatform?.length ?? 0) > 0) && (
                       <div className="tracker-assets-row" style={{ alignItems: 'flex-start', flexWrap: 'wrap' }}>
-                        <div className="asset-picker" style={{ position: 'relative' }}>
+                        <div className={`asset-picker select-menu select-menu-field${openDropdownId === t.id ? ' open' : ''}`} style={{ minWidth: 260 }}>
                           <button
                             type="button"
-                            className="cmd-select"
-                            style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8, cursor: 'pointer', width: '100%', minWidth: 260, backgroundImage: 'none' }}
+                            className="btn btn-secondary select-menu-btn"
                             onClick={() => setOpenDropdownId(openDropdownId === t.id ? null : t.id)}
                           >
                             <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
                               {selectedAsset ? `${selectedAsset.name} (${formatBytes(selectedAsset.size)})` : 'Select a build...'}
                             </span>
-                            <ChevronDown size={13} style={{ flexShrink: 0 }} />
+                            {openDropdownId === t.id ? <ChevronUp size={13} style={{ flexShrink: 0 }} /> : <ChevronDown size={13} style={{ flexShrink: 0 }} />}
                           </button>
                           {openDropdownId === t.id && (
                             <div

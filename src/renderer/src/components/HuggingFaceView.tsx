@@ -1,5 +1,6 @@
 import React, { useState, useEffect, useCallback } from 'react'
 import { useStore } from '../store/useStore'
+import SelectMenu from './SelectMenu'
 import {
   Search, Download, Heart, ChevronDown, ChevronLeft,
   FolderOpen, CheckCircle, Loader2, X, AlertCircle, Box, Pause, Play,
@@ -158,11 +159,10 @@ export default function HuggingFaceView() {
           </button>
         )}
         <div className="hub-sort-divider" />
-        <select
-          className="hub-sort-select"
+        <SelectMenu
+          variant="bare"
           value={hubSort}
-          onChange={(e) => {
-            const sort = e.target.value
+          onChange={sort => {
             setHubSort(sort)
             // HF API doesn't support ascending for downloads/likes
             let newDirection = hubDirection
@@ -174,12 +174,13 @@ export default function HuggingFaceView() {
               doSearch(inputValue, sort, newDirection)
             }
           }}
-        >
-          <option value="downloads">Downloads</option>
-          <option value="likes">Likes</option>
-          <option value="createdAt">Date Created</option>
-          <option value="lastModified">Last Updated</option>
-        </select>
+          options={[
+            { value: 'downloads', label: 'Downloads' },
+            { value: 'likes', label: 'Likes' },
+            { value: 'createdAt', label: 'Date Created' },
+            { value: 'lastModified', label: 'Last Updated' }
+          ]}
+        />
         {hubSort !== 'downloads' && hubSort !== 'likes' && (
           <button
             className="btn btn-ghost btn-icon"

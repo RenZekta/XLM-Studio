@@ -247,7 +247,7 @@ export function strataDefaults(i: StrataDefaultsInput): Record<string, string | 
   const context = i.context && i.context > 0 ? i.context : strataRecommendedContext(i)
   const beyond = context > STRATA_NATIVE_CONTEXT
   const out: Record<string, string | number> = {
-    '--vision': 'no',
+    // No '--vision': Automatic is the empty choice, and sends nothing.
     '--vision-tokens': i.vision === 'cpu' ? 300 : 1024,
     '--context': strataRecommendedContext(i),
     '--kv': 'int8',
@@ -292,7 +292,9 @@ const OWN_FLAGS = new Set(['--family', '--model', '--host', '--api-key', '--port
 
 // Settings setup keeps from an earlier run of the same model when a flag is
 // left out, so a template that leaves one on Auto must send its default to
-// avoid inheriting another template's value.
+// avoid inheriting another template's value. --vision is not here on
+// purpose: Automatic sends nothing, which is setup's own default (images on
+// where the model can read them).
 const STICKY_DEFAULTS: Array<[string, string]> = [
   ['--parallel', '1'],
   ['--draft-vocab', 'cjk']
@@ -371,6 +373,17 @@ export const STRATA_KV_CELLS_PER_TOKEN = 13
 export const STRATA_BASE_VRAM_GB = 5
 export const STRATA_BASE_CONTEXT = 32768
 export const STRATA_VISION_VRAM_GB = 1.4
+
+// Setup's rule for the image encoder when it is not told which (the same one
+// for "yes" and for nothing at all): the CPU under 24 GB of VRAM, the GPU
+// from 24 GB. 'none' is text only.
+export const STRATA_IMAGES_GPU_MIN_VRAM_GB = 23.5
+export function strataVisionReader(choice: string | number | boolean | null | undefined, vramGb: number): 'none' | 'cpu' | 'gpu' {
+  const c = String(choice ?? '').trim()
+  if (c === 'no' || c === 'none') return 'none'
+  if (c === 'cpu' || c === 'gpu') return c
+  return vramGb <= 0 || vramGb >= STRATA_IMAGES_GPU_MIN_VRAM_GB ? 'gpu' : 'cpu'
+}
 export const STRATA_DEFAULT_RESERVE_MIB = 700
 export const STRATA_LOW_RAM_HEADROOM_GB = 10
 export const STRATA_IQ3_RAM_HEADROOM_GB = 24

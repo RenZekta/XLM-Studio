@@ -85,7 +85,7 @@ const M = bundle('src/main/strataMetrics.ts', 'metrics')
 {
   const d = S.strataDefaults({ variant: 'IQ3_S', family: 'qwen', vramTotalGb: 24, ramTotalGb: 64 })
   check('defaults show the real values, not placeholders', d['--kv'] === 'int8' && d['--parallel'] === 1 && d['--draft-vocab'] === 'cjk' && d['--host'] === '127.0.0.1' &&
-    d['--vram-reserve-mib'] === 700 && d['--vision'] === 'no' && d['--low-ram'] === 'auto' && d['--model'] === 'IQ3_S' && d['--family'] === 'qwen')
+    d['--vram-reserve-mib'] === 700 && d['--vision'] === undefined && d['--low-ram'] === 'auto' && d['--model'] === 'IQ3_S' && d['--family'] === 'qwen')
   check('rope defaults follow the context (yarn only beyond the trained 262144)',
     S.strataDefaults({ variant: 'IQ3_S', vramTotalGb: 24, ramTotalGb: 64, context: 262144 })['--rope-scaling'] === 'none' &&
     S.strataDefaults({ variant: 'IQ3_S', vramTotalGb: 24, ramTotalGb: 64, context: 524288 })['--rope-scaling'] === 'yarn' &&
@@ -103,8 +103,17 @@ check('argv has identity flags and sticky resets', r.argv && r.argv.join(' ') ==
 r = S.buildStrataArgv({ ...base, args: { '--context': 65536, '--kv': 'q4_0', '--parallel': 3, '--vision': '', '--low-ram': null, '__lastPreset': 'quick', '--flag-on': true, '--flag-off': false } })
 const joined = r.argv.join(' ')
 check('argv carries set flags, skips empty/internal/false', joined.includes('--context 65536') && joined.includes('--kv q4_0') && joined.includes('--parallel 3') &&
-  !joined.includes('--vision') && !joined.includes('--low-ram') && !joined.includes('__lastPreset') && joined.includes('--flag-on') && !joined.includes('--flag-off'), joined)
+  !joined.includes('--low-ram') && !joined.includes('__lastPreset') && joined.includes('--flag-on') && !joined.includes('--flag-off'), joined)
 check('explicit parallel replaces the sticky reset', (joined.match(/--parallel/g) || []).length === 1)
+check('Automatic image input sends nothing (setup\'s own default)', !joined.includes('--vision') && !r.argv.join(' ').includes('--vision'), joined)
+for (const v of ['yes', 'no', 'cpu', 'gpu']) {
+  const j = S.buildStrataArgv({ ...base, args: { '--vision': v } }).argv.join(' ')
+  check(`an explicit --vision ${v} is sent once`, (j.match(/--vision/g) || []).length === 1 && j.includes(`--vision ${v}`), j)
+}
+check('the editor default for image input is the empty (Automatic) choice', !('--vision' in S.strataDefaults({ variant: 'IQ3_S', family: 'qwen', vramTotalGb: 12, ramTotalGb: 32 })))
+check('Automatic picks the encoder like setup: CPU under 24 GB, GPU from 24 GB, text only on no',
+  S.strataVisionReader(undefined, 12) === 'cpu' && S.strataVisionReader('', 23) === 'cpu' && S.strataVisionReader('yes', 24) === 'gpu' &&
+  S.strataVisionReader(undefined, 0) === 'gpu' && S.strataVisionReader('no', 48) === 'none' && S.strataVisionReader('cpu', 48) === 'cpu' && S.strataVisionReader('gpu', 8) === 'gpu')
 r = S.buildStrataArgv({ ...base, host: '0.0.0.0', apiKey: 'k1', dataDir: 'D:\\data', args: { '--host': '127.0.0.1' } })
 check('overrides win for host/api-key and data dir is passed', r.argv.join(' ').includes('--host 0.0.0.0') && !r.argv.join(' ').includes('127.0.0.1') &&
   r.argv.join(' ').includes('--api-key k1') && r.argv.join(' ').includes('--data-dir D:\\data'))

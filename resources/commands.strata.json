@@ -22,7 +22,7 @@
         {
           "arg": "--vision",
           "label": "Image Input",
-          "description": "Let the model read images. yes/gpu puts the encoder on the GPU (about 1.4 GB VRAM), cpu keeps it in RAM.",
+          "description": "Let the model read images. Automatic sends nothing, which is the engine's own default: images are on where the model can read them, the encoder runs on the CPU under 24 GB of VRAM and on the GPU from 24 GB. no is text only (no encoder download); gpu / cpu choose the reader.",
           "type": "select",
           "options": [
             "yes",
@@ -31,11 +31,12 @@
             "cpu"
           ],
           "optionLabels": {
-            "yes": "yes (encoder on the GPU)",
+            "yes": "yes (best reader for this card)",
             "no": "no (text only)",
-            "gpu": "gpu (encoder on the GPU)",
-            "cpu": "cpu (encoder in RAM)"
-          }
+            "gpu": "gpu (encoder on the GPU, about 1.4 GB VRAM)",
+            "cpu": "cpu (encoder on the CPU, in RAM)"
+          },
+          "emptyLabel": "Automatic (enabled if supported, encoder on the CPU)"
         },
         {
           "arg": "--vision-tokens",

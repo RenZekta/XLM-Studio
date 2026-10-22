@@ -5,7 +5,7 @@ import { useStore } from '../store/useStore'
 import SegmentedToggle from './SegmentedToggle'
 import HybridSlider from './HybridSlider'
 import CommandPreview, { type PreviewToken } from './CommandPreview'
-import { strataInfoFor } from '../../../shared/strata'
+import { strataInfoFor, strataVisionReader } from '../../../shared/strata'
 import type { CommandParam, CommandsSchema, StrataSettings, Template } from '../../../shared/types'
 import { ENGINES, type EngineId } from '../../../shared/engines'
 import {
@@ -17,6 +17,7 @@ import { formatWithSpaces, CONTEXT_POWER_OF_TWO_STEPS, snapToNearestPowerOfTwo }
 import { markTemplateSavePending, markTemplateSaveDone } from '../utils/templateSync'
 import { activeServerOverrides, findPortConflict } from '../utils/templatePort'
 import ServerParamsBlock from './ServerParamsBlock'
+import SelectMenu from './SelectMenu'
 
 // Parameter editor for engines whose settings are a short, flat list (Strata).
 // llama.cpp keeps CmdParamsEditor, which carries a lot of llama-only logic
@@ -141,7 +142,8 @@ export default function EngineParamsEditor({
   const ramTotalGb = (systemRam?.totalRAMMB || 0) / 1024
   const variant = String(args['--model'] || verdict?.model || '')
   const family = String(args['--family'] || verdict?.family || '')
-  const vision = String(args['--vision'] ?? 'no')
+  // Automatic (nothing set) picks the reader the way setup does.
+  const vision = strataVisionReader(args['--vision'], vramTotalGb)
   const rec = strataDefaults({ variant, family, vramTotalGb, ramTotalGb, vision })
   const effectiveCtx = Number(args['--context']) || Number(rec['--context'])
   const defaults: Record<string, string | number> = { ...strataDefaults({ variant, family, vramTotalGb, ramTotalGb, vision, context: effectiveCtx }) }
@@ -213,7 +215,8 @@ export default function EngineParamsEditor({
   const estimate = STRATA_VARIANTS[variant] && engine === 'strata'
     ? estimateStrataMemory({
         variant, context: effectiveCtx, kv: String(effective('--kv')),
-        vision: vision !== 'no' && vision !== 'none',
+        // Only the GPU encoder takes VRAM; the CPU one does not.
+        vision: vision === 'gpu',
         kvStreaming: String(effective('--kv-streaming')), lowRam: String(effective('--low-ram')),
         reserveMib: Number(effective('--vram-reserve-mib')), vramGb, ramGb
       })
@@ -297,7 +300,7 @@ export default function EngineParamsEditor({
   const renderRow = (cmdIn: CommandParam) => {
     const options = catalogOptions(cmdIn.arg)
     const cmd: CommandParam = options
-      ? { ...cmdIn, type: 'select', options, emptyLabel: 'Pick one (not detected from the file)' }
+      ? { ...cmdIn, type: 'select', options, requireValue: true, emptyLabel: 'Pick one (not detected from the file)' }
       : cmdIn
     const raw = args[cmd.arg]
     const val = raw ?? defaults[cmd.arg] ?? ''
@@ -374,11 +377,21 @@ export default function EngineParamsEditor({
             />
           )}
           {!isCtx && cmd.type === 'select' && (
-            <select className="cmd-select" value={val} onChange={e => cmd.arg === '--family' ? changeFamily(e.target.value) : update(cmd.arg, e.target.value)} disabled={rowDisabled}>
-              {val === '' && <option value="">{cmd.emptyLabel || 'Not set'}</option>}
-              {cmd.options?.map(opt => <option key={opt} value={opt}>{cmd.optionLabels?.[opt] ?? opt}</option>)}
-              {val !== '' && cmd.options && !cmd.options.includes(String(val)) && <option value={String(val)}>{String(val)}</option>}
-            </select>
+            <SelectMenu
+              variant="compact"
+              style={{ width: '100%' }}
+              value={String(val)}
+              placeholder={cmd.emptyLabel || 'Not set'}
+              disabled={rowDisabled}
+              onChange={v => cmd.arg === '--family' ? changeFamily(v) : update(cmd.arg, v)}
+              options={[
+                // An empty choice the schema names (Automatic) stays on offer.
+                ...(cmd.emptyLabel && !cmd.requireValue ? [{ value: '', label: cmd.emptyLabel }] : []),
+                ...(cmd.options ?? []).map(opt => ({ value: opt, label: cmd.optionLabels?.[opt] ?? opt })),
+                // A stored value outside the list still shows as itself.
+                ...(val !== '' && cmd.options && !cmd.options.includes(String(val)) ? [{ value: String(val), label: String(val) }] : [])
+              ]}
+            />
           )}
         </div>
         {showReset && (

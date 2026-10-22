@@ -1,6 +1,7 @@
 import React, { useState, useEffect, useRef, useCallback, useMemo } from 'react'
 import { useStore } from '../store/useStore'
 import { Terminal, Trash, Pause, Play, Upload } from 'lucide-react'
+import SelectMenu from './SelectMenu'
 
 interface LogEntry {
   id: string
@@ -152,12 +153,13 @@ export default function LogsView() {
 
       {/* Filter bar */}
       <div style={{ display: 'flex', gap: 8, marginBottom: 12, alignItems: 'center' }}>
-        <select className="cmd-select" style={{ minWidth: 180 }} value={selectedModel} onChange={e => setSelectedModel(e.target.value)}>
-          <option value="all">All Models</option>
-          {runningModels.map(c => (
-            <option key={c.template.id} value={c.template.id}>{c.template.name}</option>
-          ))}
-        </select>
+        <SelectMenu
+          variant="compact"
+          style={{ width: 200, flexShrink: 0 }}
+          value={selectedModel}
+          onChange={setSelectedModel}
+          options={[{ value: 'all', label: 'All Models' }, ...runningModels.map(c => ({ value: c.template.id, label: c.template.name }))]}
+        />
         <input
           className="form-input"
           style={{ flex: 1 }}

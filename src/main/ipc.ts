@@ -3169,7 +3169,7 @@ export function registerIpcHandlers(): void {
           } else if (!(await gitAvailable())) {
             emitAppLog(opts.id, opts.name, 'Warning: git was not found, launching the installed version')
           } else {
-            const up = await updateGitEngine(opts.backendPath)
+            const up = await updateGitEngineOnce(opts.backendPath)
             emitAppLog(opts.id, opts.name, up.error ? `Warning: update failed, launching the installed version: ${up.error.split('\n')[0]}`
               : up.skipped ? `Update skipped (${up.skipped})` : up.updated ? 'Strata updated' : 'Strata is up to date')
           }
@@ -3905,6 +3905,17 @@ export function registerIpcHandlers(): void {
     return fetchTrackedRelease(t)
   })
 
+  // Git engines are pulled in parallel, so two requests for the same clone
+  // (a row's button during Update all) share one pull instead of racing in it.
+  const gitUpdatesInFlight = new Map<string, ReturnType<typeof updateGitEngine>>()
+  function updateGitEngineOnce(dir: string): ReturnType<typeof updateGitEngine> {
+    const running = gitUpdatesInFlight.get(dir)
+    if (running) return running
+    const run = updateGitEngine(dir).finally(() => gitUpdatesInFlight.delete(dir))
+    gitUpdatesInFlight.set(dir, run)
+    return run
+  }
+
   // Brings every installed tracked engine up to its latest release: release
   // engines re-download their outdated variants (never a variant that is not
   // installed), git engines are updated in place unless a model is running
@@ -3913,37 +3924,42 @@ export function registerIpcHandlers(): void {
     const s = await loadSettings()
     const updated: string[] = []
     const errors: string[] = []
-    for (const t of s.trackedBackends) {
-      if (t.kind === 'git') {
-        const clone = await findGitEngineClone(t)
-        if (!clone || isEngineRunningFrom(clone)) continue
-        const st = await gitEngineStatus(t)
-        if (!st.updateAvailable) continue
-        const r = await updateGitEngine(clone)
-        if (r.error) errors.push(`${t.name}: ${r.error}`)
-        else if (r.updated) { updated.push(t.name); void refreshStrataVerdicts() }
-        continue
-      }
-      if (!sender || sender.isDestroyed()) continue
-      const rel = await fetchTrackedRelease(t)
-      for (const asset of rel.assets || []) {
-        if (asset.status !== 'outdated') continue
-        const res = await new Promise<{ success: boolean; error?: string }>(resolve => {
-          downloadQueue.push({
-            opts: {
-              url: asset.downloadUrl,
-              version: rel.tagName || asset.name.replace(/\.(zip|tar\.gz)$/i, ''),
-              assetName: asset.name, backendKey: t.folderName, trackedId: t.id
-            },
-            sender, resolve
+    // Two lanes that run at the same time: every git engine is pulled in
+    // parallel with the others, and none of them waits for the (one at a
+    // time) binary downloads.
+    const gitLane = Promise.all(s.trackedBackends.filter(t => t.kind === 'git').map(async t => {
+      const clone = await findGitEngineClone(t)
+      if (!clone || isEngineRunningFrom(clone)) return
+      const st = await gitEngineStatus(t)
+      if (!st.updateAvailable) return
+      const r = await updateGitEngineOnce(clone)
+      if (r.error) errors.push(`${t.name}: ${r.error}`)
+      else if (r.updated) { updated.push(t.name); void refreshStrataVerdicts() }
+    }))
+    const binaryLane = (async () => {
+      if (!sender || sender.isDestroyed()) return
+      for (const t of s.trackedBackends.filter(x => x.kind !== 'git')) {
+        const rel = await fetchTrackedRelease(t)
+        for (const asset of rel.assets || []) {
+          if (asset.status !== 'outdated') continue
+          const res = await new Promise<{ success: boolean; error?: string }>(resolve => {
+            downloadQueue.push({
+              opts: {
+                url: asset.downloadUrl,
+                version: rel.tagName || asset.name.replace(/\.(zip|tar\.gz)$/i, ''),
+                assetName: asset.name, backendKey: t.folderName, trackedId: t.id
+              },
+              sender, resolve
+            })
+            broadcastQueuePositions()
+            processDownloadQueue()
           })
-          broadcastQueuePositions()
-          processDownloadQueue()
-        })
-        if (res.success) updated.push(`${t.name} (${asset.type || asset.name})`)
-        else errors.push(`${t.name}: ${res.error}`)
+          if (res.success) updated.push(`${t.name} (${asset.type || asset.name})`)
+          else errors.push(`${t.name}: ${res.error}`)
+        }
       }
-    }
+    })()
+    await Promise.all([gitLane, binaryLane])
     BrowserWindow.getAllWindows().forEach(win => {
       if (!win.isDestroyed()) win.webContents.send('backends-changed', { deleted: [] })
     })
@@ -3986,7 +4002,7 @@ export function registerIpcHandlers(): void {
     const clone = await findGitEngineClone(t)
     if (!clone) return { success: false, error: 'Not installed' }
     if (isEngineRunningFrom(clone)) return { success: false, error: 'A model is running from this install. Stop it first.' }
-    const r = await updateGitEngine(clone)
+    const r = await updateGitEngineOnce(clone)
     BrowserWindow.getAllWindows().forEach(win => {
       if (!win.isDestroyed()) win.webContents.send('backends-changed', { deleted: [] })
     })

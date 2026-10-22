@@ -1,4 +1,5 @@
 import React, { useState, useEffect, useRef } from 'react'
+import SelectMenu from './SelectMenu'
 import { useStore } from '../store/useStore'
 import { Plus, Trash, ChevronDown, ChevronRight, Save, RotateCcw, Pencil, Check, X, Loader2, Box, Cpu, Zap, Database, Sliders, Wind, Server, FileText, GitBranch, Star, Settings, Repeat } from 'lucide-react'
 import type { CommandsSchema, CommandCategory, CommandParam } from '../../../shared/types'
@@ -39,9 +40,7 @@ function CmdForm({ cmd, onChange, onDelete }: CmdFormProps) {
         </div>
         <div className="form-group" style={{ marginBottom: 8 }}>
           <label className="form-label">Type</label>
-          <select className="form-select" value={cmd.type} onChange={e => set('type', e.target.value)}>
-            {PARAM_TYPES.map(t => <option key={t} value={t}>{t}</option>)}
-          </select>
+          <SelectMenu variant="field" value={cmd.type} onChange={v => set('type', v)} options={PARAM_TYPES.map(t => ({ value: t, label: t }))} />
         </div>
         {cmd.type === 'number' && (
           <>

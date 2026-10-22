@@ -105,7 +105,8 @@ function LlamaUpdateBanner() {
 function GitEngineBanner() {
   const { trackedBackends, trackerResults, setBackends, setTrackerResult } = useStore()
   const [dismissed, setDismissed] = useState<Record<string, boolean>>({})
-  const [busy, setBusy] = useState<string | null>(null)
+  // Several engines can update at the same time, each with its own state.
+  const [busy, setBusy] = useState<Record<string, boolean>>({})
   const [error, setError] = useState<Record<string, string>>({})
   const notifPref = localStorage.getItem('hexllama_update_notify') || 'banner'
   if (notifPref === 'manual') return null
@@ -116,13 +117,13 @@ function GitEngineBanner() {
   if (pending.length === 0) return null
 
   async function update(id: string) {
-    setBusy(id)
+    setBusy(b => ({ ...b, [id]: true }))
     const res = await window.api.updateGitEngine(id)
     if (!res.success) setError(e => ({ ...e, [id]: res.error || 'Update failed' }))
     setBackends(await window.api.listBackends())
     const checked = await window.api.checkTrackedBackend(id)
     if (!('error' in checked)) setTrackerResult(checked)
-    setBusy(null)
+    setBusy(b => { const n = { ...b }; delete n[id]; return n })
   }
 
   return (
@@ -131,12 +132,12 @@ function GitEngineBanner() {
         const g = trackerResults[t.id]!.git!
         return (
           <div className="update-banner" key={t.id}>
-            {busy === t.id ? <Loader2 size={14} className="spin" /> : <Download size={14} />}
+            {busy[t.id] ? <Loader2 size={14} className="spin" /> : <Download size={14} />}
             <span>
               <strong>{t.name} {g.latestTag}</strong> is available (installed {g.localVersion}) |{' '}
               <button onClick={() => window.api.openExternal(trackerResults[t.id]!.url)}>View release</button>
               {' '}|{' '}
-              {busy === t.id ? <span style={{ opacity: 0.8 }}>Updating...</span> : (
+              {busy[t.id] ? <span style={{ opacity: 0.8 }}>Updating...</span> : (
                 <button onClick={() => update(t.id)} title="git fetch and fast-forward to the upstream branch">
                   <RefreshCw size={12} style={{ verticalAlign: -2, marginRight: 4 }} />
                   Update

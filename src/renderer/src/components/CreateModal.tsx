@@ -480,23 +480,23 @@ export default function CreateModal() {
             <div className="form-group mb-0">
               <label className="form-label">Model File</label>
               <div className="file-picker">
-                <select
-                  className="form-select mono text-sm flex-1"
+                <SelectMenu
+                  variant="field"
+                  mono
+                  style={{ flex: 1, minWidth: 0 }}
                   value={modelPath}
-                  onChange={e => setModelPath(e.target.value)}
-                >
-                  <option value="">-- Select a model --</option>
-                  {models.map(g => (
-                    <optgroup key={g.folderPath} label={`${g.folder}${g.external ? ' (external)' : ''}${g.mmproj ? ' [has mmproj]' : ''}`}>
-                      {g.models.map(m => (
-                        <option key={m.path} value={m.path}>{m.name}</option>
-                      ))}
-                    </optgroup>
-                  ))}
-                  {modelPath && !models.some(g => g.models.some(m => m.path === modelPath)) && (
-                    <option value={modelPath}>{modelPath.split(/[/\\]/).pop()}</option>
-                  )}
-                </select>
+                  onChange={setModelPath}
+                  options={[
+                    { value: '', label: '-- Select a model --' },
+                    ...models.flatMap(g => g.models.map(m => ({
+                      value: m.path,
+                      label: m.name,
+                      group: `${g.folder}${g.external ? ' (external)' : ''}${g.mmproj ? ' [has mmproj]' : ''}`
+                    }))),
+                    ...(modelPath && !models.some(g => g.models.some(m => m.path === modelPath))
+                      ? [{ value: modelPath, label: modelPath.split(/[/\\]/).pop() || modelPath }] : [])
+                  ]}
+                />
                 <button type="button" className="btn btn-secondary" onClick={handlePickModel}>
                   <FolderOpen size={16} />
                   Browse

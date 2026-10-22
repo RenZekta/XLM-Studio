@@ -21,6 +21,7 @@ import { FORK_ONLY_ARGS } from '../../../shared/backendForks'
 import { markTemplateSavePending, markTemplateSaveDone } from '../utils/templateSync'
 import { activeServerOverrides, findPortConflict } from '../utils/templatePort'
 import ServerParamsBlock from './ServerParamsBlock'
+import SelectMenu from './SelectMenu'
 import { MMPROJ_OFFLOAD_MODE_KEY, getMmprojOffloadMode, resolveMmprojOffloadToRam } from '../../../shared/mmprojOffload'
 import { SPEC_DRAFT_K_ARG, SPEC_DRAFT_V_ARG, isSpecDraftActive, resolveKvBackfill, applySpecDraftKvDefaults } from '../../../shared/specDraftKv'
 import type { MmprojOffloadMode } from '../../../shared/types'
@@ -1666,13 +1667,20 @@ export default function CmdParamsEditor({ templateId, args, onChange, modelPathF
             </div>
           )}
           {!isHybrid && cmd.type === 'select' && (
-            <select className="cmd-select" value={val} onChange={(e) => handleUpdate(cmd.arg, e.target.value)} disabled={disabled}>
-              {!cmd.requireValue && <option value="">{cmd.emptyLabel || 'Default'}</option>}
-              {cmd.options?.map(opt => <option key={opt} value={opt}>{opt}</option>)}
-              {/* A stored value outside the option list must still display as
-                  itself; otherwise the browser shows the first option instead. */}
-              {val !== '' && cmd.options && !cmd.options.includes(String(val)) && <option value={String(val)}>{String(val)}</option>}
-            </select>
+            <SelectMenu
+              variant="compact"
+              style={{ width: '100%' }}
+              value={String(val)}
+              placeholder={cmd.emptyLabel || 'Default'}
+              disabled={disabled}
+              onChange={v => handleUpdate(cmd.arg, v)}
+              options={[
+                ...(!cmd.requireValue ? [{ value: '', label: cmd.emptyLabel || 'Default' }] : []),
+                ...(cmd.options ?? []).map(opt => ({ value: opt, label: opt })),
+                // A stored value outside the option list must still display as itself.
+                ...(val !== '' && cmd.options && !cmd.options.includes(String(val)) ? [{ value: String(val), label: String(val) }] : [])
+              ]}
+            />
           )}
         </div>
         {/* The global Parallel Inference override (Overrides tab) is a hard
@@ -1854,11 +1862,14 @@ export default function CmdParamsEditor({ templateId, args, onChange, modelPathF
         <div className="mmproj-widget-arg">--spec-type · Accelerate generation using draft tokens</div>
         <div className="spec-widget-row">
           <span className="mmproj-widget-label">Method</span>
-          <select
-            className="cmd-select"
+          <SelectMenu
+            variant="compact"
+            style={{ width: 240, maxWidth: '100%' }}
             value={currentSpecTierDef.method}
-            onChange={e => {
-              const t = SPEC_TIER_DEFS.find(td => td.method === e.target.value) || SPEC_TIER_DEFS[0]
+            options={SPEC_TIER_DEFS.map(t => ({ value: t.method, label: `${t.label}${t.tier > 0 ? ` (T${t.tier})` : ''}` }))}
+            disabled={disabled}
+            onChange={method => {
+              const t = SPEC_TIER_DEFS.find(td => td.method === method) || SPEC_TIER_DEFS[0]
               // If we have exactly one detected candidate for this tier, use
               // its path automatically; otherwise leave the existing/empty
               // path for the user to fill in via the candidate list or
@@ -1866,10 +1877,7 @@ export default function CmdParamsEditor({ templateId, args, onChange, modelPathF
               const matchingCandidate = candidates.find(c => c.method === t.method)
               setSpecTier(t, matchingCandidate ? matchingCandidate.path : undefined)
             }}
-            disabled={disabled}
-          >
-            {SPEC_TIER_DEFS.map(t => <option key={t.method} value={t.method}>{t.label}{t.tier > 0 ? ` (T${t.tier})` : ''}</option>)}
-          </select>
+          />
         </div>
         {detected && detected.tier > 0 && (
           <div className="spec-detected-info"><Gauge size={12} /> Auto-detected: {detected.reason} (applied automatically — highest tier found)</div>
@@ -1969,10 +1977,14 @@ export default function CmdParamsEditor({ templateId, args, onChange, modelPathF
                     <div className="cmd-label">Draft Model KV Cache Type ({side})</div>
                     <div className="cmd-arg">{side === 'K' ? '-ctkd, ' : '-ctvd, '}{arg}</div>
                   </div>
-                  <select className="cmd-select" value={cur} onChange={e => handleUpdate(arg, e.target.value)} disabled={disabled}>
-                    {options.map(opt => <option key={opt} value={opt}>{opt}</option>)}
-                    {!options.includes(cur) && <option value={cur}>{cur}</option>}
-                  </select>
+                  <SelectMenu
+                    variant="compact"
+                    style={{ width: 160, maxWidth: '100%' }}
+                    value={cur}
+                    disabled={disabled}
+                    onChange={v => handleUpdate(arg, v)}
+                    options={[...options, ...(options.includes(cur) ? [] : [cur])].map(opt => ({ value: opt, label: opt }))}
+                  />
                   {changed && <button type="button" className="cmd-reset-btn" onClick={() => handleUpdate(arg, def)} disabled={disabled} title={`Reset to ${def} (this backend's KV default)`}><RotateCcw size={12} /></button>}
                 </div>
               )
@@ -2317,7 +2329,7 @@ export default function CmdParamsEditor({ templateId, args, onChange, modelPathF
     const vramOverheadChanged = vramOverheadEnabled && vramOverheadMB !== vramOverheadDefault
     const ramOverheadChanged = ramOverheadEnabled && ramOverheadMB !== DEFAULT_RAM_OVERHEAD_MB
     return (
-      <div className="collapsible-section" style={{ marginTop: 12 }}>
+      <div className="collapsible-section" style={{ marginTop: 12, marginBottom: 12 }}>
         <button
           type="button"
           className="collapsible-toggle"
