@@ -33,7 +33,7 @@ jobs:
           tag_name: ${{ steps.bump_version.outputs.new_tag }}
           name: Release ${{ steps.bump_version.outputs.new_tag }}
           body: |
-            ![Hexllama Logo](https://github.com/${{ github.repository }}/raw/main/assets/github-logo-hexllama.png)
+            ![XLM Studio](https://github.com/${{ github.repository }}/raw/main/assets/github-banner.png)
 
           draft: false
           prerelease: false

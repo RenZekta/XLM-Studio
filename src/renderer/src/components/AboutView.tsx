@@ -7,7 +7,8 @@ export default function AboutView() {
       <div className="page-header" style={{ marginBottom: 32 }}>
         <div>
           <h1 className="page-title" style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
-            <img src="./full-logo.png" alt="XLM Studio" style={{ height: 32, imageRendering: 'crisp-edges' }} draggable={false} />
+            <img src="./icon.png" alt="" style={{ height: 32, width: 32 }} draggable={false} />
+            XLM Studio
           </h1>
           <p className="page-subtitle">A fast, beautiful GUI for managing local LLMs</p>
         </div>

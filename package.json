@@ -1,5 +1,6 @@
 {
   "name": "xlm-studio",
+  "desktopName": "xlm-studio.desktop",
   "version": "2.2.0",
   "description": "XLM Studio — a GUI for llama.cpp (fork of Hexllama)",
   "main": "out/main/index.js",

@@ -9,6 +9,9 @@ files:
 extraResources:
   - from: resources/
     to: resources/
+  # The icon of the app's windows (resources/icon.png, see src/main/appIcon.ts).
+  - from: assets/icon_256.png
+    to: icon.png
 win:
   target:
     - target: nsis
@@ -30,4 +33,10 @@ mac:
   icon: assets/icon_1024.png
 linux:
   target: AppImage
-  icon: assets/icon_256.png
+  # A set of sizes (assets/icons/<size>x<size>.png), so launchers and task bars
+  # pick a crisp one instead of scaling a single image.
+  icon: assets/icons
+  # Electron names its window after desktopName (package.json); the desktop
+  # entry's StartupWMClass has to say the same or the desktop cannot tell which
+  # entry (and icon) the open window belongs to.
+  syncDesktopName: true

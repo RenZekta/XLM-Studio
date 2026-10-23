@@ -348,8 +348,7 @@ export default function App() {
           alt="XLM Studio Icon"
           style={{
             width: 96, height: 96, marginBottom: 24,
-            animation: 'pixelateSplashIn 1.5s steps(8) forwards',
-            imageRendering: 'pixelated'
+            animation: 'pixelateSplashIn 1.5s steps(8) forwards'
           }}
           draggable={false}
         />

@@ -31,6 +31,7 @@ import { assetMatchesHost } from '../shared/assetPlatform'
 import { NATIVE_PLATFORM, platformOfBuildDir, installVersionName } from './buildPlatform'
 import { strataTableHash, strataVerdict, bestStrataInfo, STRATA_NO_TABLE, type StrataTable, type StrataFingerprint } from '../shared/strata'
 import { fingerprintGguf } from './ggufTensors'
+import { resolveAppIcon } from './appIcon'
 import { parseStrataCatalog, type StrataCatalog } from './strataCatalog'
 import { LineAssembler } from './lineAssembler'
 import {
@@ -3420,12 +3421,7 @@ export function registerIpcHandlers(): void {
       return
     }
     {
-    const candidates = [
-      join(process.cwd(), 'assets', 'icon.png'),
-      join(__dirname, '../../assets/icon.png'),
-      join(app.getAppPath(), 'assets', 'icon.png')
-    ]
-    const icon = candidates.find(existsSync)
+    const icon = resolveAppIcon()
     let x: number | undefined
     let y: number | undefined
     const width = 1024
@@ -3508,12 +3504,7 @@ export function registerIpcHandlers(): void {
   ipcMain.handle('open-detached-chat-window', async (_e, port: number, name: string) => {
     const chatUrl = await resolveChatUrl(port)
     const templateName = name || `Port ${port}`
-    const candidates = [
-      join(process.cwd(), 'assets', 'icon.png'),
-      join(__dirname, '../../assets/icon.png'),
-      join(app.getAppPath(), 'assets', 'icon.png')
-    ]
-    const icon = candidates.find(existsSync)
+    const icon = resolveAppIcon()
     let x: number | undefined
     let y: number | undefined
     const width = 1024

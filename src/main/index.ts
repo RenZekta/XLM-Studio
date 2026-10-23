@@ -3,17 +3,9 @@ import { join } from 'path'
 import { electronApp, optimizer, is } from '@electron-toolkit/utils'
 import { registerIpcHandlers, cleanupAllProcesses, getRunningProcessCount } from './ipc'
 import { shutdownMcpLayer } from './mcpServer'
-import { existsSync } from 'fs'
-function resolveIcon(): string | undefined {
-  const candidates = [
-    join(process.cwd(), 'assets', 'icon.png'),                  
-    join(__dirname, '../../assets/icon.png'),                    
-    join(app.getAppPath(), 'assets', 'icon.png')                 
-  ]
-  return candidates.find(existsSync)
-}
+import { resolveAppIcon } from './appIcon'
 function createWindow(): void {
-  const icon = resolveIcon()
+  const icon = resolveAppIcon()
   const mainWindow = new BrowserWindow({
     width: 1280,
     height: 800,
