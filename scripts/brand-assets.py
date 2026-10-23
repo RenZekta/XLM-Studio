@@ -28,7 +28,8 @@ EDGE = (255, 255, 255, 40)
 MARGIN = 0.0625          # transparent border around the tile, of the canvas
 RADIUS = 0.225           # corner radius, of the tile
 LINE = 0.062             # stroke width of both lines, of the tile
-KNOB = 0.078             # knob radius, of the tile
+KNOB = 0.078             # outer radius of the knob (its white ring), of the tile
+RING = 0.028             # width of the white ring around the blue centre, of the tile
 A = 0.27                 # the X spans A..1-A of the tile on both axes
 KNOB_AT = 0.75           # position of the knob along the blue line
 
@@ -83,6 +84,8 @@ def icon(size, supersample=None):
     stroke(blue, BLUE)
     kx, ky = px(knob)
     r = KNOB * boost * tile
+    d.ellipse((kx - r, ky - r, kx + r, ky + r), fill=WHITE)
+    r -= RING * boost * tile
     d.ellipse((kx - r, ky - r, kx + r, ky + r), fill=BLUE)
     return out.resize((size, size), Image.LANCZOS)
 
@@ -107,7 +110,8 @@ def icon_svg():
   <rect x="{o}" y="{o}" width="{t}" height="{t}" rx="{round(RADIUS * t, 1)}" fill="none" stroke="#fff" stroke-opacity="0.16" stroke-width="{round(0.012 * t, 1)}"/>
   <path d="M{wx0} {wy0}L{wx1} {wy1}" stroke="#fff" stroke-width="{w}" stroke-linecap="round"/>
   <path d="M{bx0} {by0}L{bx1} {by1}" stroke="rgb{BLUE}" stroke-width="{w}" stroke-linecap="round"/>
-  <circle cx="{kx}" cy="{ky}" r="{round(KNOB * t, 1)}" fill="rgb{BLUE}"/>
+  <circle cx="{kx}" cy="{ky}" r="{round(KNOB * t, 1)}" fill="#fff"/>
+  <circle cx="{kx}" cy="{ky}" r="{round((KNOB - RING) * t, 1)}" fill="rgb{BLUE}"/>
 </svg>
 '''
 
