@@ -1,4 +1,4 @@
-# XLM Studio
+![[assets/github-banner.png]]
 <p align="center">
   <img src="https://img.shields.io/github/v/release/RenZekta/XLM-Studio?style=flat-square&color=black&label=version" alt="Latest Version" />
   <img src="https://img.shields.io/badge/Electron-191970?style=flat-square&logo=Electron&logoColor=white" alt="Electron" />
