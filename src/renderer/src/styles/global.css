@@ -68,6 +68,24 @@ input[type="number"] {
 ::-webkit-scrollbar-track { background: transparent; }
 ::-webkit-scrollbar-thumb { background: var(--border-strong); border-radius: 99px; }
 ::-webkit-scrollbar-thumb:hover { background: var(--text-muted); }
+/* A scrollable, resizable textarea has a corner square where the two scrollbars
+   meet. Left unstyled, Chromium paints it white with a light resize shape,
+   which glares in dark mode, and at the global 5px scrollbar width the corner
+   is too small to hold a handle. So textareas get a 12px scrollbar track with a
+   thin visible thumb, a transparent corner, and a drawn two-line resize handle.
+   The Custom Arguments mirror layer must use the same width as its textarea,
+   or highlighted text would wrap differently from the typed text. */
+::-webkit-scrollbar-corner { background: transparent; }
+textarea::-webkit-scrollbar, .custom-args-mirror::-webkit-scrollbar { width: 12px; height: 12px; }
+textarea::-webkit-scrollbar-thumb {
+  background: var(--border-strong); background-clip: padding-box;
+  border: 3px solid transparent; border-radius: 99px;
+}
+textarea::-webkit-scrollbar-thumb:hover { background-color: var(--text-muted); }
+textarea::-webkit-resizer {
+  background: linear-gradient(135deg, transparent 0 46%, var(--text-muted) 46% 56%, transparent 56% 70%, var(--text-muted) 70% 80%, transparent 80%);
+  border-radius: 0 0 var(--radius-sm) 0;
+}
 .app { display: flex; flex-direction: column; height: 100vh; overflow: hidden; }
 .titlebar {
   height: 44px;
@@ -171,7 +189,67 @@ input[type="number"] {
 }
 .card-drag-region { cursor: grab; }
 .card-drag-source { opacity: .35; }
-.card-drag-source .card-drag-region { cursor: grabbing; }
+/* Dragging is pointer-driven (see CardsView), so the page owns the cursor
+   and can show the grabbing hand everywhere for the whole drag. */
+body.card-dragging, body.card-dragging * { cursor: grabbing !important; user-select: none !important; }
+.drag-ghost {
+  position: fixed !important; left: 0; top: 0; z-index: 3000; pointer-events: none;
+  opacity: .92; box-shadow: var(--shadow-md), 0 10px 28px rgba(0, 0, 0, .25);
+  max-height: 220px; overflow: hidden !important; border-radius: var(--radius-lg);
+}
+.drag-ghost-count {
+  position: absolute; top: 8px; right: 8px; min-width: 22px; height: 22px; padding: 0 6px;
+  border-radius: 11px; background: var(--info-blue); color: #fff; font-size: 12px; font-weight: 700;
+  display: flex; align-items: center; justify-content: center;
+}
+/* Selection: blue outline and tint, with a short pop when it is applied. */
+.model-card.selected, .folder-card.selected {
+  outline: 2px solid var(--info-blue); outline-offset: -1px;
+  background: linear-gradient(rgba(59, 130, 246, .09), rgba(59, 130, 246, .09)), var(--surface);
+  animation: card-select-pop 280ms cubic-bezier(.2, .8, .3, 1);
+}
+/* Selected and running: ring just outside the green border so both show. */
+.model-card.running.selected, .folder-card.has-running.selected { outline-offset: 2px; }
+@keyframes card-select-pop {
+  0% { transform: scale(.985); box-shadow: 0 0 0 0 rgba(59, 130, 246, .5); }
+  55% { transform: scale(1.007); }
+  100% { transform: scale(1); box-shadow: 0 0 0 10px rgba(59, 130, 246, 0); }
+}
+.card-cut { opacity: .5; }
+.dropdown-menu.context-menu { position: fixed; right: auto; bottom: auto; min-width: 230px; z-index: 5000; }
+.context-menu-hint { font-size: 11px; color: var(--text-muted); margin-left: 16px; }
+/* Folders */
+.folder-card {
+  display: flex; align-items: center; gap: 12px; padding: 18px;
+  background: var(--surface); border: 1.5px solid var(--border); border-radius: var(--radius-lg);
+  box-shadow: var(--shadow); transition: box-shadow var(--transition), border-color var(--transition);
+  position: relative; user-select: none; cursor: default;
+}
+.folder-card:hover { box-shadow: var(--shadow-md); border-color: var(--border-strong); }
+.folder-card .card-info { min-width: 0; flex: 1; }
+.folder-card.folder-stretch { height: 100%; box-sizing: border-box; }
+.folder-card.has-running, .folder-card.has-running:hover {
+  border-color: var(--success); box-shadow: 0 0 0 3px rgba(22, 163, 74, .1), var(--shadow-md);
+}
+.folder-drop-target { border-color: var(--info-blue); background: linear-gradient(rgba(59, 130, 246, .14), rgba(59, 130, 246, .14)), var(--surface); }
+.folder-rename-input {
+  width: 100%; box-sizing: border-box; font: inherit; font-size: 15px; font-weight: 600;
+  color: var(--text); background: var(--bg); border: 1.5px solid var(--info-blue);
+  border-radius: 6px; padding: 2px 6px; outline: none;
+}
+.folder-bar { display: flex; align-items: center; gap: 8px; margin-bottom: 14px; }
+.folder-path { display: flex; align-items: center; gap: 2px; flex-wrap: wrap; font-size: 14px; }
+.folder-path-seg {
+  background: none; border: none; color: var(--text-secondary); cursor: pointer;
+  padding: 3px 6px; border-radius: 6px; font: inherit;
+}
+.folder-path-seg:hover { background: var(--bg); color: var(--text); }
+.folder-path-seg.current { color: var(--text); font-weight: 600; }
+.folder-path-seg.drop-target, .folder-bar .btn-icon.drop-target {
+  background: rgba(59, 130, 246, .22); color: var(--text); outline: 1.5px solid var(--info-blue);
+}
+.folder-path-sep { color: var(--text-muted); }
+.folder-empty { color: var(--text-muted); font-size: 13px; margin: 4px 0 14px; }
 .model-card {
   background: var(--surface);
   border: 1.5px solid var(--border);
@@ -237,7 +315,6 @@ input[type="number"] {
   cursor: help;
 }
 .card-desc { font-size: 12px; color: var(--text-secondary); margin-top: 2px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.card-menu-btn { flex-shrink: 0; position: relative; }
 .card-meta { padding: 0 18px 14px; display: flex; flex-wrap: wrap; gap: 6px; }
 .card-tag {
   display: inline-flex; align-items: center; gap: 4px;
@@ -330,6 +407,30 @@ input[type="number"] {
 .cmd-input[type="number"] { width: 120px; }
 .cmd-textarea { padding: 8px 10px; width: 100%; resize: vertical; min-height: 60px; font-size: 13px; margin-top: 6px; display: block; }
 .cmd-row-full { grid-template-columns: 1fr; }
+/* Custom Arguments: a textarea over a mirror layer that paints the same text
+   with highlighted flags. Both layers share font, padding and wrapping so the
+   colored spans sit exactly under the typed characters. */
+.custom-args-box {
+  position: relative; background: var(--surface); border: 1.5px solid var(--border);
+  border-radius: var(--radius-sm); transition: border-color var(--transition);
+}
+.custom-args-box:focus-within { border-color: var(--accent); }
+.custom-args-mirror, .custom-args-input {
+  box-sizing: border-box; margin: 0; padding: 8px 10px; width: 100%;
+  font-family: var(--font-mono); font-size: 13px; line-height: 19.5px;
+  white-space: pre-wrap; overflow-wrap: anywhere; scrollbar-gutter: stable;
+}
+.custom-args-mirror {
+  position: absolute; inset: 0; overflow: hidden; pointer-events: none; color: var(--text);
+}
+.custom-args-input {
+  position: relative; display: block; min-height: 35.5px; border: none; outline: none;
+  resize: vertical; overflow-y: auto; background: transparent; color: transparent;
+  caret-color: var(--text);
+}
+.custom-args-input::placeholder { color: var(--text-muted); }
+.custom-args-supported { background: rgba(22, 163, 74, .25); border-radius: 3px; }
+.custom-args-reserved { background: rgba(217, 119, 6, .25); border-radius: 3px; }
 /* num-btn retained for clipboard/browse buttons in string inputs */
 .num-btn { width: 32px; height: 34px; border: 1.5px solid var(--border); background: var(--bg); color: var(--text-secondary); cursor: pointer; font-size: 14px; display: flex; align-items: center; justify-content: center; transition: background var(--transition); border-radius: var(--radius-sm); flex-shrink: 0; }
 .num-btn:hover { background: var(--border); color: var(--text); }

@@ -12,6 +12,7 @@ import SelectMenu from './SelectMenu'
 import { buildQuickEngineBaseline, seedSamplingArgsFromPreset } from '../../../shared/presetBaselines'
 import { useOverlayClose } from '../hooks/useOverlayClose'
 import { normalizeImportedArgs, parseServerCommand, parseStrataCommand } from '../../../shared/importCommand'
+import { CUSTOM_ARGS_KEY, appendCustomArgs, partitionImportedArgs } from '../../../shared/customArgs'
 import { activeServerOverrides, findPortConflict } from '../utils/templatePort'
 import { strataInfoFor } from '../../../shared/strata'
 // Starting values of a new Template for an engine: llama.cpp gets the starred
@@ -184,10 +185,18 @@ export default function CreateModal() {
     const normalized = normalizeImportedArgs(parsed.args, schema)
     if (parsed.modelPath) setModelPath(parsed.modelPath)
     if (parsed.serverPort !== null) setServerPort(parsed.serverPort)
-    setArgs((prev) => ({ ...prev, ...normalized }))
+    // Flags the schema does not list have no control, so they go into the
+    // Custom Arguments text, where they stay editable.
+    const { known, custom } = partitionImportedArgs(normalized, schema)
+    const customCount = Object.keys(custom).length
+    setArgs((prev) => ({
+      ...prev,
+      ...known,
+      ...(customCount ? { [CUSTOM_ARGS_KEY]: appendCustomArgs(prev[CUSTOM_ARGS_KEY], custom) } : {})
+    }))
     // Host and API key are edited in the Server block of the parameters.
-    if (normalized['--host'] !== undefined || normalized['--api-key'] !== undefined) setShowAdvanced(true)
-    setImportNote('')
+    if (customCount || normalized['--host'] !== undefined || normalized['--api-key'] !== undefined) setShowAdvanced(true)
+    setImportNote(customCount ? `${Object.keys(custom).join(', ')} not in this backend's parameter list: added to Custom Arguments.` : '')
     setShowImport(false)
     setImportCmd('')
   }
@@ -305,6 +314,7 @@ export default function CreateModal() {
         serverPort,
         args,
         tags: tagsStr.split(',').map(t => t.trim()).filter(Boolean),
+        folderId: useStore.getState().currentFolderId,
         createdAt: new Date().toISOString(),
         updatedAt: new Date().toISOString()
       }

@@ -1,7 +1,7 @@
-import React, { useState, useEffect, useRef, useMemo } from 'react'
+import React, { useMemo } from 'react'
 import { useStore } from '../store/useStore'
-import { Play, Square, Settings, ChevronDown, MoreVertical, Copy, Trash, Upload, Globe, AlertCircle, Gauge, Loader2, Star } from 'lucide-react'
-import type { CardState, Template, CheckpointMode } from '../../../shared/types'
+import { Play, Square, Settings, ChevronDown, Globe, AlertCircle, Gauge, Loader2, Star } from 'lucide-react'
+import type { CardState, CheckpointMode } from '../../../shared/types'
 import { applyMmprojOffloadFlag } from '../../../shared/mmprojOffload'
 import CmdParamsEditor from './CmdParamsEditor'
 import EngineParamsEditor from './EngineParamsEditor'
@@ -9,21 +9,15 @@ import { ENGINES, engineOf } from '../../../shared/engines'
 import { buildStrataArgv, strataGgufDir, strataInfoFor } from '../../../shared/strata'
 import { resolveEngineBackend } from '../utils/engineBackends'
 import { effectiveTemplatePort, starColorForPort } from '../utils/templatePort'
+import { CUSTOM_ARGS_KEY, customArgsLaunchTokens } from '../../../shared/customArgs'
 interface Props {
   card: CardState
-  // Applied only to the grabbable region (header through the Start/Stop
-  // row) so a card can be reordered by dragging without hijacking mouse
-  // drags inside the expanded Parameters editor below it -- sliders, text
-  // selection in inputs, etc. Omitted entirely when the card isn't
-  // rendered inside a reorderable grid.
-  dragHandleProps?: {
-    draggable: true
-    onDragStart: (e: React.DragEvent) => void
-    onDragEnd: () => void
-  }
+  selected?: boolean
+  // Waiting to be moved by a pending Cut.
+  cut?: boolean
 }
-export default function ModelCard({ card, dragHandleProps }: Props) {
-  const { toggleCardExpanded, setCardStatus, removeCard, backends, activeBackend, commandsSchema, setShowCreateModal, models, modelDefaults, ggufMetadata, cards, baseUrlOverride, updateCard } = useStore()
+export default function ModelCard({ card, selected, cut }: Props) {
+  const { toggleCardExpanded, setCardStatus, backends, activeBackend, commandsSchema, models, modelDefaults, ggufMetadata, cards, baseUrlOverride } = useStore()
 
   // Compute the EFFECTIVE context that will be passed to
   // llama.cpp on the next run. Precedence:
@@ -100,19 +94,10 @@ export default function ModelCard({ card, dragHandleProps }: Props) {
     const mainTemplates = cards.map(c => c.template).filter(t => t.mainForPort === true)
     return starColorForPort(myEffectivePort, mainTemplates, baseUrlOverride)
   }, [isMainTemplate, myEffectivePort, cards, baseUrlOverride])
-  const [showMenu, setShowMenu] = useState(false)
-  const menuRef = useRef<HTMLDivElement>(null)
   const isRunning = card.status === 'running'
   const isStopping = card.status === 'stopping'
   const isExpanded = card.expanded
   const modelExists = !card.template.modelPath || models.some(g => g.models.some(m => m.path === card.template.modelPath))
-  useEffect(() => {
-    function handleClickOutside(e: MouseEvent) {
-      if (menuRef.current && !menuRef.current.contains(e.target as Node)) setShowMenu(false)
-    }
-    document.addEventListener('mousedown', handleClickOutside)
-    return () => document.removeEventListener('mousedown', handleClickOutside)
-  }, [])
   async function handleRunToggle() {
     if (isRunning) {
       // Enter 'stopping' state: disables the Start button + shows a spinner while
@@ -232,6 +217,7 @@ export default function ModelCard({ card, dragHandleProps }: Props) {
         else if (v !== false && v !== null && v !== '') args.push(k, String(v))
       }
     }
+    args.push(...customArgsLaunchTokens(tArgs[CUSTOM_ARGS_KEY]))
     // "Offload mmproj to RAM": the Template's own pin or the global Overrides
     // switch decides whether --no-mmproj-offload is passed. GPU offload is
     // llama-server's default, so "off" adds nothing.
@@ -307,40 +293,9 @@ export default function ModelCard({ card, dragHandleProps }: Props) {
     if (res.success) setCardStatus(card.template.id, 'running', res.pid, res.port)
     else { alert(`Failed to run: ${res.error}`); setCardStatus(card.template.id, 'error') }
   }
-  async function handleDelete() {
-    if (isRunning) { alert('Please stop the model before deleting.'); return }
-    if (confirm('Delete this template?')) {
-      await window.api.deleteTemplate(card.template.id)
-      removeCard(card.template.id)
-    }
-  }
-  async function handleExport() { await window.api.exportTemplate(card.template); setShowMenu(false) }
-  function handleEdit() { setShowCreateModal(true, card.template); setShowMenu(false) }
-  function handleDuplicate() {
-    // A duplicate never inherits the Main Template star -- it would
-    // otherwise immediately dethrone the original, which shares the same
-    // port until the user changes it.
-    const { mainForPort, mainStarredAt, ...rest } = card.template
-    const t = { ...rest, id: Date.now().toString(), name: `${card.template.name} (Copy)` }
-    window.api.saveTemplate(t).then(res => { if (res.success) useStore.getState().addCard(t) })
-    setShowMenu(false)
-  }
-  async function handleToggleMain() {
-    const nowMain = !isMainTemplate
-    const patch: Partial<Template> = nowMain
-      ? { mainForPort: true, mainStarredAt: Date.now() }
-      : { mainForPort: false, mainStarredAt: undefined }
-    updateCard(card.template.id, patch)
-    // The main process is the source of truth for the one-Main-Template-
-    // per-port invariant and may dethrone a DIFFERENT template as a side
-    // effect -- it broadcasts 'templates-changed' either way, which the
-    // App-level listener uses to reconcile every card from disk.
-    await window.api.saveTemplate({ ...card.template, ...patch })
-    setShowMenu(false)
-  }
   return (
-    <div className={`model-card ${isRunning ? 'running' : ''}`} style={{ overflow: 'visible' }}>
-      <div {...dragHandleProps} className={dragHandleProps ? 'card-drag-region' : undefined}>
+    <div className={`model-card ${isRunning ? 'running' : ''} ${selected ? 'selected' : ''} ${cut ? 'card-cut' : ''}`} style={{ overflow: 'visible' }}>
+      <div className="card-drag-region">
         <div className="card-header">
           <div className="card-icon">
             {isRunning ? (
@@ -402,24 +357,6 @@ export default function ModelCard({ card, dragHandleProps }: Props) {
               ) : null}
             </div>
             <p className="card-desc" title={card.template.description}>{card.template.description || 'No description'}</p>
-          </div>
-          <div className="card-menu-btn" ref={menuRef} style={{ position: 'relative', zIndex: 10 }}>
-            <button className="btn btn-ghost btn-icon" onClick={() => setShowMenu(!showMenu)}>
-              <MoreVertical size={16} />
-            </button>
-            {showMenu && (
-              <div className="dropdown-menu" style={{ position: 'absolute', right: 0, top: 'calc(100% + 4px)', zIndex: 500 }}>
-                <button className="dropdown-item" onClick={handleEdit}><Settings size={14} /> Edit Template</button>
-                <button className="dropdown-item" onClick={handleToggleMain}>
-                  <Star size={14} style={isMainTemplate ? { fill: starColor, color: starColor } : undefined} />
-                  {isMainTemplate ? 'Unstar Main Template' : `Star as Main Template (port ${myEffectivePort})`}
-                </button>
-                <button className="dropdown-item" onClick={handleDuplicate}><Copy size={14} /> Duplicate</button>
-                <button className="dropdown-item" onClick={handleExport}><Upload size={14} /> Export</button>
-                <div className="dropdown-divider" />
-                <button className="dropdown-item danger" onClick={handleDelete}><Trash size={14} /> Delete</button>
-              </div>
-            )}
           </div>
         </div>
         <div className="card-meta">

@@ -22,6 +22,8 @@ import { markTemplateSavePending, markTemplateSaveDone } from '../utils/template
 import { activeServerOverrides, findPortConflict } from '../utils/templatePort'
 import ServerParamsBlock from './ServerParamsBlock'
 import SelectMenu from './SelectMenu'
+import CustomArgsEditor from './CustomArgsEditor'
+import { CUSTOM_ARGS_KEY, parseCustomArgs, importSupportedArgs } from '../../../shared/customArgs'
 import { MMPROJ_OFFLOAD_MODE_KEY, getMmprojOffloadMode, resolveMmprojOffloadToRam } from '../../../shared/mmprojOffload'
 import { SPEC_DRAFT_K_ARG, SPEC_DRAFT_V_ARG, isSpecDraftActive, resolveKvBackfill, applySpecDraftKvDefaults } from '../../../shared/specDraftKv'
 import type { MmprojOffloadMode } from '../../../shared/types'
@@ -1101,6 +1103,22 @@ export default function CmdParamsEditor({ templateId, args, onChange, modelPathF
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [disabled, effectiveBackend])
 
+  const customArgsText = typeof args[CUSTOM_ARGS_KEY] === 'string' ? (args[CUSTOM_ARGS_KEY] as string) : ''
+  function setCustomArgsText(v: string) {
+    const newArgs = { ...args }
+    if (v === '') delete newArgs[CUSTOM_ARGS_KEY]
+    else newArgs[CUSTOM_ARGS_KEY] = v
+    commit(newArgs)
+  }
+  function importCustomArgs() {
+    const res = importSupportedArgs(customArgsText, args, commandsSchema, true)
+    if (res.imported.length === 0) return
+    const newArgs = { ...res.args }
+    if (res.text === '') delete newArgs[CUSTOM_ARGS_KEY]
+    else newArgs[CUSTOM_ARGS_KEY] = res.text
+    commit(newArgs)
+  }
+
   const reasoningPreserveOn = args['--reasoning-preserve'] !== false
   function setReasoningPreserveOn(on: boolean) {
     commit({ ...args, '--reasoning-preserve': on })  }
@@ -1333,6 +1351,8 @@ export default function CmdParamsEditor({ templateId, args, onChange, modelPathF
     for (const k of SERVER_ARGS) {
       if (args[k] !== undefined) newArgs[k] = args[k]
     }
+    // Hand-typed flags are not part of any preset baseline.
+    if (args[CUSTOM_ARGS_KEY] !== undefined) newArgs[CUSTOM_ARGS_KEY] = args[CUSTOM_ARGS_KEY]
     // Clear must preserve sampling values too — it wipes the engine args
     // (everything else), not the model's/user's sampling setup.
     for (const k of SAMPLING_KEYS) {
@@ -1514,6 +1534,10 @@ export default function CmdParamsEditor({ templateId, args, onChange, modelPathF
                 : undefined
       tokens.push({ flag: key, value: val === true ? undefined : (val as string | number), overridden: isOverridden, title })
     })
+    for (const e of parseCustomArgs(customArgsText)) {
+      if (e.flag === '-m' || e.flag === '--model' || e.flag === '--port') continue
+      tokens.push({ flag: e.flag, value: e.values.length ? e.values.join(' ') : undefined, title: 'From Custom Arguments' })
+    }
     return tokens
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [args, ignoreCtxOverride, ignoreBaseUrlOverride, autoCtxFill, cards, templateId, modelPathFallback, serverPortFallback, previewEffectiveCtx, ctxOverriddenInPreview, previewEffectiveParallel, parallelOverriddenInPreview, previewEffectivePort, portOverriddenInPreview, hostOverrideActive, apiKeyOverrideActive, baseUrlOverride, isMoe, modelDefaults])
@@ -2678,6 +2702,7 @@ export default function CmdParamsEditor({ templateId, args, onChange, modelPathF
       {renderSpecWidget()}
       {renderMoeWidget()}
       {renderReasoningWidget()}
+      <CustomArgsEditor value={customArgsText} schema={commandsSchema} disabled={disabled} onChange={setCustomArgsText} onImport={importCustomArgs} />
       <div className="params-search-box">
         <Search size={16} style={{ color: 'var(--text-muted)' }} />
         <input type="text" className="form-input" placeholder="Search parameters..." value={searchQuery} onChange={e => setSearchQuery(e.target.value)} />

@@ -1,7 +1,7 @@
 import { create } from 'zustand'
 import type { EngineId } from '../../../shared/engines'
 import type {
-  Template, BackendVersion, CommandsSchema, ReleaseInfo, RunningStatus,
+  Template, TemplateFolder, BackendVersion, CommandsSchema, ReleaseInfo, RunningStatus,
   ModelGroup, TrackedBackend, TrackedBackendRelease, ThemePref, SpecDetectionResult,
   KvCacheCheckpointSettings
 } from '../../../shared/types'
@@ -37,6 +37,9 @@ interface AppStore {
   commandsSchema: CommandsSchema | null
   releaseInfo: ReleaseInfo | null
   paths: { models: string; templates: string; backend: string; mainModelFolder: string; mainBackendFolder: string } | null
+  // Folders of the Templates page and the one currently open (null = top level).
+  templateFolders: TemplateFolder[]
+  currentFolderId: string | null
   view: 'cards' | 'settings' | 'hub' | 'models' | 'about' | 'logs' | 'overrides' | 'monitoring'
   showCreateModal: boolean
   editingTemplate: Template | null
@@ -96,6 +99,8 @@ interface AppStore {
 
   setCompactSidebarEnabled: (enabled: boolean) => void
   setView: (v: AppStore['view']) => void
+  setTemplateFolders: (f: TemplateFolder[]) => void
+  setCurrentFolderId: (id: string | null) => void
   setShowCreateModal: (show: boolean, template?: Template | null) => void
   setPrefillModelPath: (path: string | null) => void
   setActiveBackend: (b: BackendVersion) => void
@@ -166,6 +171,7 @@ interface AppStore {
 export const useStore = create<AppStore>((set) => ({
   cards: [], backends: [], models: [], activeBackend: null, engineGlobals: {},
   commandsSchema: null, releaseInfo: null, paths: null,
+  templateFolders: [], currentFolderId: null,
   view: 'cards', showCreateModal: false, editingTemplate: null, prefillModelPath: null,
   updateDismissed: false, checkingUpdate: false, downloadProgress: {},
   templateSearch: '', modelDownloads: {},
@@ -203,6 +209,8 @@ export const useStore = create<AppStore>((set) => ({
     set({ compactSidebarEnabled: enabled })
   },
   setView: (v) => set({ view: v }),
+  setTemplateFolders: (f) => set({ templateFolders: f }),
+  setCurrentFolderId: (id) => set({ currentFolderId: id }),
   setShowCreateModal: (show, template = null) => set({ showCreateModal: show, editingTemplate: template }),
   setPrefillModelPath: (path) => set({ prefillModelPath: path }),
   setActiveBackend: (b) => set({ activeBackend: b }),

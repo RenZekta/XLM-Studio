@@ -135,6 +135,7 @@ export default function App() {
             expanded: false
           }))
         )
+        useStore.getState().setTemplateFolders(await window.api.listTemplateFolders())
       } catch (e) {
         console.error('Init error:', e)
       }
@@ -298,7 +299,7 @@ export default function App() {
   }
 
   // '.content' is one shared scroll container reused by every view. Leaving
-  // My Templates for a shorter view (e.g. Logs) lets the browser clamp its
+  // Templates for a shorter view (e.g. Logs) lets the browser clamp its
   // scrollTop down to fit the shorter content, so simply keeping CardsView
   // mounted underneath isn't enough to bring the page back where it was.
   // Track and restore its scroll position across the view switch, in memory
@@ -366,7 +367,7 @@ export default function App() {
       <div className="main-layout">
         <Sidebar />
         <main className="content" ref={contentRef} onScroll={handleContentScroll}>
-          {/* CardsView (My Templates) stays mounted behind other views instead of
+          {/* CardsView (Templates) stays mounted behind other views instead of
               being torn down on navigation, so its own scroll position and each
               expanded template's scroll position survive a trip to Logs/Settings/etc
               and back, instead of remounting at scrollTop 0 every time. */}

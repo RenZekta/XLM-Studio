@@ -9,8 +9,9 @@
 // startTracking/stopTracking.
 import { buildQuickEngineBaseline, SAMPLING_KEYS, SAMPLING_PRESET_MARKER, seedSamplingArgsFromPreset } from '../shared/presetBaselines'
 import { COMMON_PARAM_FLAGS } from '../shared/commonParams'
+import { CUSTOM_ARGS_KEY, customArgsLaunchTokens, classifyCustomArgs, importSupportedArgs } from '../shared/customArgs'
 import { applyNgramModifierToggle, getNgramModifierState, NGRAM_MAP_K4V_FLAGS, NGRAM_MOD_FLAGS } from '../shared/specToggles'
-import type { Template, CheckpointMode } from '../shared/types'
+import type { Template, CheckpointMode, CommandsSchema } from '../shared/types'
 import { applyMmprojOffloadFlag, MMPROJ_OFFLOAD_MODE_KEY, getMmprojOffloadMode, resolveMmprojOffloadToRam } from '../shared/mmprojOffload'
 import { applySpecDraftKvDefaults } from '../shared/specDraftKv'
 import { engineOf, ENGINES, type EngineId } from '../shared/engines'
@@ -75,6 +76,12 @@ function D(): ControlDeps {
 // ---------------------------------------------------------------------------
 
 class ToolError extends Error {}
+
+// A call that cannot proceed until the caller answers a question; nothing is
+// saved. `details` is returned next to the error so an agent can read it.
+class NeedsDecision extends ToolError {
+  constructor(message: string, public details: Record<string, unknown>) { super(message) }
+}
 
 function findTemplate(name: string): Template {
   const t = D().listTemplates().find(t => t.name === name)
@@ -298,6 +305,7 @@ async function buildLaunchArgs(template: Template): Promise<{ args: string[]; ct
     flags.push(key)
     if (value !== true) flags.push(String(value))
   }
+  flags.push(...customArgsLaunchTokens(raw[CUSTOM_ARGS_KEY]))
   if (template.modelPath) flags.push('--model', template.modelPath)
   // Same resolution as ModelCard.tsx's handleRunToggle: the Template's own
   // "Offload mmproj to RAM" pin, else the global Overrides switch.
@@ -592,7 +600,7 @@ export async function toolTemplateCreate(args: { name: string; model: string; ba
 // template (would corrupt the live session) — see the guard below.
 export async function toolTemplateEdit(args: { templates: string[]; changes: Record<string, any> }) {
   const targets = findTemplates(args.templates)
-  const results: { template: string; success: boolean; error?: string }[] = []
+  const results: { template: string; success: boolean; error?: string; needsDecision?: Record<string, unknown>; customArgs?: Record<string, unknown> }[] = []
   for (const t of targets) {
     try {
       await assertEditAllowed(t)
@@ -613,6 +621,9 @@ export async function toolTemplateEdit(args: { templates: string[]; changes: Rec
       // applied (see below), rather than unconditionally discarded.
       let backendTypeExplicit = false
       let backendKeyOrVersionChanged = false
+      let customArgsInput: string | undefined
+      let overwriteSupported: boolean | undefined
+      let customArgsReport: Record<string, unknown> | undefined
       for (const [k, v] of Object.entries(args.changes)) {
         if (k === 'model' || k === 'modelPath') { patch.modelPath = v; continue }
         if (k === 'backend' || k === 'backendKey') { patch.backendKey = v; backendKeyOrVersionChanged = true; continue }
@@ -749,6 +760,17 @@ export async function toolTemplateEdit(args: { templates: string[]; changes: Rec
           newArgs['--spec-draft-model'] = v
           continue
         }
+        // Free text of flags the parameter list does not cover, shown in the
+        // app as the Custom Arguments box. Replaces the whole text; an empty
+        // value clears it. Supported flags found in it are resolved below.
+        if (kLower === 'custom arguments' || kLower === 'custom-arguments' || kLower === 'custom-args' || kLower === 'customargs') {
+          customArgsInput = v === null || v === undefined ? '' : String(v)
+          continue
+        }
+        if (kLower === 'overwritesupported' || kLower === 'overwrite-supported') {
+          overwriteSupported = v === true || (typeof v === 'string' && /^(true|yes|1)$/i.test(v.trim()))
+          continue
+        }
         // Every other parameter (model, backend, multimodal projector,
         // speculative decoding, and every other UI parameter) is stored as
         // an args key. Accept the raw flag ("ctx-size"/"--ctx-size"), its
@@ -792,6 +814,23 @@ export async function toolTemplateEdit(args: { templates: string[]; changes: Rec
           patch.backendType = globalMatch ? (globalMatch.backendType ?? null) : null
         }
       }
+      if (customArgsInput !== undefined) {
+        const schema = await getCommandsSchemaFor({ ...t, ...patch } as Template)
+        const probe = importSupportedArgs(customArgsInput, newArgs, schema, true)
+        if (probe.conflicts.length > 0 && overwriteSupported === undefined) {
+          const list = probe.conflicts.map(c => `${c.key}: stored ${JSON.stringify(c.current)}, custom-args has ${JSON.stringify(c.incoming)}`).join('; ')
+          throw new NeedsDecision(
+            `Nothing was saved for \"${t.name}\". The custom-args text contains flags the Template already has its own parameters for, with different values (${list}). ` +
+            'Call template-edit again with the same changes plus \"overwriteSupported\": true to replace the stored values with the ones in custom-args, or false to keep the stored values (the flags are removed from the custom-args text either way).',
+            { conflicts: probe.conflicts, options: { overwriteSupported: [true, false] } }
+          )
+        }
+        const res = overwriteSupported === undefined ? probe : importSupportedArgs(customArgsInput, newArgs, schema, overwriteSupported)
+        newArgs = res.args
+        if (res.text === '') delete newArgs[CUSTOM_ARGS_KEY]
+        else newArgs[CUSTOM_ARGS_KEY] = res.text
+        customArgsReport = { text: res.text, importedAsParameters: res.imported, keptStoredValue: res.kept }
+      }
       // Draft model KV cache types exist only while a primary speculative
       // method is on: seed them from the backend's KV defaults when it is
       // (unset values only), drop them when it isn't -- the same invariant
@@ -802,9 +841,9 @@ export async function toolTemplateEdit(args: { templates: string[]; changes: Rec
       patch.args = newArgs
       delete patch._file
       await D().saveTemplate(patch)
-      results.push({ template: t.name, success: true })
+      results.push({ template: t.name, success: true, ...(customArgsReport ? { customArgs: customArgsReport } : {}) })
     } catch (err: any) {
-      results.push({ template: t.name, success: false, error: err?.message || String(err) })
+      results.push({ template: t.name, success: false, error: err?.message || String(err), ...(err instanceof NeedsDecision ? { needsDecision: err.details } : {}) })
     }
   }
   return { results }
@@ -965,6 +1004,13 @@ async function findDetectedMmproj(t: Template): Promise<{ name: string; path: st
   return group?.mmproj || null
 }
 
+async function getCommandsSchemaFor(t: Template): Promise<CommandsSchema | null> {
+  try {
+    const backend = await resolveBackend(t)
+    return (await D().getCommands(backend.backendKey)) || null
+  } catch { return null }
+}
+
 async function getSchemaLookup(t: Template): Promise<{ flagToParam: Map<string, any>; labelToFlag: Map<string, string>; shortToFlag: Map<string, string> }> {
   const flagToParam = new Map<string, any>()
   const labelToFlag = new Map<string, string>()
@@ -1046,7 +1092,8 @@ async function paramsView(t: Template, view: 'common' | 'full') {
   // with nothing filtered out.
   if (view === 'common') entries = entries.filter(([k]) => COMMON_PARAM_FLAGS.has(k))
   const { flagToParam } = await getSchemaLookup(t)
-  const parameters = entries.map(([flag, value]) => {
+  const customText = typeof args[CUSTOM_ARGS_KEY] === 'string' ? (args[CUSTOM_ARGS_KEY] as string) : ''
+  const parameters: Record<string, unknown>[] = entries.map(([flag, value]) => {
     const cmd = flagToParam.get(flag)
     return {
       flag,                                   // the raw llama.cpp value this affects, e.g. "--ctx-size"
@@ -1056,6 +1103,19 @@ async function paramsView(t: Template, view: 'common' | 'full') {
       options: cmd?.options || undefined      // for select-type params, the UI's own valid choices
     }
   })
+  // Shown in both views whenever set, like any other parameter.
+  if (customText.trim()) {
+    const schema = await getCommandsSchemaFor(t)
+    const classified = classifyCustomArgs(customText, schema)
+    parameters.push({
+      flag: 'custom-args',
+      label: 'Custom Arguments',
+      value: customText,
+      type: 'text',
+      note: 'Free text appended to the launch command as typed. Replace it with template-edit\'s \"custom-args\" key.',
+      supportedFlagsInText: classified.filter(e => e.kind === 'supported').map(e => e.flag)
+    })
+  }
   // Composite UI toggles that don't map to a single flag — the app's
   // interface shows each as a switch, not a tunable value. N-gram Map/
   // Modifier are derived from --spec-type (a comma-separated segment list);
@@ -1126,6 +1186,17 @@ export async function toolDisplayParametersCommon(args: { template: string }) {
 }
 export async function toolDisplayParametersFull(args: { template: string }) {
   return paramsView(findTemplate(args.template), 'full')
+}
+
+// The launch command of one Template as a shell-ready string: arguments with
+// spaces or quotes are double-quoted.
+export async function launchCommandForId(id: string): Promise<string> {
+  const t = D().listTemplates().find(x => x.id === id)
+  if (!t) throw new ToolError('This Template no longer exists.')
+  const backend = await resolveBackend(t)
+  const { args } = await buildLaunchArgs(t)
+  const quote = (a: string) => /[\s"]/.test(a) ? `"${a.replace(/"/g, '\\"')}"` : a
+  return [backend.exe, ...args].map(quote).join(' ')
 }
 
 // Best-effort reconstruction of the final launch command — see
@@ -1560,7 +1631,7 @@ export const TOOL_DEFS: ToolDef[] = [
   },
   {
     name: 'template-edit', handler: toolTemplateEdit,
-    description: 'Edit one or more Templates: model, backend, multimodal projector, speculative decoding, or any other parameter. Each parameter key accepts its display-parameters label ("Context Size"), its raw flag ("ctx-size"/"--ctx-size"), or its short flag ("-c"). Also accepts the six composite toggles from display-parameters-* (booleans, except where noted): "N-gram Map (K4V)"/"ngram-map-k4v", "N-gram Modifier"/"ngram-mod" (each auto-applies/removes its own default sub-parameters), "Automatic YaRN scaling control"/"yarn-auto-scale", "Multimodal Projector"/"mmproj" (turning it on auto-fills the model\'s own detected mmproj file -- see display-parameters\' "detected" field -- unless "mmprojPath" is also given in the same call to point at a specific file instead; turning it off clears "--mmproj"), "Offload mmproj to RAM"/"mmproj-offload" (a mode: "follow" the global Overrides switch, "enabled" = keep the projector in RAM via --no-mmproj-offload, "disabled" = offload it to the GPU; true/false also accepted), and "Speculative Decoding"/"spec-decode" (accepts true/false, OR one of the method names from display-parameters\' "detected" list, e.g. "eagle3" -- activates that method with ITS OWN default draft parameters and detected sidecar file, same as picking it in the UI; "true" alone activates the single highest-tier detected method; "false"/"off" disables it; "specDraftModel" alongside it points at a specific sidecar file instead of the detected one). While a method is on, the draft model KV cache types "--spec-draft-type-k"/"--spec-draft-type-v" (aliases "-ctkd"/"-ctvd") are auto-filled with the backend\'s KV cache defaults and removed when it is off; set them directly with those flags. Changing "backend"/"backendKey" or "backendVersion" without also setting "backendType" in the same call auto-resolves the type (adopts the installed match\'s type if the new key+version is unambiguous, else the Global Backend\'s type if it happens to be that same fork+version, else clears it back to ambiguous) -- pass "backendType" explicitly (from info-backends) to pin an exact GPU-runtime variant when more than one is installed for that fork+version. Refuses to change model/backend/backendVersion/backendType of a currently-serving Template. If "Only allow Template edits via MCP for MCP-made Templates" is on, only "MCP-made"-tagged Templates can be edited.',
+    description: 'Edit one or more Templates: model, backend, multimodal projector, speculative decoding, or any other parameter. Each parameter key accepts its display-parameters label ("Context Size"), its raw flag ("ctx-size"/"--ctx-size"), or its short flag ("-c"). Also accepts the six composite toggles from display-parameters-* (booleans, except where noted): "N-gram Map (K4V)"/"ngram-map-k4v", "N-gram Modifier"/"ngram-mod" (each auto-applies/removes its own default sub-parameters), "Automatic YaRN scaling control"/"yarn-auto-scale", "Multimodal Projector"/"mmproj" (turning it on auto-fills the model\'s own detected mmproj file -- see display-parameters\' "detected" field -- unless "mmprojPath" is also given in the same call to point at a specific file instead; turning it off clears "--mmproj"), "Offload mmproj to RAM"/"mmproj-offload" (a mode: "follow" the global Overrides switch, "enabled" = keep the projector in RAM via --no-mmproj-offload, "disabled" = offload it to the GPU; true/false also accepted), and "Speculative Decoding"/"spec-decode" (accepts true/false, OR one of the method names from display-parameters\' "detected" list, e.g. "eagle3" -- activates that method with ITS OWN default draft parameters and detected sidecar file, same as picking it in the UI; "true" alone activates the single highest-tier detected method; "false"/"off" disables it; "specDraftModel" alongside it points at a specific sidecar file instead of the detected one). While a method is on, the draft model KV cache types "--spec-draft-type-k"/"--spec-draft-type-v" (aliases "-ctkd"/"-ctvd") are auto-filled with the backend\'s KV cache defaults and removed when it is off; set them directly with those flags. Changing "backend"/"backendKey" or "backendVersion" without also setting "backendType" in the same call auto-resolves the type (adopts the installed match\'s type if the new key+version is unambiguous, else the Global Backend\'s type if it happens to be that same fork+version, else clears it back to ambiguous) -- pass "backendType" explicitly (from info-backends) to pin an exact GPU-runtime variant when more than one is installed for that fork+version. "Custom Arguments"/"custom-args" (a string) sets the free-text box of extra flags the parameter list has no control for; it replaces the whole text, "" clears it, and the text is appended to the launch command as written. If it contains a flag the Template has its own parameter for (e.g. "--ctx-size 8192") whose stored value differs, nothing is saved and the result carries "needsDecision": ask the user, or decide, then repeat the call with "overwriteSupported": true (replace the stored values) or false (keep them); such flags are moved out of the text into their own parameters either way. Refuses to change model/backend/backendVersion/backendType of a currently-serving Template. If "Only allow Template edits via MCP for MCP-made Templates" is on, only "MCP-made"-tagged Templates can be edited.',
     params: [
       { name: 'templates', type: 'string[]', required: true, description: 'One or more Template names' },
       { name: 'changes', type: 'object', required: true, description: 'Key/value map of parameters to change, e.g. {"ctx-size": 8192, "model": "...", "backendType": "vulkan"}. Set "backend"/"backendKey" to "" (empty string) to unpin and go back to following the Global Backend.' }
@@ -1586,12 +1657,12 @@ export const TOOL_DEFS: ToolDef[] = [
   },
   {
     name: 'display-parameters-common', handler: toolDisplayParametersCommon,
-    description: 'Show a Template\'s parameters the same way the app\'s interface shows them (label + raw flag + stored value + type), filtered to the curated "Common Parameters" set (ctx-size, threads, gpu-layers, batch/ubatch size, parallel, flash-attn, sampling, KV cache type/offload, load-mode, keep, seed) — only those actually set on the Template. Also includes a "toggles" array (N-gram Map (K4V), N-gram Modifier, Automatic YaRN scaling control, Multimodal Projector, Offload mmproj to RAM, Speculative Decoding) showing each toggle\'s on/off state and any active sub-parameters — pass a toggle\'s label straight to template-edit to flip it with defaults auto-applied. These are the Template\'s stored values, not the resolved launch command — use display-preview for that. Try this before display-parameters-full — reach for -full only if the parameter you need isn\'t in this curated set, since it returns everything unfiltered and costs more context.',
+    description: 'Show a Template\'s parameters the same way the app\'s interface shows them (label + raw flag + stored value + type), filtered to the curated "Common Parameters" set (ctx-size, threads, gpu-layers, batch/ubatch size, parallel, flash-attn, sampling, KV cache type/offload, load-mode, keep, seed) — only those actually set on the Template. Also lists "Custom Arguments" (flag "custom-args", the free-text extra flags) as a parameter whenever it is set. Also includes a "toggles" array (N-gram Map (K4V), N-gram Modifier, Automatic YaRN scaling control, Multimodal Projector, Offload mmproj to RAM, Speculative Decoding) showing each toggle\'s on/off state and any active sub-parameters — pass a toggle\'s label straight to template-edit to flip it with defaults auto-applied. These are the Template\'s stored values, not the resolved launch command — use display-preview for that. Try this before display-parameters-full — reach for -full only if the parameter you need isn\'t in this curated set, since it returns everything unfiltered and costs more context.',
     params: [{ name: 'template', type: 'string', required: true, description: 'Template name' }]
   },
   {
     name: 'display-parameters-full', handler: toolDisplayParametersFull,
-    description: 'Show every parameter actually set on a Template, unfiltered, the same way the app\'s interface shows them (label + raw flag + stored value + type). Also includes the same "toggles" array as display-parameters-common (N-gram Map (K4V), N-gram Modifier, Automatic YaRN scaling control, Multimodal Projector, Offload mmproj to RAM, Speculative Decoding). These are the Template\'s stored values, not the resolved launch command — use display-preview for that. Costs more context than display-parameters-common\'s curated subset — use that first and only fall back to this if the parameter you\'re after wasn\'t in it.',
+    description: 'Show every parameter actually set on a Template, unfiltered, the same way the app\'s interface shows them (label + raw flag + stored value + type). Includes "Custom Arguments" (flag "custom-args") when set. Also includes the same "toggles" array as display-parameters-common (N-gram Map (K4V), N-gram Modifier, Automatic YaRN scaling control, Multimodal Projector, Offload mmproj to RAM, Speculative Decoding). These are the Template\'s stored values, not the resolved launch command — use display-preview for that. Costs more context than display-parameters-common\'s curated subset — use that first and only fall back to this if the parameter you\'re after wasn\'t in it.',
     params: [{ name: 'template', type: 'string', required: true, description: 'Template name' }]
   },
   {

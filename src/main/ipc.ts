@@ -24,7 +24,7 @@ import { compareBackendVersions, isComparableBackendVersion, selectLatestRelease
 import { BEELLAMA_BACKEND_KEY, BEELLAMA_KV_TYPES, BEELLAMA_EXTRA_COMMANDS } from '../shared/backendForks'
 import { initPerfMonitor, registerPerfHandlers, startTracking, stopTracking, stopAllTracking } from './perfMonitor'
 import { initMcpLayer, registerMcpHandlers } from './mcpServer'
-import { toolTemplateAction } from './mcpControl'
+import { toolTemplateAction, launchCommandForId } from './mcpControl'
 import { randomBytes } from 'crypto'
 import { engineOf, type EngineId } from '../shared/engines'
 import { assetMatchesHost } from '../shared/assetPlatform'
@@ -2872,6 +2872,39 @@ export function registerIpcHandlers(): void {
     return { success: true }
   }
   ipcMain.handle('reorder-templates', (_e, orderedIds: string[]) => reorderTemplatesImpl(orderedIds))
+  // Folders live outside TEMPLATES_DIR, which holds one Template per file.
+  const FOLDERS_FILE = join(APP_ROOT, 'template-folders.json')
+  ipcMain.handle('list-template-folders', () => {
+    try {
+      const raw = JSON.parse(readFileSync(FOLDERS_FILE, 'utf-8'))
+      return Array.isArray(raw) ? raw.filter(f => f && typeof f.id === 'string' && typeof f.name === 'string') : []
+    } catch { return [] }
+  })
+  ipcMain.handle('save-template-folders', (_e, folders: unknown) => {
+    if (!Array.isArray(folders)) return { success: false }
+    writeFileSync(FOLDERS_FILE, JSON.stringify(folders, null, 2))
+    return { success: true }
+  })
+  // Sets only the folder of each Template file, then announces one change.
+  ipcMain.handle('move-templates', (_e, ids: string[], folderId: string | null) => {
+    for (const id of ids) {
+      const fp = join(TEMPLATES_DIR, `${id}.json`)
+      if (!isSafePath(TEMPLATES_DIR, fp) || !existsSync(fp)) continue
+      try {
+        const template = JSON.parse(readFileSync(fp, 'utf-8'))
+        template.folderId = folderId
+        writeFileSync(fp, JSON.stringify(template, null, 2))
+      } catch {}
+    }
+    BrowserWindow.getAllWindows().forEach(win => {
+      if (!win.isDestroyed()) win.webContents.send('templates-changed')
+    })
+    return { success: true }
+  })
+  ipcMain.handle('get-launch-command', async (_e, id: string) => {
+    try { return { command: await launchCommandForId(id) } }
+    catch (err: any) { return { error: err?.message || String(err) } }
+  })
   async function saveTemplateImpl(template: Record<string, unknown>): Promise<{ success: true; id: string }> {
     const id = (template.id as string) || Date.now().toString()
     const fp = join(TEMPLATES_DIR, `${id}.json`)
@@ -2975,6 +3008,7 @@ export function registerIpcHandlers(): void {
     // Template already main for that port on this machine.
     delete data.mainForPort
     delete data.mainStarredAt
+    delete data.folderId
     // Apply the same '--mmap'/'--mlock' → '--load-mode' migration as
     // list-templates, so an imported template (possibly exported from an
     // older version of the app) is normalized immediately rather than

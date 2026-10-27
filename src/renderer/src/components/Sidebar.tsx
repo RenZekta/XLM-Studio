@@ -240,7 +240,7 @@ export default function Sidebar() {
         onClick={() => setView('cards')}
       >
         <LayoutGrid size={16} />
-        <span className="nav-item-text">My Templates</span>
+        <span className="nav-item-text">Templates</span>
       </button>
       <button
         className={`nav-item ${view === 'models' ? 'active' : ''}`}

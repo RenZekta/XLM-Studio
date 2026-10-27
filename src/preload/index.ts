@@ -64,6 +64,10 @@ const api = {
   // ----- Templates -----
   listTemplates: () => ipcRenderer.invoke('list-templates'),
   reorderTemplates: (orderedIds: string[]) => ipcRenderer.invoke('reorder-templates', orderedIds),
+  listTemplateFolders: () => ipcRenderer.invoke('list-template-folders'),
+  saveTemplateFolders: (folders: unknown[]) => ipcRenderer.invoke('save-template-folders', folders),
+  moveTemplates: (ids: string[], folderId: string | null) => ipcRenderer.invoke('move-templates', ids, folderId),
+  getLaunchCommand: (id: string) => ipcRenderer.invoke('get-launch-command', id),
   saveTemplate: (template: object, opts?: { silentSync?: boolean }) => ipcRenderer.invoke('save-template', template, opts),
   deleteTemplate: (id: string) => ipcRenderer.invoke('delete-template', id),
   importTemplate: () => ipcRenderer.invoke('import-template'),

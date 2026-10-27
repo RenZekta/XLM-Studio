@@ -159,6 +159,9 @@ export interface Template {
   serverPort: number
   args: Record<string, string | number | boolean | null>
   tags?: string[]
+  // The Templates-page folder this Template sits in; null or absent is the
+  // top level. A folder id that no longer exists reads as the top level.
+  folderId?: string | null
   // Deprecated: the per-Template Chat UI/API Only switch was removed (the
   // bundled webui is always available, "Open Chat" is always offered once
   // running — see settings.modelDefaults.autoOpenChatUI for the one
@@ -279,6 +282,14 @@ export interface ReleaseInfo {
 // die + the port to be released (Stop→Start race fix). The Start button is
 // disabled and shows a spinner during this short window.
 export type RunningStatus = 'idle' | 'running' | 'stopping' | 'error'
+// A folder on the Templates page. Folders only group Templates for display;
+// a Template's launch never depends on where it sits.
+export interface TemplateFolder {
+  id: string
+  name: string
+  parentId: string | null
+}
+
 export interface CardState {
   template: Template
   status: RunningStatus

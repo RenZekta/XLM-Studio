@@ -1,5 +1,5 @@
 import type {
-  Template, BackendVersion, CommandsSchema, ReleaseInfo,
+  Template, TemplateFolder, BackendVersion, CommandsSchema, ReleaseInfo,
   ModelGroup, TrackedBackend, TrackedBackendRelease, ThemePref,
   CpuInfo, SpeculationMode, KvCacheCheckpointSettings, RedundantCheckpoint, CheckpointMode, StrataSettings
 } from '../../shared/types'
@@ -76,6 +76,10 @@ interface LlamaCppApi {
   // Templates
   listTemplates: () => Promise<Template[]>
   reorderTemplates: (orderedIds: string[]) => Promise<{ success: boolean }>
+  listTemplateFolders: () => Promise<TemplateFolder[]>
+  saveTemplateFolders: (folders: TemplateFolder[]) => Promise<{ success: boolean }>
+  moveTemplates: (ids: string[], folderId: string | null) => Promise<{ success: boolean }>
+  getLaunchCommand: (id: string) => Promise<{ command?: string; error?: string }>
   saveTemplate: (template: object, opts?: { silentSync?: boolean }) => Promise<{ success: boolean; id: string }>
   deleteTemplate: (id: string) => Promise<{ success: boolean }>
   importTemplate: () => Promise<Template | null>
