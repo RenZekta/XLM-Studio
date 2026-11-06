@@ -17,10 +17,10 @@ import { activeServerOverrides, findPortConflict } from '../utils/templatePort'
 import { strataInfoFor } from '../../../shared/strata'
 // Starting values of a new Template for an engine: llama.cpp gets the starred
 // sampling preset plus the Quick baseline, Strata the Quick baseline of the
-// few settings it shares (context, KV precision, image input).
-function seedArgsFor(engine: EngineId, activeBackend: BackendVersion | null, samplingPresets: any, meta: any, hasVision: boolean): Record<string, any> {
+// few settings it shares (context, KV precision).
+function seedArgsFor(engine: EngineId, activeBackend: BackendVersion | null, samplingPresets: any, meta: any): Record<string, any> {
   if (engine === 'strata') {
-    return { ...buildStrataQuickBaseline({ contextLength: meta?.contextLength, hasVision }), __lastPreset: 'quick' }
+    return { ...buildStrataQuickBaseline({ contextLength: meta?.contextLength }), __lastPreset: 'quick' }
   }
   const seeded: Record<string, any> = seedSamplingArgsFromPreset(samplingPresets)
   Object.assign(seeded, buildQuickEngineBaseline({
@@ -83,7 +83,7 @@ export default function CreateModal() {
     // what clicking Quick manually would produce.
     const startEngine: EngineId = autoEngineFor(prefillModelPath ? useStore.getState().ggufMetadata[prefillModelPath] : undefined, backends)
     const startMeta = prefillModelPath ? useStore.getState().ggufMetadata[prefillModelPath] : undefined
-    return seedArgsFor(startEngine, activeBackend, samplingPresets, startMeta, false)
+    return seedArgsFor(startEngine, activeBackend, samplingPresets, startMeta)
   })
   const [tagsStr, setTagsStr] = useState('')
   const [showAdvanced, setShowAdvanced] = useState(false)
@@ -141,7 +141,7 @@ export default function CreateModal() {
       if (!isFirstRun) {
         // Stay consistent with the lazy initializer above — a real reseed
         // should also reapply the Quick engine baseline, not just sampling.
-        setArgs(seedArgsFor(engine, activeBackend, samplingPresets, undefined, false))
+        setArgs(seedArgsFor(engine, activeBackend, samplingPresets, undefined))
         setTagsStr('')
       }
       if (prefillModelPath) {
@@ -259,7 +259,7 @@ export default function CreateModal() {
       setBackendVersion(restored.backendVersion || '')
       setBackendType(restored.backendType ?? null)
     } else {
-      setArgs(seedArgsFor(next, activeBackend, samplingPresets, meta, false))
+      setArgs(seedArgsFor(next, activeBackend, samplingPresets, meta))
       pinTo(undefined)
     }
   }
@@ -450,7 +450,7 @@ export default function CreateModal() {
               </label>
               <div className="form-hint">
                 {engineBuilds.length === 0
-                  ? `${ENGINES[engine].label} is not installed. Install it from Settings > Engine tracker.`
+                  ? `${ENGINES[engine].label} is not installed. Install it from Settings > Engine Tracker.`
                   : follow
                     ? `Uses ${shownBuild?.displayName || ENGINES[engine].label}, the engine's selection in the sidebar. Choosing a repo or backend below pins this Template to it.`
                     : 'Pinned: this Template keeps using the repo below when the global selection changes.'}
@@ -527,7 +527,7 @@ export default function CreateModal() {
                 <div className="form-hint">
                   {suggested.label} can run this model ({STRATA_VERDICT_TEXT[modelMeta?.strata?.kind || 'known'].toLowerCase()}).{' '}
                   {missingEngine === suggested.id
-                    ? `It is not installed: install it from Settings > Engine tracker.`
+                    ? `It is not installed: install it from Settings > Engine Tracker.`
                     : <button type="button" className="btn btn-ghost btn-sm" onClick={() => switchEngine(suggested.id)}>Use {suggested.label}</button>}
                 </div>
               )}

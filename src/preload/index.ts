@@ -2,7 +2,7 @@ import { contextBridge, ipcRenderer } from 'electron'
 import { electronAPI } from '@electron-toolkit/preload'
 import type {
   ModelGroup, BackendVersion, TrackedBackend,
-  TrackedBackendRelease, ThemePref, ReleaseInfo, CpuInfo, SpecDetectionResult, StrataSettings
+  TrackedBackendRelease, ThemePref, ReleaseInfo, CpuInfo, SpecDetectionResult, StrataSettings, EngineInstallMode
 } from '../shared/types'
 import type { EngineId } from '../shared/engines'
 
@@ -198,8 +198,21 @@ const api = {
   updateTrackedEngines: () => ipcRenderer.invoke('update-tracked-engines') as Promise<{ updated: string[]; errors: string[] }>,
   installGitEngine: (trackedId: string) => ipcRenderer.invoke('install-git-engine', trackedId) as Promise<{ success: boolean; error?: string; path?: string }>,
   updateGitEngine: (trackedId: string) => ipcRenderer.invoke('update-git-engine', trackedId) as Promise<{ success: boolean; error?: string; updated?: boolean; skipped?: string }>,
-  getEngineSettings: () => ipcRenderer.invoke('get-engine-settings') as Promise<{ autoUpdateTrackedEngines: boolean; strata: StrataSettings; strataDataDir: string; strataRememberedDataDir: string | null; gitAvailable: boolean }>,
+  getEngineSettings: () => ipcRenderer.invoke('get-engine-settings') as Promise<{ autoUpdateTrackedEngines: boolean; engineInstallMode: EngineInstallMode; autoUpdateBuildTools: boolean; rocmChannel: 'stable' | 'nightly'; rocmSource: 'tarball' | 'pip'; strata: StrataSettings; strataDataDir: string; strataRememberedDataDir: string | null; gitAvailable: boolean }>,
   setAutoUpdateTrackedEngines: (enabled: boolean) => ipcRenderer.invoke('set-auto-update-tracked-engines', enabled) as Promise<{ success: boolean }>,
+  setEngineInstallMode: (mode: EngineInstallMode) => ipcRenderer.invoke('set-engine-install-mode', mode) as Promise<{ success: boolean }>,
+  buildFromSource: (opts: { trackedId: string; type: string; extraArgs?: string; installTools?: boolean; gpuTarget?: string; pull?: boolean }) => ipcRenderer.invoke('build-from-source', opts) as Promise<{ success: boolean; path?: string; error?: string }>,
+  cancelSourceBuild: (trackedId: string, type: string) => ipcRenderer.invoke('cancel-source-build', trackedId, type) as Promise<{ success: boolean }>,
+  getBuildToolsPlan: (type: string, gpuTarget?: string) => ipcRenderer.invoke('get-build-tools-plan', type, gpuTarget) as Promise<{ manager: string | null; tools: { id: string; label: string; present: boolean; installable: boolean; reason?: string; outdated: boolean; detail?: string; needsGpu?: boolean }[] } | null>,
+  getRocmGpus: () => ipcRenderer.invoke('get-rocm-gpus') as Promise<{ detected: { name: string; gfx: string | null }[]; gpus: { gfx: string; label: string; family: string }[] }>,
+  setRocmChannel: (channel: 'stable' | 'nightly') => ipcRenderer.invoke('set-rocm-channel', channel) as Promise<{ success: boolean }>,
+  setRocmSource: (source: 'tarball' | 'pip') => ipcRenderer.invoke('set-rocm-source', source) as Promise<{ success: boolean }>,
+  installBuildTools: (opts: { type: string; mode: 'install' | 'update'; gpuTarget?: string }) => ipcRenderer.invoke('install-build-tools', opts) as Promise<{ success: boolean; error?: string }>,
+  setAutoUpdateBuildTools: (enabled: boolean) => ipcRenderer.invoke('set-auto-update-build-tools', enabled) as Promise<{ success: boolean }>,
+  onEngineUpdateState: (cb: (data: { trackedId: string; busy: boolean }) => void) => {
+    ipcRenderer.removeAllListeners('engine-update-state')
+    ipcRenderer.on('engine-update-state', (_e, data) => cb(data))
+  },
   setStrataSettings: (patch: { pullBeforeLaunch?: boolean; parallelOverride?: number | null; data?: Partial<StrataSettings['data']> }) => ipcRenderer.invoke('set-strata-settings', patch) as Promise<{ success: boolean }>,
   pickStrataDataFolder: () => ipcRenderer.invoke('pick-strata-data-folder') as Promise<string | null>,
   getGlobalEngineBackends: () => ipcRenderer.invoke('get-global-engine-backends') as Promise<Partial<Record<EngineId, { backendKey: string }>>>,

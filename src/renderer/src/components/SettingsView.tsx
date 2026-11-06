@@ -4,7 +4,7 @@ import { useStore } from '../store/useStore'
 import {
   HardDrive, Download, Trash, RefreshCw, Loader2, ChevronDown, Terminal,
   Bell, BellOff, Folder, Monitor, Moon, Sun, Plus, Link2,
-  AlertCircle, ExternalLink, Cpu, Layers, Database, Key, ChevronUp } from 'lucide-react'
+  AlertCircle, ExternalLink, Cpu, Layers, Database, Key, ChevronUp, Hammer, GitBranch } from 'lucide-react'
 import CommandsEditor from './CommandsEditor'
 import ExternalFolderList from './ExternalFolderList'
 import McpSettingsSection from './McpSettingsSection'
@@ -12,8 +12,9 @@ import LaunchSettingsSection from './LaunchSettingsSection'
 import { changeTheme } from '../hooks/useTheme'
 import { formatBytes } from '../utils/format'
 import SegmentedToggle from './SegmentedToggle'
+import SourceBuildPanel from './SourceBuildPanel'
 import { ENGINES, engineOf, type EngineId } from '../../../shared/engines'
-import type { StrataSettings } from '../../../shared/types'
+import type { StrataSettings, EngineInstallMode } from '../../../shared/types'
 import { pickDefaultAsset, setLastAssetType } from '../utils/backendAssetPref'
 import type { ThemePref, TrackedBackend, TrackedBackendRelease, RedundantCheckpoint } from '../../../shared/types'
 
@@ -34,7 +35,7 @@ export default function SettingsView() {
     trackedBackends, trackerResults, checkingAllBackends,
     setExternalModelFolders, setExternalBackendFolders,
     setMainModelFolder, setMainBackendFolder, setTrackedBackends,
-    setTrackerResult, setCheckingAllBackends,
+    setTrackerResult, setCheckingAllBackends, engineUpdating,
     kvCacheCheckpoints, setKvCacheCheckpoints,
     modelDefaults, setModelDefaults, engineGlobals, setEngineGlobals
   } = useStore()
@@ -46,10 +47,11 @@ export default function SettingsView() {
   const [customBackendErr, setCustomBackendErr] = useState('')
   // Engine override for the Add dialog: '' = detect from the repository.
   const [customEngine, setCustomEngine] = useState<'' | EngineId>('')
+  const [installedOpen, setInstalledOpen] = useState(false)
   const [gitBusy, setGitBusy] = useState<Record<string, string>>({})
   const [gitError, setGitError] = useState<Record<string, string>>({})
   const [engineSettings, setEngineSettings] = useState<{
-    autoUpdateTrackedEngines: boolean; strata: StrataSettings; strataDataDir: string
+    autoUpdateTrackedEngines: boolean; engineInstallMode: EngineInstallMode; autoUpdateBuildTools: boolean; rocmChannel: 'stable' | 'nightly'; rocmSource: 'tarball' | 'pip'; strata: StrataSettings; strataDataDir: string
     strataRememberedDataDir: string | null; gitAvailable: boolean
   } | null>(null)
   const refreshEngineSettings = useCallback(async () => {
@@ -290,7 +292,319 @@ export default function SettingsView() {
     await changeTheme(t)
   }
 
-  const anyUpdatesDetected = trackedBackends.some(t => trackerResults[t.id]?.assets?.some(a => a.status === 'outdated') || (t.kind === 'git' && trackerResults[t.id]?.git?.updateAvailable))
+  const installMode = engineSettings?.engineInstallMode ?? 'binary'
+
+  async function handleSetInstallMode(mode: EngineInstallMode) {
+    await window.api.setEngineInstallMode(mode)
+    await refreshEngineSettings()
+    handleCheckAllBackends()
+  }
+
+  async function handleSourceChanged(t: TrackedBackend) {
+    setBackends(await window.api.listBackends())
+    const updated = await window.api.checkTrackedBackend(t.id)
+    if (!('error' in updated)) setTrackerResult(updated)
+  }
+
+  // One Repo block per repository: the entries that follow different branches
+  // of it are listed inside it, the default-branch entry first.
+  const trackerGroups: TrackedBackend[][] = []
+  for (const t of trackedBackends) {
+    const group = trackerGroups.find(g => g[0].repo.toLowerCase() === t.repo.toLowerCase())
+    if (group) group.push(t)
+    else trackerGroups.push([t])
+  }
+  for (const g of trackerGroups) g.sort((a, b) => (a.branch ? 1 : 0) - (b.branch ? 1 : 0))
+
+  function renderEntryButtons(t: TrackedBackend) {
+    const release = trackerResults[t.id]
+    return (
+      <>
+        {release?.url && (
+          <button
+            className="btn btn-ghost btn-icon"
+            onClick={() => window.api.openExternal(release.url)}
+            title={release.source ? 'Open on GitHub' : 'Open release on GitHub'}
+          >
+            <ExternalLink size={14} />
+          </button>
+        )}
+        {!t.isDefault && (
+          <button
+            className="btn btn-ghost btn-icon text-danger"
+            onClick={() => handleRemoveTrackedBackend(t)}
+            title={t.branch ? 'Stop tracking this branch' : 'Stop tracking this fork'}
+          >
+            <Trash size={14} />
+          </button>
+        )}
+      </>
+    )
+  }
+
+  function renderTrackerEntry(t: TrackedBackend) {
+    const release = trackerResults[t.id]
+    const loadingThis = checkingAllBackends && !release
+    const selectedUrl = selectedAssetByUrl[t.id] || pickDefaultAsset(t.id, release?.assets || [])
+    const selectedAsset = release?.assets.find(a => a.downloadUrl === selectedUrl)
+    // Progress is keyed per (backend, asset) -- several of this
+    // backend's own variants can be queued/downloading at once (via
+    // Update), so only the currently-SELECTED asset's progress is
+    // shown inline next to the Download button.
+    const outdatedAssets = release?.assets.filter(a => a.status === 'outdated') || []
+    // Every asset of this backend that's currently queued or
+    // downloading, regardless of which one is selected in the
+    // dropdown right now -- switching the dropdown selection must
+    // never hide the fact that something is still working in the
+    // background (this drives both the "N builds..." list below and
+    // the busy state on the primary button when it IS the selected
+    // one).
+    const busyAssets = release?.assets.filter(a => downloadProgress[`${t.id}::${a.name}`]) || []
+    const otherBusyAssets = busyAssets.filter(a => a.name !== selectedAsset?.name)
+    const gitBusyNow = !!gitBusy[t.id] || !!engineUpdating[t.id]
+    // A result from before the install method was switched is not shown as
+    // if it described the current one.
+    const wrongMode = !!release && !release.error && !release.needsSource && t.kind !== 'git' && (installMode === 'source') !== !!release.source
+    return (
+      <>
+      {loadingThis || wrongMode ? (
+        <div className="tracker-release" style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+          <Loader2 size={13} className="spin" /> {installMode === 'source' ? 'Checking GitHub for the latest commit...' : 'Checking GitHub for releases...'}
+        </div>
+      ) : release?.needsSource ? (
+        <div className="tracker-release" style={{ display: 'flex', flexDirection: 'column', gap: 8, alignItems: 'flex-start' }}>
+          <span>
+            <AlertCircle size={13} style={{ display: 'inline', marginRight: 6 }} />
+            {release.needsSource === 'branch'
+              ? `Binaries are published per release, not per branch, so "${t.branch}" can only be built from source.`
+              : 'This repository has no releases, so there is no binary to download. Build it from source instead?'}
+          </span>
+          <button className="btn btn-secondary btn-sm" onClick={() => handleSetInstallMode('source')}>
+            <Hammer size={13} /> Switch to Build from Source
+          </button>
+        </div>
+      ) : release?.error ? (
+        <div className="tracker-release" style={{ color: 'var(--danger)' }}>
+          <AlertCircle size={13} style={{ display: 'inline', marginRight: 6 }} />
+          Error: {release.error}
+        </div>
+      ) : release ? (
+        <>
+          <div className="tracker-release">
+            <strong>{release.name || release.tagName}</strong>
+            {release.publishedAt && (
+              <span style={{ marginLeft: 8, color: 'var(--text-muted)' }}>
+                Published: {new Date(release.publishedAt).toLocaleDateString()}
+              </span>
+            )}
+            {release.isNewer === false && <span className="up-to-date">✓ Up to date</span>}
+            {release.isNewer === true && <span className="new-badge">Update available</span>}
+          </div>
+          {release.source && t.kind !== 'git' && (
+            <SourceBuildPanel
+              t={t}
+              release={release}
+              autoUpdateTools={engineSettings?.autoUpdateBuildTools !== false}
+                        rocmSource={engineSettings?.rocmSource ?? 'tarball'}
+              onChanged={() => handleSourceChanged(t)}
+              onDeleteType={type => handleDeleteBackendType(t, { name: type, type })}
+            />
+          )}
+          {t.kind === 'git' && release.git && (
+            <div className="tracker-assets-row" style={{ alignItems: 'center', flexWrap: 'wrap', gap: 10 }}>
+              {release.git.installed ? (
+                <>
+                  <span style={{ fontSize: 12 }}>Installed: <strong>{release.git.localVersion}</strong></span>
+                  {/* Only when there is something to pull (or while pulling). With no release
+                      tag to compare against, whether there is an update is not known, so the
+                      button stays as the manual way to pull the branch. */}
+                  {(release.git.updateAvailable || !release.git.latestTag || gitBusyNow) && (
+                    <button
+                      className="btn btn-primary btn-sm"
+                      disabled={gitBusyNow}
+                      onClick={() => runGitAction(t, 'update')}
+                      title="git fetch and fast-forward (or reset) to the upstream branch"
+                    >
+                      {(gitBusy[t.id] === 'update' || !!engineUpdating[t.id]) ? <Loader2 size={13} className="spin" /> : <RefreshCw size={13} />} {gitBusyNow ? 'Updating...' : 'Update now'}
+                    </button>
+                  )}
+                </>
+              ) : (
+                <button className="btn btn-primary btn-sm" disabled={gitBusyNow} onClick={() => runGitAction(t, 'install')}>
+                  {gitBusy[t.id] === 'install' ? <Loader2 size={13} className="spin" /> : <Download size={13} />} {gitBusy[t.id] === 'install' ? 'Cloning...' : 'Install (git clone)'}
+                </button>
+              )}
+              {engineSettings && !engineSettings.gitAvailable && (
+                <span style={{ fontSize: 12, color: 'var(--warning)' }}>git was not found on PATH.</span>
+              )}
+              {gitError[t.id] && <span style={{ fontSize: 12, color: 'var(--danger)' }}>{gitError[t.id]}</span>}
+            </div>
+          )}
+          {(release.assets.length > 0 || (release.otherPlatform?.length ?? 0) > 0) && (
+            <div className="tracker-assets-row" style={{ alignItems: 'center', flexWrap: 'wrap' }}>
+              <div className={`asset-picker select-menu select-menu-field${openDropdownId === t.id ? ' open' : ''}`} style={{ minWidth: 260 }}>
+                <button
+                  type="button"
+                  className="btn btn-secondary select-menu-btn"
+                  onClick={() => setOpenDropdownId(openDropdownId === t.id ? null : t.id)}
+                >
+                  <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                    {selectedAsset ? `${selectedAsset.name} (${formatBytes(selectedAsset.size)})` : 'Select a build...'}
+                  </span>
+                  {openDropdownId === t.id ? <ChevronUp size={13} style={{ flexShrink: 0 }} /> : <ChevronDown size={13} style={{ flexShrink: 0 }} />}
+                </button>
+                {openDropdownId === t.id && (
+                  <div
+                    className="asset-dropdown-menu"
+                    style={{
+                      position: 'absolute', top: '100%', left: 0, right: 0, zIndex: 20,
+                      marginTop: 4, background: 'var(--surface-2, var(--surface))', border: '1px solid var(--border)',
+                      borderRadius: 8, boxShadow: '0 8px 24px rgba(0,0,0,.25)', maxHeight: 280, overflowY: 'auto'
+                    }}
+                  >
+                    {release.assets.map(a => (
+                      <div
+                        key={a.downloadUrl}
+                        onClick={() => {
+                          setSelectedAssetByUrl(prev => ({ ...prev, [t.id]: a.downloadUrl }))
+                          setLastAssetType(t.id, a.name)
+                          setOpenDropdownId(null)
+                        }}
+                        style={{
+                          display: 'flex', alignItems: 'center', gap: 8, padding: '8px 10px',
+                          cursor: 'pointer', borderBottom: '1px solid var(--border)'
+                        }}
+                        onMouseEnter={e => (e.currentTarget.style.background = 'var(--hover, rgba(255,255,255,.05))')}
+                        onMouseLeave={e => (e.currentTarget.style.background = 'transparent')}
+                      >
+                        <span style={{ flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', fontSize: 13 }}>
+                          {a.name} <span style={{ color: 'var(--text-muted)' }}>({formatBytes(a.size)})</span>
+                        </span>
+                        {downloadProgress[`${t.id}::${a.name}`] ? (
+                          <Loader2 size={12} className="spin" style={{ flexShrink: 0, color: 'var(--text-muted)' }} />
+                        ) : a.status !== 'not-installed' ? (
+                          <button
+                            className="btn btn-ghost btn-icon text-danger"
+                            onClick={e => { e.stopPropagation(); handleDeleteBackendType(t, a) }}
+                            title={`Delete installed "${a.type}" build`}
+                            style={{ flexShrink: 0, padding: 2 }}
+                          >
+                            <Trash size={12} />
+                          </button>
+                        ) : null}
+                      </div>
+                    ))}
+                    {(release.otherPlatform || []).map(o => (
+                      <div
+                        key={`${o.platform}::${o.type}::${o.version}`}
+                        title={`Made for ${o.platform}, so it cannot run on this machine. Listed so it can be removed.`}
+                        style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '8px 10px', borderBottom: '1px solid var(--border)', opacity: 0.75 }}
+                      >
+                        <span style={{ flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', fontSize: 13 }}>
+                          {o.type} <span style={{ color: 'var(--text-muted)' }}>({o.platform} build {o.version}, installed)</span>
+                        </span>
+                        <button
+                          className="btn btn-ghost btn-icon text-danger"
+                          onClick={e => { e.stopPropagation(); handleDeleteBackendType(t, { name: o.type, type: o.type }, o.platform) }}
+                          title={`Delete the ${o.platform} "${o.type}" build`}
+                          style={{ flexShrink: 0, padding: 2 }}
+                        >
+                          <Trash size={12} />
+                        </button>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+              {(() => {
+                const myProgress = selectedAsset ? downloadProgress[`${t.id}::${selectedAsset.name}`] : undefined
+                const isQueued = myProgress?.phase === 'queued'
+                const isActive = !!myProgress && !isQueued
+                return isQueued ? (
+                  <div className="text-sm flex items-center gap-3" style={{ color: 'var(--text-muted)' }}>
+                    <Loader2 size={14} className="spin" />
+                    {`Queued (#${myProgress?.queuePosition || 1})`}
+                    <button
+                      className="btn btn-ghost btn-sm text-danger"
+                      onClick={() => { window.api.cancelBackendDownload(t.id, selectedAsset?.name); setDownloadProgress(`${t.id}::${selectedAsset?.name}`, null) }}
+                      style={{ padding: '0 8px' }}
+                    >
+                      Cancel
+                    </button>
+                  </div>
+                ) : isActive ? (
+                  <div className="text-sm flex items-center gap-3" style={{ color: 'var(--text-muted)' }}>
+                    <Loader2 size={14} className="spin" />
+                    {myProgress?.phase === 'extracting' ? 'Extracting...' : `Downloading... ${myProgress?.percent || 0}%`}
+                    <button
+                      className="btn btn-ghost btn-sm text-danger"
+                      onClick={() => { window.api.cancelBackendDownload(t.id, selectedAsset?.name); setDownloadProgress(`${t.id}::${selectedAsset?.name}`, null) }}
+                      style={{ padding: '0 8px' }}
+                    >
+                      Cancel
+                    </button>
+                  </div>
+                ) : (
+                  <div style={{ display: 'flex', gap: 6 }}>
+                    <button
+                      className="btn btn-primary btn-sm"
+                      onClick={() => selectedAsset && handleDownloadAsset(t, selectedAsset, release)}
+                      disabled={!selectedAsset}
+                    >
+                      <Download size={13} /> {selectedAsset?.status === 'installed' ? 'Re-download' : 'Download'}
+                    </button>
+                    {outdatedAssets.length > 0 && (
+                      <button
+                        className="btn btn-secondary btn-sm"
+                        onClick={() => handleUpdateBackend(t, release)}
+                        title={`Update ${outdatedAssets.length} installed build${outdatedAssets.length === 1 ? '' : 's'}`}
+                      >
+                        <RefreshCw size={13} /> Update ({outdatedAssets.length})
+                      </button>
+                    )}
+                  </div>
+                )
+              })()}
+              {/* Any OTHER build of this backend that's queued/downloading in the
+                  background -- shown regardless of which one is currently selected
+                  in the dropdown above, so switching selection never hides the fact
+                  that something is still working. */}
+              {otherBusyAssets.length > 0 && (
+                <div style={{ display: 'flex', flexDirection: 'column', gap: 4, width: '100%' }}>
+                  {otherBusyAssets.map(a => {
+                    const p = downloadProgress[`${t.id}::${a.name}`]
+                    const label = p?.phase === 'queued'
+                      ? `Queued (#${p.queuePosition || 1})`
+                      : p?.phase === 'extracting' ? 'Extracting...' : `Downloading... ${p?.percent || 0}%`
+                    return (
+                      <div key={a.name} className="text-sm flex items-center gap-3" style={{ color: 'var(--text-muted)' }}>
+                        <Loader2 size={13} className="spin" />
+                        <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{a.type}: {label}</span>
+                        <button
+                          className="btn btn-ghost btn-sm text-danger"
+                          onClick={() => { window.api.cancelBackendDownload(t.id, a.name); setDownloadProgress(`${t.id}::${a.name}`, null) }}
+                          style={{ padding: '0 8px' }}
+                        >
+                          Cancel
+                        </button>
+                      </div>
+                    )
+                  })}
+                </div>
+              )}
+            </div>
+          )}
+        </>
+      ) : (
+        <div className="tracker-release" style={{ color: 'var(--text-muted)' }}>
+          Click "Check for updates" to query GitHub for the latest release.
+        </div>
+      )}
+      </>
+    )
+  }
+
+  const anyUpdatesDetected = trackedBackends.some(t => trackerResults[t.id]?.assets?.some(a => a.status === 'outdated') || trackerResults[t.id]?.source?.builds.some(b => b.outdated) || (t.kind === 'git' && trackerResults[t.id]?.git?.updateAvailable))
 
   return (
     <div className="max-w-3xl">
@@ -580,7 +894,7 @@ export default function SettingsView() {
           <p style={{ fontSize: 13, color: 'var(--text-secondary)', lineHeight: 1.6 }}>
             Add folders that contain pre-built llama.cpp backends (e.g. a folder where you keep several
             compiled forks). Star one to make it the <strong>main engines folder</strong>: engines
-            downloaded through the Engine tracker land there, under <code>&lt;fork-name&gt;/&lt;version&gt;/</code>.
+            downloaded through the Engine Tracker land there, under <code>&lt;fork-name&gt;/&lt;version&gt;/</code>.
             Same star/sort mechanics as model folders.
           </p>
           <ExternalFolderList
@@ -757,73 +1071,157 @@ export default function SettingsView() {
         <div className="settings-section-title"><HardDrive /> Installed Engines</div>
         {backends.length === 0 ? (
           <div className="text-center py-6 text-sm" style={{ color: 'var(--text-muted)' }}>
-            No engines installed. Download one from the Engine tracker below.
+            No engines installed. Download one from the Engine Tracker below.
           </div>
         ) : (
-          <div className="flex flex-col gap-2">
-            {backends.map((b) => (
-              <div key={b.id}>
-                <div className="settings-row">
-                  <div style={{ minWidth: 0, flex: 1 }}>
-                    <div className="settings-row-label flex items-center gap-2">
-                      <Layers size={13} style={{ color: 'var(--text-muted)', flexShrink: 0 }} />
-                      <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{b.displayName}</span>
-                      {engineOf(b) !== 'llama.cpp' && <span className="version-badge">{ENGINES[engineOf(b)].label}</span>}
-                      {(engineOf(b) === 'llama.cpp'
-                        ? activeBackend?.id === b.id
-                        : engineGlobals[engineOf(b)]?.backendKey === b.backendKey) && <span className="version-badge active-version">Active</span>}
-                      {!b.hasCommands && <span className="version-badge">Fallback Schema</span>}
-                      {b.external && <span className="version-badge">External</span>}
+          <div className="collapsible-section" style={{ width: '100%' }}>
+            <button
+              type="button"
+              className="collapsible-toggle"
+              onClick={() => setInstalledOpen(o => !o)}
+              aria-expanded={installedOpen}
+            >
+              <Layers size={14} />
+              <span>Engines</span>
+              <span style={{ fontSize: 12, color: 'var(--text-muted)', fontWeight: 400 }}>
+                {backends.length} installed
+              </span>
+              <ChevronDown
+                size={14}
+                style={{ marginLeft: 'auto', transform: installedOpen ? 'rotate(180deg)' : 'none', transition: 'transform 180ms' }}
+              />
+            </button>
+            {installedOpen && (
+              <div className="collapsible-body">
+            <div className="flex flex-col gap-2">
+              {backends.map((b) => (
+                <div key={b.id}>
+                  <div className="settings-row">
+                    <div style={{ minWidth: 0, flex: 1 }}>
+                      <div className="settings-row-label flex items-center gap-2">
+                        <Layers size={13} style={{ color: 'var(--text-muted)', flexShrink: 0 }} />
+                        <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{b.displayName}</span>
+                        {engineOf(b) !== 'llama.cpp' && <span className="version-badge">{ENGINES[engineOf(b)].label}</span>}
+                        {(engineOf(b) === 'llama.cpp'
+                          ? activeBackend?.id === b.id
+                          : engineGlobals[engineOf(b)]?.backendKey === b.backendKey) && <span className="version-badge active-version">Active</span>}
+                        {!b.hasCommands && <span className="version-badge">Fallback Schema</span>}
+                        {b.external && <span className="version-badge">External</span>}
+                      </div>
+                      <div className="settings-row-sub mono" style={{ wordBreak: 'break-all' }}>
+                        {b.exe ? `${b.path}${b.path.endsWith('/') || b.path.endsWith('\\') ? '' : '/'}${b.exe}` : 'No executable found'}
+                      </div>
                     </div>
-                    <div className="settings-row-sub mono" style={{ wordBreak: 'break-all' }}>
-                      {b.exe ? `${b.path}${b.path.endsWith('/') || b.path.endsWith('\\') ? '' : '/'}${b.exe}` : 'No executable found'}
+                    <div className="flex gap-2" style={{ flexShrink: 0 }}>
+                      <button
+                        className="btn btn-secondary btn-sm"
+                        onClick={() => handleSwitchBackend(b.id)}
+                        disabled={engineOf(b) === 'llama.cpp' ? activeBackend?.id === b.id : engineGlobals[engineOf(b)]?.backendKey === b.backendKey}
+                      >
+                        Set Active
+                      </button>
+                      <button
+                        className={`btn btn-ghost btn-sm flex items-center gap-1 ${expandedEditor === b.id ? 'btn-primary' : ''}`}
+                        onClick={() => setExpandedEditor(expandedEditor === b.id ? null : b.id)}
+                        title="Edit commands.json for this backend fork"
+                      >
+                        <Terminal size={13} />
+                        <ChevronDown size={12} style={{ transform: expandedEditor === b.id ? 'rotate(180deg)' : 'none', transition: 'transform 180ms' }} />
+                      </button>
+                      <button
+                        className="btn btn-ghost btn-icon text-danger"
+                        onClick={() => handleDeleteBackend(b.id)}
+                        title="Delete backend version"
+                      >
+                        <Trash size={14} />
+                      </button>
                     </div>
                   </div>
-                  <div className="flex gap-2" style={{ flexShrink: 0 }}>
-                    <button
-                      className="btn btn-secondary btn-sm"
-                      onClick={() => handleSwitchBackend(b.id)}
-                      disabled={engineOf(b) === 'llama.cpp' ? activeBackend?.id === b.id : engineGlobals[engineOf(b)]?.backendKey === b.backendKey}
-                    >
-                      Set Active
-                    </button>
-                    <button
-                      className={`btn btn-ghost btn-sm flex items-center gap-1 ${expandedEditor === b.id ? 'btn-primary' : ''}`}
-                      onClick={() => setExpandedEditor(expandedEditor === b.id ? null : b.id)}
-                      title="Edit commands.json for this backend fork"
-                    >
-                      <Terminal size={13} />
-                      <ChevronDown size={12} style={{ transform: expandedEditor === b.id ? 'rotate(180deg)' : 'none', transition: 'transform 180ms' }} />
-                    </button>
-                    <button
-                      className="btn btn-ghost btn-icon text-danger"
-                      onClick={() => handleDeleteBackend(b.id)}
-                      title="Delete backend version"
-                    >
-                      <Trash size={14} />
-                    </button>
-                  </div>
+                  {expandedEditor === b.id && (
+                    <div className="ce-panel">
+                      <CommandsEditor backendKey={b.backendKey} />
+                    </div>
+                  )}
                 </div>
-                {expandedEditor === b.id && (
-                  <div className="ce-panel">
-                    <CommandsEditor backendKey={b.backendKey} />
-                  </div>
-                )}
+              ))}
+            </div>
               </div>
-            ))}
+            )}
           </div>
         )}
       </div>
 
-      {/* Engine tracker (renamed from "Available Updates") */}
+      {/* Engine Tracker */}
       <div className="settings-section">
-        <div className="settings-section-title"><Download /> Engine tracker</div>
+        <div className="settings-section-title"><Download /> Engine Tracker</div>
+
+        <div className="settings-row" style={{ flexDirection: 'column', alignItems: 'flex-start', gap: 10 }}>
+          <div>
+            <div className="settings-row-label">Install method</div>
+            <div className="settings-row-sub">
+              Download Binary installs the prebuilt release assets. Build from Source clones the repository and compiles it on this machine, which needs git, CMake and a C++ compiler (plus the CUDA, Vulkan or ROCm SDK for that backend); missing ones are installed for you through winget, Homebrew or your Linux package manager. It applies to llama.cpp-style engines; Strata is always installed with git.
+            </div>
+          </div>
+          <SegmentedToggle<EngineInstallMode>
+            options={[{ value: 'binary', label: 'Download Binary' }, { value: 'source', label: 'Build from Source' }]}
+            value={installMode}
+            onChange={handleSetInstallMode}
+          />
+        </div>
+
+        {installMode === 'source' && (
+          <div className="settings-row">
+            <div>
+              <div className="settings-row-label">Keep build tools up to date</div>
+              <div className="settings-row-sub">
+                Before you build, updates git, CMake, the compiler and the CUDA or Vulkan SDK through the system package manager, and the ROCm SDK from AMD, when a newer version is available. Missing tools are offered for install when you press Build. Updates may ask for administrator permission, so they never run in the background.
+              </div>
+            </div>
+            <div className="toggle-wrap">
+              <label className="toggle">
+                <input type="checkbox" checked={engineSettings?.autoUpdateBuildTools !== false} onChange={async (e) => {
+                  await window.api.setAutoUpdateBuildTools(e.target.checked)
+                  refreshEngineSettings()
+                }} />
+                <span className="toggle-track"></span><span className="toggle-thumb"></span>
+              </label>
+            </div>
+          </div>
+        )}
+
+        {installMode === 'source' && (
+          <div className="settings-row" style={{ flexDirection: 'column', alignItems: 'flex-start', gap: 10 }}>
+            <div>
+              <div className="settings-row-label">ROCm SDK for AMD GPUs</div>
+              <div className="settings-row-sub">
+                A ROCm build needs AMD's SDK for your GPU family, kept in the engines folder (no administrator rights, nothing added to the system PATH). Tarball downloads and unpacks AMD's archive: self-contained, no Python needed. pip installs AMD's Python wheels into a virtual environment (needs Python 3.11 to 3.14). If one gives you trouble, switch to the other; the SDK of the other kind is replaced.
+              </div>
+            </div>
+            <SegmentedToggle<'tarball' | 'pip'>
+              options={[{ value: 'tarball', label: 'Tarball' }, { value: 'pip', label: 'pip (wheels)' }]}
+              value={engineSettings?.rocmSource ?? 'tarball'}
+              onChange={async (v) => { await window.api.setRocmSource(v); refreshEngineSettings() }}
+            />
+            {(engineSettings?.rocmSource ?? 'tarball') === 'tarball' && (
+              <>
+                <div className="settings-row-sub">
+                  Stable uses AMD's release; Nightly uses the daily TheRock builds, which are newer but unfinished. If a GPU has no stable build, the nightly one is used. (pip always uses AMD's stable index.)
+                </div>
+                <SegmentedToggle<'stable' | 'nightly'>
+                  options={[{ value: 'stable', label: 'Stable' }, { value: 'nightly', label: 'Nightly' }]}
+                  value={engineSettings?.rocmChannel ?? 'stable'}
+                  onChange={async (v) => { await window.api.setRocmChannel(v); refreshEngineSettings() }}
+                />
+              </>
+            )}
+          </div>
+        )}
 
         <div className="settings-row">
           <div>
             <div className="settings-row-label">Update tracked engines automatically</div>
             <div className="settings-row-sub">
-              After the check at startup, installs the new release of every engine you already have (llama.cpp builds are re-downloaded, Strata is updated with git). Off by default. An engine with a running model is skipped.
+              After the check at startup, installs the new release of every engine you already have (llama.cpp builds are re-downloaded, or rebuilt in Build from Source mode, and Strata is updated with git). Off by default. An engine with a running model is skipped.
             </div>
           </div>
           <div className="toggle-wrap">
@@ -841,7 +1239,8 @@ export default function SettingsView() {
         <div className="settings-row" style={{ borderBottom: 'none', flexDirection: 'column', alignItems: 'stretch', gap: 12 }}>
           <p style={{ fontSize: 13, color: 'var(--text-secondary)', lineHeight: 1.6 }}>
             Track additional engines and forks by their GitHub repository (llama.cpp builds, or a Strata clone: the engine is detected from the repository). Paste a link like
-            <code> https://github.com/owner/repo </code> or <code>owner/repo</code>. Backends are
+            <code> https://github.com/owner/repo </code> or <code>owner/repo</code>. A link to another branch
+            (<code>.../tree/branch</code> or <code>owner/repo@branch</code>) tracks that branch as its own entry inside the same repo block. Backends are
             organised under <code>&lt;fork-name&gt;/&lt;version&gt;/</code> and a resilient search
             locates the <code>llama-server</code> binary — even when it's nested deep in <code>build/bin/</code>.
           </p>
@@ -850,7 +1249,7 @@ export default function SettingsView() {
               className="form-input"
               style={{ flex: 1 }}
               type="text"
-              placeholder="https://github.com/owner/repo  or  owner/repo"
+              placeholder="https://github.com/owner/repo  or  owner/repo@branch"
               value={customBackendLink}
               onChange={e => setCustomBackendLink(e.target.value)}
               onKeyDown={e => { if (e.key === 'Enter') handleAddTrackedBackend() }}
@@ -874,266 +1273,38 @@ export default function SettingsView() {
 
         {/* Tracked backends list */}
         <div style={{ marginTop: 16 }}>
-          {trackedBackends.map(t => {
-            const release = trackerResults[t.id]
-            const loadingThis = checkingAllBackends && !release
-            const selectedUrl = selectedAssetByUrl[t.id] || pickDefaultAsset(t.id, release?.assets || [])
-            const selectedAsset = release?.assets.find(a => a.downloadUrl === selectedUrl)
-            // Progress is keyed per (backend, asset) -- several of this
-            // backend's own variants can be queued/downloading at once (via
-            // Update), so only the currently-SELECTED asset's progress is
-            // shown inline next to the Download button.
-            const outdatedAssets = release?.assets.filter(a => a.status === 'outdated') || []
-            // Every asset of this backend that's currently queued or
-            // downloading, regardless of which one is selected in the
-            // dropdown right now -- switching the dropdown selection must
-            // never hide the fact that something is still working in the
-            // background (this drives both the "N builds..." list below and
-            // the busy state on the primary button when it IS the selected
-            // one).
-            const busyAssets = release?.assets.filter(a => downloadProgress[`${t.id}::${a.name}`]) || []
-            const otherBusyAssets = busyAssets.filter(a => a.name !== selectedAsset?.name)
+          {trackerGroups.map(group => {
+            const multi = group.length > 1
+            const lead = group[0]
+            const groupName = group.find(t => !t.branch)?.name ?? lead.repo.split('/').pop()
             return (
-              <div key={t.id} className="tracker-card">
+              <div key={lead.repo.toLowerCase()} className="tracker-card">
                 <div className="tracker-card-header">
                   <div style={{ minWidth: 0, flex: 1 }}>
                     <div className="tracker-name">
-                      {t.name}
-                      {t.isDefault && <span className="tracker-default-tag">built-in</span>}
+                      {groupName}
+                      {!multi && lead.branch && <span className="version-badge" style={{ marginLeft: 8 }}><GitBranch size={10} style={{ display: 'inline', marginRight: 3 }} />{lead.branch}</span>}
+                      {lead.isDefault && <span className="tracker-default-tag">built-in</span>}
                     </div>
                     <div className="tracker-repo">
                       <Link2 size={11} style={{ display: 'inline', marginRight: 4 }} />
-                      {t.repo}
+                      {lead.repo}
                     </div>
                   </div>
-                  <div style={{ display: 'flex', gap: 6, flexShrink: 0 }}>
-                    {release?.url && (
-                      <button
-                        className="btn btn-ghost btn-icon"
-                        onClick={() => window.api.openExternal(release.url)}
-                        title="Open release on GitHub"
-                      >
-                        <ExternalLink size={14} />
-                      </button>
-                    )}
-                    {!t.isDefault && (
-                      <button
-                        className="btn btn-ghost btn-icon text-danger"
-                        onClick={() => handleRemoveTrackedBackend(t)}
-                        title="Stop tracking this fork"
-                      >
-                        <Trash size={14} />
-                      </button>
-                    )}
-                  </div>
+                  {!multi && <div style={{ display: 'flex', gap: 6, flexShrink: 0 }}>{renderEntryButtons(lead)}</div>}
                 </div>
-
-                {loadingThis ? (
-                  <div className="tracker-release" style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-                    <Loader2 size={13} className="spin" /> Checking GitHub for releases...
-                  </div>
-                ) : release?.error ? (
-                  <div className="tracker-release" style={{ color: 'var(--danger)' }}>
-                    <AlertCircle size={13} style={{ display: 'inline', marginRight: 6 }} />
-                    Error: {release.error}
-                  </div>
-                ) : release ? (
-                  <>
-                    <div className="tracker-release">
-                      <strong>{release.name || release.tagName}</strong>
-                      {release.publishedAt && (
-                        <span style={{ marginLeft: 8, color: 'var(--text-muted)' }}>
-                          Published: {new Date(release.publishedAt).toLocaleDateString()}
-                        </span>
-                      )}
-                      {release.isNewer === false && <span className="up-to-date">✓ Up to date</span>}
-                      {release.isNewer === true && <span className="new-badge">Update available</span>}
-                    </div>
-                    {t.kind === 'git' && release.git && (
-                      <div className="tracker-assets-row" style={{ alignItems: 'center', flexWrap: 'wrap', gap: 10 }}>
-                        {release.git.installed ? (
-                          <>
-                            <span style={{ fontSize: 12 }}>Installed: <strong>{release.git.localVersion}</strong></span>
-                            <button
-                              className="btn btn-primary btn-sm"
-                              disabled={!!gitBusy[t.id]}
-                              onClick={() => runGitAction(t, 'update')}
-                              title="git fetch and fast-forward (or reset) to the upstream branch"
-                            >
-                              {gitBusy[t.id] === 'update' ? <Loader2 size={13} className="spin" /> : <RefreshCw size={13} />} Update now
-                            </button>
-                          </>
-                        ) : (
-                          <button className="btn btn-primary btn-sm" disabled={!!gitBusy[t.id]} onClick={() => runGitAction(t, 'install')}>
-                            {gitBusy[t.id] === 'install' ? <Loader2 size={13} className="spin" /> : <Download size={13} />} {gitBusy[t.id] === 'install' ? 'Cloning...' : 'Install (git clone)'}
-                          </button>
-                        )}
-                        {engineSettings && !engineSettings.gitAvailable && (
-                          <span style={{ fontSize: 12, color: 'var(--warning)' }}>git was not found on PATH.</span>
-                        )}
-                        {gitError[t.id] && <span style={{ fontSize: 12, color: 'var(--danger)' }}>{gitError[t.id]}</span>}
+                {group.map(t => (
+                  <div key={t.id} className={multi ? 'tracker-branch' : undefined}>
+                    {multi && (
+                      <div className="tracker-branch-header">
+                        <GitBranch size={12} />
+                        <span style={{ flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{t.branch ?? 'default branch'}</span>
+                        <div style={{ display: 'flex', gap: 6, flexShrink: 0 }}>{renderEntryButtons(t)}</div>
                       </div>
                     )}
-                    {(release.assets.length > 0 || (release.otherPlatform?.length ?? 0) > 0) && (
-                      <div className="tracker-assets-row" style={{ alignItems: 'flex-start', flexWrap: 'wrap' }}>
-                        <div className={`asset-picker select-menu select-menu-field${openDropdownId === t.id ? ' open' : ''}`} style={{ minWidth: 260 }}>
-                          <button
-                            type="button"
-                            className="btn btn-secondary select-menu-btn"
-                            onClick={() => setOpenDropdownId(openDropdownId === t.id ? null : t.id)}
-                          >
-                            <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-                              {selectedAsset ? `${selectedAsset.name} (${formatBytes(selectedAsset.size)})` : 'Select a build...'}
-                            </span>
-                            {openDropdownId === t.id ? <ChevronUp size={13} style={{ flexShrink: 0 }} /> : <ChevronDown size={13} style={{ flexShrink: 0 }} />}
-                          </button>
-                          {openDropdownId === t.id && (
-                            <div
-                              className="asset-dropdown-menu"
-                              style={{
-                                position: 'absolute', top: '100%', left: 0, right: 0, zIndex: 20,
-                                marginTop: 4, background: 'var(--surface-2, var(--surface))', border: '1px solid var(--border)',
-                                borderRadius: 8, boxShadow: '0 8px 24px rgba(0,0,0,.25)', maxHeight: 280, overflowY: 'auto'
-                              }}
-                            >
-                              {release.assets.map(a => (
-                                <div
-                                  key={a.downloadUrl}
-                                  onClick={() => {
-                                    setSelectedAssetByUrl(prev => ({ ...prev, [t.id]: a.downloadUrl }))
-                                    setLastAssetType(t.id, a.name)
-                                    setOpenDropdownId(null)
-                                  }}
-                                  style={{
-                                    display: 'flex', alignItems: 'center', gap: 8, padding: '8px 10px',
-                                    cursor: 'pointer', borderBottom: '1px solid var(--border)'
-                                  }}
-                                  onMouseEnter={e => (e.currentTarget.style.background = 'var(--hover, rgba(255,255,255,.05))')}
-                                  onMouseLeave={e => (e.currentTarget.style.background = 'transparent')}
-                                >
-                                  <span style={{ flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', fontSize: 13 }}>
-                                    {a.name} <span style={{ color: 'var(--text-muted)' }}>({formatBytes(a.size)})</span>
-                                  </span>
-                                  {downloadProgress[`${t.id}::${a.name}`] ? (
-                                    <Loader2 size={12} className="spin" style={{ flexShrink: 0, color: 'var(--text-muted)' }} />
-                                  ) : a.status !== 'not-installed' ? (
-                                    <button
-                                      className="btn btn-ghost btn-icon text-danger"
-                                      onClick={e => { e.stopPropagation(); handleDeleteBackendType(t, a) }}
-                                      title={`Delete installed "${a.type}" build`}
-                                      style={{ flexShrink: 0, padding: 2 }}
-                                    >
-                                      <Trash size={12} />
-                                    </button>
-                                  ) : null}
-                                </div>
-                              ))}
-                              {(release.otherPlatform || []).map(o => (
-                                <div
-                                  key={`${o.platform}::${o.type}::${o.version}`}
-                                  title={`Made for ${o.platform}, so it cannot run on this machine. Listed so it can be removed.`}
-                                  style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '8px 10px', borderBottom: '1px solid var(--border)', opacity: 0.75 }}
-                                >
-                                  <span style={{ flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', fontSize: 13 }}>
-                                    {o.type} <span style={{ color: 'var(--text-muted)' }}>({o.platform} build {o.version}, installed)</span>
-                                  </span>
-                                  <button
-                                    className="btn btn-ghost btn-icon text-danger"
-                                    onClick={e => { e.stopPropagation(); handleDeleteBackendType(t, { name: o.type, type: o.type }, o.platform) }}
-                                    title={`Delete the ${o.platform} "${o.type}" build`}
-                                    style={{ flexShrink: 0, padding: 2 }}
-                                  >
-                                    <Trash size={12} />
-                                  </button>
-                                </div>
-                              ))}
-                            </div>
-                          )}
-                        </div>
-                        {(() => {
-                          const myProgress = selectedAsset ? downloadProgress[`${t.id}::${selectedAsset.name}`] : undefined
-                          const isQueued = myProgress?.phase === 'queued'
-                          const isActive = !!myProgress && !isQueued
-                          return isQueued ? (
-                            <div className="text-sm flex items-center gap-3" style={{ color: 'var(--text-muted)' }}>
-                              <Loader2 size={14} className="spin" />
-                              {`Queued (#${myProgress?.queuePosition || 1})`}
-                              <button
-                                className="btn btn-ghost btn-sm text-danger"
-                                onClick={() => { window.api.cancelBackendDownload(t.id, selectedAsset?.name); setDownloadProgress(`${t.id}::${selectedAsset?.name}`, null) }}
-                                style={{ padding: '0 8px' }}
-                              >
-                                Cancel
-                              </button>
-                            </div>
-                          ) : isActive ? (
-                            <div className="text-sm flex items-center gap-3" style={{ color: 'var(--text-muted)' }}>
-                              <Loader2 size={14} className="spin" />
-                              {myProgress?.phase === 'extracting' ? 'Extracting...' : `Downloading... ${myProgress?.percent || 0}%`}
-                              <button
-                                className="btn btn-ghost btn-sm text-danger"
-                                onClick={() => { window.api.cancelBackendDownload(t.id, selectedAsset?.name); setDownloadProgress(`${t.id}::${selectedAsset?.name}`, null) }}
-                                style={{ padding: '0 8px' }}
-                              >
-                                Cancel
-                              </button>
-                            </div>
-                          ) : (
-                            <div style={{ display: 'flex', gap: 6 }}>
-                              <button
-                                className="btn btn-primary btn-sm"
-                                onClick={() => selectedAsset && handleDownloadAsset(t, selectedAsset, release)}
-                                disabled={!selectedAsset}
-                              >
-                                <Download size={13} /> {selectedAsset?.status === 'installed' ? 'Re-download' : 'Download'}
-                              </button>
-                              {outdatedAssets.length > 0 && (
-                                <button
-                                  className="btn btn-secondary btn-sm"
-                                  onClick={() => handleUpdateBackend(t, release)}
-                                  title={`Update ${outdatedAssets.length} installed build${outdatedAssets.length === 1 ? '' : 's'}`}
-                                >
-                                  <RefreshCw size={13} /> Update ({outdatedAssets.length})
-                                </button>
-                              )}
-                            </div>
-                          )
-                        })()}
-                        {/* Any OTHER build of this backend that's queued/downloading in the
-                            background -- shown regardless of which one is currently selected
-                            in the dropdown above, so switching selection never hides the fact
-                            that something is still working. */}
-                        {otherBusyAssets.length > 0 && (
-                          <div style={{ display: 'flex', flexDirection: 'column', gap: 4, width: '100%' }}>
-                            {otherBusyAssets.map(a => {
-                              const p = downloadProgress[`${t.id}::${a.name}`]
-                              const label = p?.phase === 'queued'
-                                ? `Queued (#${p.queuePosition || 1})`
-                                : p?.phase === 'extracting' ? 'Extracting...' : `Downloading... ${p?.percent || 0}%`
-                              return (
-                                <div key={a.name} className="text-sm flex items-center gap-3" style={{ color: 'var(--text-muted)' }}>
-                                  <Loader2 size={13} className="spin" />
-                                  <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{a.type}: {label}</span>
-                                  <button
-                                    className="btn btn-ghost btn-sm text-danger"
-                                    onClick={() => { window.api.cancelBackendDownload(t.id, a.name); setDownloadProgress(`${t.id}::${a.name}`, null) }}
-                                    style={{ padding: '0 8px' }}
-                                  >
-                                    Cancel
-                                  </button>
-                                </div>
-                              )
-                            })}
-                          </div>
-                        )}
-                      </div>
-                    )}
-                  </>
-                ) : (
-                  <div className="tracker-release" style={{ color: 'var(--text-muted)' }}>
-                    Click "Check for updates" to query GitHub for the latest release.
+                    {renderTrackerEntry(t)}
                   </div>
-                )}
+                ))}
               </div>
             )
           })}

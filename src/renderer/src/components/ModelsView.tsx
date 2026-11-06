@@ -193,6 +193,7 @@ function ModelGroupCard({ group, onDeleted }: { group: ModelGroup; onDeleted: ()
   const { expandedModelGroups, toggleModelGroup } = useStore()
   const expanded = !!expandedModelGroups[group.folderPath]
   const mmproj = group.mmproj
+  const mmprojs = group.mmprojs?.length ? group.mmprojs : mmproj ? [mmproj] : []
   return (
     <div className="model-group">
       <div className="model-group-header" onClick={() => toggleModelGroup(group.folderPath)}>
@@ -201,8 +202,8 @@ function ModelGroupCard({ group, onDeleted }: { group: ModelGroup; onDeleted: ()
         <span className="model-group-name" title={group.folderPath}>{group.folder}</span>
         {group.external && <span className="external-tag" title="Model from an external folder">External</span>}
         {mmproj ? (
-          <span className="mmproj-badge" title={mmproj.name}>
-            <Eye size={11} /> mmproj
+          <span className="mmproj-badge" title={mmprojs.map(m => m.name).join('\n')}>
+            <Eye size={11} /> {mmprojs.length > 1 ? `${mmprojs.length} mmproj` : 'mmproj'}
           </span>
         ) : (
           <span className="mmproj-badge absent" title="No multimodal projector detected">no mmproj</span>
@@ -226,18 +227,22 @@ function ModelGroupCard({ group, onDeleted }: { group: ModelGroup; onDeleted: ()
               onDeleted={onDeleted}
             />
           ))}
-          {mmproj && (
-            <div className="models-file-row" style={{ opacity: 0.7 }} title="Multimodal projector — shared by all models in this folder. Not listed as a separate model.">
+          {mmprojs.map((p, i) => (
+            <div key={p.path} className="models-file-row" style={{ opacity: i === 0 ? 0.7 : 0.55 }} title="Multimodal projector — shared by all models in this folder. Not listed as a separate model.">
               <div className="models-file-icon"><Eye size={16} /></div>
               <div className="models-file-meta">
-                <span className="models-file-name" style={{ color: 'var(--success)' }}>{mmproj.name}</span>
+                <span className="models-file-name" style={{ color: i === 0 ? 'var(--success)' : 'var(--text-secondary)' }}>{p.name}</span>
                 <div className="model-size-breakdown">
-                  <span className="mmproj-chip">mmproj {formatBytes(mmproj.size)}</span>
-                  <span style={{ fontSize: 10 }}>auto-detected, shared by this folder</span>
+                  <span className="mmproj-chip">mmproj{p.quant ? ` ${p.quant}` : ''} {formatBytes(p.size)}</span>
+                  <span style={{ fontSize: 10 }}>
+                    {i === 0
+                      ? (mmprojs.length > 1 ? 'default (most precise), auto-detected' : 'auto-detected, shared by this folder')
+                      : 'also detected; a Template can pick it'}
+                  </span>
                 </div>
               </div>
             </div>
-          )}
+          ))}
           {/* Speculative-decoding sidecar files (draft/EAGLE3/DSpark2/DFlash2
               heads) — same non-interactive treatment as mmproj above: shown
               here for visibility, but never selectable as a Model File

@@ -13,7 +13,8 @@ import CommandPreview, { type PreviewToken } from './CommandPreview'
 import SegmentedToggle from './SegmentedToggle'
 import SamplingPresets from './SamplingPresets'
 import { useVramBudget, computeAutoFillContext, estimateMoeDefaultContext } from '../hooks/useVramBudget'
-import { formatWithSpaces, CONTEXT_POWER_OF_TWO_STEPS, snapToNearestPowerOfTwo } from '../utils/contextFormat'
+import { formatWithSpaces, CONTEXT_POWER_OF_TWO_STEPS, snapToNearestPowerOfTwo, ladderUpTo } from '../utils/contextFormat'
+import { resolveLlamaTarget, resolveEngineBackend } from '../utils/engineBackends'
 import { buildQuickEngineBaseline, computeRecommendedThreads, defaultKvQuantFor, defaultKvQuantVFor, SAMPLING_KEYS, SAMPLING_PRESET_MARKER } from '../../../shared/presetBaselines'
 import { COMMON_PARAM_FLAGS as COMMON_VISIBLE } from '../../../shared/commonParams'
 import { applyNgramModifierToggle } from '../../../shared/specToggles'
@@ -22,6 +23,7 @@ import { markTemplateSavePending, markTemplateSaveDone } from '../utils/template
 import { activeServerOverrides, findPortConflict } from '../utils/templatePort'
 import ServerParamsBlock from './ServerParamsBlock'
 import SelectMenu from './SelectMenu'
+import { formatBytes } from '../utils/format'
 import CustomArgsEditor from './CustomArgsEditor'
 import { CUSTOM_ARGS_KEY, parseCustomArgs, importSupportedArgs } from '../../../shared/customArgs'
 import { MMPROJ_OFFLOAD_MODE_KEY, getMmprojOffloadMode, resolveMmprojOffloadToRam } from '../../../shared/mmprojOffload'
@@ -155,7 +157,7 @@ function NgramModifierBlock({ title, flagPrefix, enabled, onToggle, disabled, fi
             const val = args[arg] ?? f.def
             const changed = val !== f.def
             return (
-              <div key={arg} className={`cmd-row cmd-row-hybrid ${changed ? 'changed-param' : ''}`} style={{ padding: '4px 0', border: 'none', background: 'transparent', position: 'relative' }}>
+              <div key={arg} className={`cmd-row cmd-row-flat cmd-row-hybrid ${changed ? 'changed-param' : ''}`}>
                 {changed && <div className="changed-indicator" />}
                 <div className="cmd-label-group"><div className="cmd-label">{f.label}</div><div className="cmd-arg">{arg}</div></div>
                 <div style={{ display: 'flex', alignItems: 'center', gap: 8, flex: 1, minWidth: 0 }}>
@@ -182,7 +184,7 @@ export default function CmdParamsEditor({ templateId, args, onChange, modelPathF
   const {
     commandsSchema: activeCommandsSchema, updateCard, cards, models, cpuInfo,
     detectedSpeculation, setDetectedSpeculation, markSpeculationApplied,
-    ggufMetadata, setGgufMetadata, activeBackend, backends,
+    ggufMetadata, setGgufMetadata, activeBackend, backends, engineGlobals,
     paramViewMode, setParamViewMode,
     setPresetMode, modelDefaults, samplingPresets, baseUrlOverride
   } = useStore()
@@ -206,30 +208,14 @@ export default function CmdParamsEditor({ templateId, args, onChange, modelPathF
   const effectiveBackendVersionName = backendVersionProp !== undefined ? backendVersionProp : card?.template.backendVersion
   const effectiveBackendType = backendTypeProp !== undefined ? backendTypeProp : card?.template.backendType
   const effectiveBackend = useMemo(() => {
-    let b = undefined as (typeof backends)[number] | undefined
-    if (effectiveBackendKey) {
-      // Prefer an exact type match whenever we actually know the type
-      // (including "explicitly no type" for a legacy install) -- backendKey
-      // + version alone stopped being unique once the SAME fork+version
-      // could exist under several type folders at once (e.g. a vulkan and
-      // a rocm build of the same release), so without this a template could
-      // silently resolve to whichever variant happened to sort first and
-      // launch (or preview defaults for) the wrong binary.
-      if (effectiveBackendType !== undefined) {
-        b = backends.find(x => x.backendKey === effectiveBackendKey && x.name === effectiveBackendVersionName && (x.backendType ?? null) === (effectiveBackendType ?? null))
-      }
-      // Fall back to the old key+version-only match when we have no type
-      // info at all (a Template saved before this field existed) or the
-      // exact variant it pinned is no longer installed.
-      if (!b) {
-        b = backends.find(x => x.backendKey === effectiveBackendKey && x.name === effectiveBackendVersionName)
-      }
-    }
-    if (!b && effectiveBackendVersionName) {
-      b = backends.find(x => x.name === effectiveBackendVersionName || x.version === effectiveBackendVersionName || x.id === effectiveBackendVersionName)
-    }
-    return b || activeBackend
-  }, [effectiveBackendKey, effectiveBackendVersionName, effectiveBackendType, backends, activeBackend])
+    // The Template's own pin (repo, backend type, then version), else the global
+    // selection. When the pinned backend is gone the nearest build of its repo is
+    // shown rather than the global one, which is another engine.
+    const pin = { backendKey: effectiveBackendKey, backendType: effectiveBackendType, backendVersion: effectiveBackendVersionName }
+    return resolveLlamaTarget(pin, backends, activeBackend, engineGlobals).build
+      ?? resolveEngineBackend('llama.cpp', pin, backends, activeBackend, engineGlobals)
+      ?? activeBackend
+  }, [effectiveBackendKey, effectiveBackendVersionName, effectiveBackendType, backends, activeBackend, engineGlobals])
 
   // The store's schema belongs to the sidebar's active backend. A Template
   // pinned to another fork needs that fork's own schema, or its fork-only
@@ -318,7 +304,12 @@ export default function CmdParamsEditor({ templateId, args, onChange, modelPathF
     if (!effectiveModelPath) return null
     return models.find(g => g.models.some(m => m.path === effectiveModelPath)) || null
   }, [models, effectiveModelPath])
-  const detectedMmproj = modelGroup?.mmproj || null
+  // Every projector found next to the model, best first. The one in use is the
+  // one the Template already points at when it is among them (the user picked
+  // it, or it was picked before), else the best: so the automatic mode keeps a
+  // choice and falls back to the best when the chosen file is gone.
+  const detectedMmprojs = useMemo(() => modelGroup?.mmprojs ?? (modelGroup?.mmproj ? [modelGroup.mmproj] : []), [modelGroup])
+  const detectedMmproj = detectedMmprojs.find(m => m.path === args['--mmproj']) ?? detectedMmprojs[0] ?? null
 
   // Load GGUF metadata when model changes.
   useEffect(() => {
@@ -1206,7 +1197,7 @@ export default function CmdParamsEditor({ templateId, args, onChange, modelPathF
       if (expectedUnset) return !currentUnset
       return currentUnset || String(val) !== String(gpuLayersMax)
     }
-    const quickBaselines: Record<string, any> = buildQuickEngineBaseline({ cpuInfo, backendKey: activeBackend?.backendKey, backendInfo: activeBackend, cpuThreadsOverridePercent })
+    const quickBaselines: Record<string, any> = buildQuickEngineBaseline({ cpuInfo, backendKey: effectiveBackend?.backendKey, backendInfo: effectiveBackend, cpuThreadsOverridePercent })
     // Ctx-size baseline = model's native context (or 32768 if unknown).
     if (meta?.contextLength && meta.contextLength > 0) {
       quickBaselines['--ctx-size'] = Math.min(meta.contextLength, 32768)
@@ -1259,7 +1250,7 @@ export default function CmdParamsEditor({ templateId, args, onChange, modelPathF
     // Reset to the current preset baseline, not the schema default.
     // Same unification as isChanged() above.
     if (derivedPresetMode !== 'clear' && !SAMPLING_KEYS.includes(cmd.arg)) {
-      const quickBaselines: Record<string, any> = buildQuickEngineBaseline({ cpuInfo, backendKey: activeBackend?.backendKey, backendInfo: activeBackend, cpuThreadsOverridePercent })
+      const quickBaselines: Record<string, any> = buildQuickEngineBaseline({ cpuInfo, backendKey: effectiveBackend?.backendKey, backendInfo: effectiveBackend, cpuThreadsOverridePercent })
       // Ctx-size baseline = model's native context (or 32768 if unknown).
       if (meta?.contextLength && meta.contextLength > 0) {
         quickBaselines['--ctx-size'] = Math.min(meta.contextLength, 32768)
@@ -1290,7 +1281,7 @@ export default function CmdParamsEditor({ templateId, args, onChange, modelPathF
     // The engine baseline comes from the same pure function CreateModal's
     // lazy initializer uses, so the button and "apply on template creation"
     // can never drift apart.
-    Object.assign(newArgs, buildQuickEngineBaseline({ cpuInfo, backendKey: activeBackend?.backendKey, backendInfo: activeBackend, cpuThreadsOverridePercent }))
+    Object.assign(newArgs, buildQuickEngineBaseline({ cpuInfo, backendKey: effectiveBackend?.backendKey, backendInfo: effectiveBackend, cpuThreadsOverridePercent }))
     // ctx-size needs model metadata, which the shared baseline function
     // doesn't have access to — set it here only if not already present.
     // MoE gets a memory-aware default (VRAM+RAM leftover after model
@@ -1338,7 +1329,7 @@ export default function CmdParamsEditor({ templateId, args, onChange, modelPathF
     // heuristic.
     newArgs['__lastPreset'] = 'quick'
     // Presets reset to the baseline, which includes the draft KV types.
-    commit(applySpecDraftKvDefaults(newArgs, activeBackend?.backendKey, { force: true }))
+    commit(applySpecDraftKvDefaults(newArgs, effectiveBackend?.backendKey, { force: true }))
     // Mark Quick as the active baseline so blue lines DON'T appear.
     setPresetMode('quick')
   }
@@ -1378,7 +1369,7 @@ export default function CmdParamsEditor({ templateId, args, onChange, modelPathF
     // Same shared baseline as Quick, then override the two advanced context
     // toggles for FULL AUTO's "set it and forget it" behavior.
     const newArgs: Record<string, any> = { ...args }
-    Object.assign(newArgs, buildQuickEngineBaseline({ cpuInfo, backendKey: activeBackend?.backendKey, backendInfo: activeBackend, cpuThreadsOverridePercent }))
+    Object.assign(newArgs, buildQuickEngineBaseline({ cpuInfo, backendKey: effectiveBackend?.backendKey, backendInfo: effectiveBackend, cpuThreadsOverridePercent }))
     // Same MoE-aware default as Quick (see the identical note there).
     if (meta?.contextLength && meta.contextLength > 0) {
       if (isMoe && vramBudget) {
@@ -1409,7 +1400,7 @@ export default function CmdParamsEditor({ templateId, args, onChange, modelPathF
     newArgs['__ignoreCtxOverride'] = true
     newArgs['__autoCtxFill'] = 'auto'
     newArgs['__lastPreset'] = 'fullauto'
-    commit(applySpecDraftKvDefaults(newArgs, activeBackend?.backendKey, { force: true }))
+    commit(applySpecDraftKvDefaults(newArgs, effectiveBackend?.backendKey, { force: true }))
     setPresetMode('fullauto')
   }
 
@@ -1647,7 +1638,7 @@ export default function CmdParamsEditor({ templateId, args, onChange, modelPathF
                   <input type="checkbox" checked={ctxUse2xIncrements} disabled={rowDisabled} onChange={(e) => {
                     const use2x = e.target.checked
                     const newArgs: Record<string, any> = { ...args, '__ctxUse2xIncrements': use2x }
-                    if (use2x && currentCtx > 0) newArgs['--ctx-size'] = snapToNearestPowerOfTwo(currentCtx, CONTEXT_POWER_OF_TWO_STEPS.filter(s => s <= ctxSliderMax))
+                    if (use2x && currentCtx > 0) newArgs['--ctx-size'] = snapToNearestPowerOfTwo(currentCtx, ladderUpTo(ctxSliderMax))
                     commit(newArgs)
                   }} />
                   Use 2x increments
@@ -1781,8 +1772,26 @@ export default function CmdParamsEditor({ templateId, args, onChange, modelPathF
       </div>
       <div className="mmproj-widget-row" style={mmprojOn ? {} : { opacity: 0.5 }}>
         <span className="mmproj-widget-label">Status</span>
-        {detectedMmproj ? <span className="mmproj-commentary detected"><CheckCircle2 size={13} /> mmproj detected</span> : <span className="mmproj-commentary absent"><XCircle size={13} /> mmproj not detected</span>}
+        {detectedMmproj ? <span className="mmproj-commentary detected"><CheckCircle2 size={13} /> {detectedMmprojs.length > 1 ? `${detectedMmprojs.length} mmproj files detected` : 'mmproj detected'}</span> : <span className="mmproj-commentary absent"><XCircle size={13} /> mmproj not detected</span>}
       </div>
+      {/* Several projectors of the model (BF16, F16, Q8_0, ...): the best one is
+          used automatically; this picks another of the detected ones. */}
+      {detectedMmprojs.length > 1 && (
+        <div className="mmproj-widget-row" style={mmprojOn ? {} : { opacity: 0.5 }}>
+          <span className="mmproj-widget-label">Detected projector</span>
+          <SelectMenu
+            variant="compact"
+            style={{ width: 280, maxWidth: '100%' }}
+            value={detectedMmproj?.path ?? ''}
+            disabled={disabled || !mmprojOn}
+            options={detectedMmprojs.map((m, i) => ({
+              value: m.path,
+              label: `${m.quant ?? m.name} (${formatBytes(m.size)})${i === 0 ? ' - default' : ''}`
+            }))}
+            onChange={p => commit({ ...args, '--mmproj': p })}
+          />
+        </div>
+      )}
       {mmprojMode === 'auto' && detectedMmproj && mmprojOn && <div style={{ fontSize: 11, color: 'var(--text-muted)', fontFamily: "var(--font-mono)", wordBreak: 'break-all' }}>Using: {detectedMmproj.path}</div>}
       {/* Manual path input + browse button — always visible when in manual mode */}
       {mmprojMode === 'manual' && mmprojOn && (
@@ -1960,7 +1969,7 @@ export default function CmdParamsEditor({ templateId, args, onChange, modelPathF
             own values, with a reset button. */}
         {currentSpecTierDef.tier > 0 && (
           <div style={{ marginTop: 8 }}>
-            <div className={`cmd-row cmd-row-hybrid ${draftMaxChanged ? 'changed-param' : ''}`} style={{ padding: '6px 0', border: 'none', background: 'transparent', position: 'relative' }}>
+            <div className={`cmd-row cmd-row-flat cmd-row-hybrid ${draftMaxChanged ? 'changed-param' : ''}`}>
               {draftMaxChanged && <div className="changed-indicator" />}
               <div className="cmd-label-group">
                 <div className="cmd-label">Max Draft Tokens</div>
@@ -1969,7 +1978,7 @@ export default function CmdParamsEditor({ templateId, args, onChange, modelPathF
               <HybridSlider value={draftMaxVal ?? currentSpecTierDef.draftMax} min={0} max={128} step={1} onChange={v => handleUpdate('--spec-draft-n-max', v)} defaultVal={currentSpecTierDef.draftMax} disabled={disabled} />
               {draftMaxChanged && <button type="button" className="cmd-reset-btn" onClick={() => handleUpdate('--spec-draft-n-max', currentSpecTierDef.draftMax)} disabled={disabled} title={`Reset to ${currentSpecTierDef.label} default (${currentSpecTierDef.draftMax})`}><RotateCcw size={12} /></button>}
             </div>
-            <div className={`cmd-row cmd-row-hybrid ${draftMinChanged ? 'changed-param' : ''}`} style={{ padding: '6px 0', border: 'none', background: 'transparent', position: 'relative' }}>
+            <div className={`cmd-row cmd-row-flat cmd-row-hybrid ${draftMinChanged ? 'changed-param' : ''}`}>
               {draftMinChanged && <div className="changed-indicator" />}
               <div className="cmd-label-group">
                 <div className="cmd-label">Min Draft Tokens</div>
@@ -1978,7 +1987,7 @@ export default function CmdParamsEditor({ templateId, args, onChange, modelPathF
               <HybridSlider value={draftMinVal ?? currentSpecTierDef.draftMin} min={0} max={128} step={1} onChange={v => handleUpdate('--spec-draft-n-min', v)} defaultVal={currentSpecTierDef.draftMin} disabled={disabled} />
               {draftMinChanged && <button type="button" className="cmd-reset-btn" onClick={() => handleUpdate('--spec-draft-n-min', currentSpecTierDef.draftMin)} disabled={disabled} title={`Reset to ${currentSpecTierDef.label} default (${currentSpecTierDef.draftMin})`}><RotateCcw size={12} /></button>}
             </div>
-            <div className={`cmd-row cmd-row-hybrid ${draftPMinChanged ? 'changed-param' : ''}`} style={{ padding: '6px 0', border: 'none', background: 'transparent', position: 'relative' }}>
+            <div className={`cmd-row cmd-row-flat cmd-row-hybrid ${draftPMinChanged ? 'changed-param' : ''}`}>
               {draftPMinChanged && <div className="changed-indicator" />}
               <div className="cmd-label-group">
                 <div className="cmd-label">Draft Probability</div>
@@ -1995,7 +2004,7 @@ export default function CmdParamsEditor({ templateId, args, onChange, modelPathF
               const options = specDraftKvOptions[arg] || []
               const changed = cur !== def
               return (
-                <div key={arg} className={`cmd-row ${changed ? 'changed-param' : ''}`} style={{ padding: '6px 0', border: 'none', background: 'transparent', position: 'relative' }}>
+                <div key={arg} className={`cmd-row cmd-row-flat ${changed ? 'changed-param' : ''}`}>
                   {changed && <div className="changed-indicator" />}
                   <div className="cmd-label-group">
                     <div className="cmd-label">Draft Model KV Cache Type ({side})</div>
@@ -2072,7 +2081,7 @@ export default function CmdParamsEditor({ templateId, args, onChange, modelPathF
       <div className="spec-widget">
         <div className="mmproj-widget-title"><Layers size={15} /> MoE (Mixture of Experts)</div>
         <div className="mmproj-widget-arg">Total experts: {expertCount > 0 ? expertCount : 'unknown'} · Active experts: {expertUsedCount > 0 ? expertUsedCount : 'unknown'}</div>
-        <div className={`cmd-row cmd-row-hybrid ${nExpertsChanged ? 'changed-param' : ''}`} style={{ padding: '8px 12px', border: '1px solid var(--border)', background: 'var(--surface)', position: 'relative', overflow: 'visible' }}>
+        <div className={`cmd-row cmd-row-hybrid cmd-row-card ${nExpertsChanged ? 'changed-param' : ''}`}>
           {nExpertsChanged && <div className="changed-indicator" />}
           <div className="cmd-label-group" style={{ paddingLeft: 4 }}>
             <div className="cmd-label">Number of Active Experts</div>
@@ -2097,7 +2106,7 @@ export default function CmdParamsEditor({ templateId, args, onChange, modelPathF
           </div>
         </div>
         {/* Force MoE weights onto CPU layers (inverse locking) */}
-        <div className={`cmd-row cmd-row-hybrid ${moeCpuLayersSet ? 'changed-param' : ''}`} style={{ padding: '8px 12px', border: '1px solid var(--border)', background: 'var(--surface)', position: 'relative', overflow: 'visible' }}
+        <div className={`cmd-row cmd-row-hybrid cmd-row-card ${moeCpuLayersSet ? 'changed-param' : ''}`}
           title={!gpuLayersManuallySet ? 'Accessible only when GPU Offload is configured manually' : ''}>
           {moeCpuLayersSet && <div className="changed-indicator" />}
           <div className="cmd-label-group" style={{ paddingLeft: 4 }}>
@@ -2151,7 +2160,7 @@ export default function CmdParamsEditor({ templateId, args, onChange, modelPathF
       </div>
       {reasoningOn && (
         <>
-          <div className={`cmd-row cmd-row-hybrid ${reasoningBudgetChanged ? 'changed-param' : ''}`} style={{ padding: '8px 12px', border: '1px solid var(--border)', background: 'var(--surface)', position: 'relative', overflow: 'visible' }}>
+          <div className={`cmd-row cmd-row-hybrid cmd-row-card ${reasoningBudgetChanged ? 'changed-param' : ''}`}>
             {reasoningBudgetChanged && <div className="changed-indicator" />}
             <div className="cmd-label-group" style={{ paddingLeft: 4 }}>
               <div className="cmd-label">Reasoning Budget (tokens)</div>
@@ -2166,7 +2175,7 @@ export default function CmdParamsEditor({ templateId, args, onChange, modelPathF
               )}
             </div>
           </div>
-          <div className={`cmd-row cmd-row-hybrid ${reasoningMsgChanged ? 'changed-param' : ''}`} style={{ padding: '8px 12px', border: '1px solid var(--border)', background: 'var(--surface)', position: 'relative', overflow: 'visible', marginTop: 6 }}>
+          <div className={`cmd-row cmd-row-hybrid cmd-row-card ${reasoningMsgChanged ? 'changed-param' : ''}`} style={{ marginTop: 6 }}>
             {reasoningMsgChanged && <div className="changed-indicator" />}
             <div className="cmd-label-group" style={{ paddingLeft: 4 }}>
               <div className="cmd-label">Reasoning Budget Message</div>
@@ -2385,7 +2394,7 @@ export default function CmdParamsEditor({ templateId, args, onChange, modelPathF
                   </div>
                 </div>
                 {vramOverheadEnabled && (
-                  <div className={`cmd-row cmd-row-hybrid ${vramOverheadChanged ? 'changed-param' : ''}`} style={{ padding: '8px 12px', border: '1px solid var(--border)', background: 'var(--surface)', position: 'relative', overflow: 'visible' }}>
+                  <div className={`cmd-row cmd-row-hybrid cmd-row-card ${vramOverheadChanged ? 'changed-param' : ''}`}>
                     {vramOverheadChanged && <div className="changed-indicator" />}
                     <div className="cmd-label-group" style={{ paddingLeft: 4 }}>
                       <div className="cmd-label">VRAM Overhead amount</div>
@@ -2427,7 +2436,7 @@ export default function CmdParamsEditor({ templateId, args, onChange, modelPathF
               </div>
             </div>
             {ramOverheadEnabled && (
-              <div className={`cmd-row cmd-row-hybrid ${ramOverheadChanged ? 'changed-param' : ''}`} style={{ padding: '8px 12px', border: '1px solid var(--border)', background: 'var(--surface)', position: 'relative', overflow: 'visible' }}>
+              <div className={`cmd-row cmd-row-hybrid cmd-row-card ${ramOverheadChanged ? 'changed-param' : ''}`}>
                 {ramOverheadChanged && <div className="changed-indicator" />}
                 <div className="cmd-label-group" style={{ paddingLeft: 4 }}>
                   <div className="cmd-label">RAM Overhead amount</div>

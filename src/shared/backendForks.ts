@@ -8,11 +8,17 @@ import type { CommandCategory } from './types'
 export const TURBOQUANT_BACKEND_KEY = 'atomic-llama-cpp-turboquant'
 export const BEELLAMA_BACKEND_KEY = 'beellama.cpp'
 
+// A branch followed from the same repo keeps the folder name plus "@branch".
+export function isTurboQuantBackendKey(backendKey: string | undefined | null): boolean {
+  return !!backendKey && (backendKey === TURBOQUANT_BACKEND_KEY || backendKey.startsWith(TURBOQUANT_BACKEND_KEY + '@'))
+}
+
 // Also matches the owner-qualified folder ("beellama.cpp-anbeeld") that the
 // custom tracker generates for the same repo, so a backend installed before
-// BeeLlama became built-in keeps its fork behavior.
+// BeeLlama became built-in keeps its fork behavior, and the "@branch" form of
+// a branch followed from the same repo.
 export function isBeeLlamaBackendKey(backendKey: string | undefined | null): boolean {
-  return !!backendKey && /^beellama\.cpp(-anbeeld(-\d+)?)?$/i.test(backendKey)
+  return !!backendKey && /^beellama\.cpp(-anbeeld(-\d+)?)?(@.+)?$/i.test(backendKey)
 }
 
 // KVarN widths accepted by --cache-type-k/-v and the SWA overrides.

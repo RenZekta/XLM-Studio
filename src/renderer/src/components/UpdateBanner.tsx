@@ -2,7 +2,7 @@ import React, { useState } from 'react'
 import { useStore } from '../store/useStore'
 import { X, Download, Loader2, RefreshCw } from 'lucide-react'
 
-// Mirrors Settings -> Engine tracker's own "Update (N)" action for the
+// Mirrors Settings -> Engine Tracker's own "Update (N)" action for the
 // llama-cpp tracked backend: every already-installed build that's now
 // outdated gets updated in one click, no per-click asset-type choice (that
 // choice was already made whenever each build was originally installed --
@@ -101,9 +101,9 @@ function LlamaUpdateBanner() {
 
 // Git-installed engines (Strata) are updated by pulling the clone, so they
 // have no assets to list: the notice names the new release tag and offers the
-// same update the Engine tracker has. Dismissal is per release tag.
+// same update the Engine Tracker has. Dismissal is per release tag.
 function GitEngineBanner() {
-  const { trackedBackends, trackerResults, setBackends, setTrackerResult } = useStore()
+  const { trackedBackends, trackerResults, setBackends, setTrackerResult, engineUpdating } = useStore()
   const [dismissed, setDismissed] = useState<Record<string, boolean>>({})
   // Several engines can update at the same time, each with its own state.
   const [busy, setBusy] = useState<Record<string, boolean>>({})
@@ -132,12 +132,12 @@ function GitEngineBanner() {
         const g = trackerResults[t.id]!.git!
         return (
           <div className="update-banner" key={t.id}>
-            {busy[t.id] ? <Loader2 size={14} className="spin" /> : <Download size={14} />}
+            {busy[t.id] || engineUpdating[t.id] ? <Loader2 size={14} className="spin" /> : <Download size={14} />}
             <span>
               <strong>{t.name} {g.latestTag}</strong> is available (installed {g.localVersion}) |{' '}
               <button onClick={() => window.api.openExternal(trackerResults[t.id]!.url)}>View release</button>
               {' '}|{' '}
-              {busy[t.id] ? <span style={{ opacity: 0.8 }}>Updating...</span> : (
+              {busy[t.id] || engineUpdating[t.id] ? <span style={{ opacity: 0.8 }}>Updating...</span> : (
                 <button onClick={() => update(t.id)} title="git fetch and fast-forward to the upstream branch">
                   <RefreshCw size={12} style={{ verticalAlign: -2, marginRight: 4 }} />
                   Update

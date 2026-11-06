@@ -2,6 +2,7 @@ import React, { useState, useEffect, useRef, useCallback, useMemo } from 'react'
 import { useStore } from '../store/useStore'
 import { Terminal, Trash, Pause, Play, Upload } from 'lucide-react'
 import SelectMenu from './SelectMenu'
+import { isBuildLogId } from '../../../shared/sourceBuild'
 
 interface LogEntry {
   id: string
@@ -53,13 +54,12 @@ const LogRow = React.memo(function LogRow({ l, name }: { l: LogEntry; name: stri
 // entries (the store keeps collecting them in the background either way, so
 // nothing is lost while paused — resuming shows everything that arrived).
 export default function LogsView() {
-  const { cards, logs: storeLogs, clearLogs } = useStore()
+  const { cards, logs: storeLogs, clearLogs, logsSource, setLogsSource } = useStore()
   const [paused, setPaused] = useState(false)
   // While paused, freeze the displayed list at what it was the moment Pause
   // was pressed, rather than dropping subsequently-arriving lines entirely.
   const [pausedSnapshot, setPausedSnapshot] = useState<LogEntry[] | null>(null)
   const [filter, setFilter] = useState('')
-  const [selectedModel, setSelectedModel] = useState<string>('all')
   const scrollRef = useRef<HTMLDivElement>(null)
   // Tracks whether the user was scrolled to the bottom before the log list
   // last changed, so new lines only pull the view along when it was already
@@ -89,6 +89,23 @@ export default function LogsView() {
       scrollRef.current.scrollTop = scrollRef.current.scrollHeight
     }
   }, [logs, paused])
+
+  const runningModels = cards.filter(c => c.status === 'running')
+  // Engine builds are not Templates, so each one that has logged is listed by
+  // the name its first line carried.
+  const buildSources = useMemo(() => {
+    const seen = new Map<string, string>()
+    for (const l of storeLogs) if (isBuildLogId(l.id) && !seen.has(l.id)) seen.set(l.id, l.name)
+    return [...seen]
+  }, [storeLogs])
+  const sourceOptions = [
+    { value: 'all', label: 'Everything' },
+    ...runningModels.map(c => ({ value: c.template.id, label: c.template.name })),
+    ...buildSources.map(([id, name]) => ({ value: id, label: name }))
+  ]
+  // A model that has stopped is no longer listed, and showing nothing selected
+  // would be worse than showing everything.
+  const selectedModel = sourceOptions.some(o => o.value === logsSource) ? logsSource : 'all'
 
   const filteredLogs = useCallback(() => {
     let result = logs
@@ -125,7 +142,6 @@ export default function LogsView() {
     URL.revokeObjectURL(url)
   }
 
-  const runningModels = cards.filter(c => c.status === 'running')
   const displayed = filteredLogs()
   const appLogCount = logs.filter(l => l.stream === 'app').length
 
@@ -135,7 +151,7 @@ export default function LogsView() {
         <div>
           <h1 className="page-title">Logs</h1>
           <p className="page-subtitle">
-            Live server output stream · {logs.length} lines {appLogCount > 0 ? `· ${appLogCount} events ` : ''}{paused ? '· Paused' : ''}
+            Live server and engine build output · {logs.length} lines {appLogCount > 0 ? `· ${appLogCount} events ` : ''}{paused ? '· Paused' : ''}
           </p>
         </div>
         <div className="page-actions">
@@ -157,8 +173,8 @@ export default function LogsView() {
           variant="compact"
           style={{ width: 200, flexShrink: 0 }}
           value={selectedModel}
-          onChange={setSelectedModel}
-          options={[{ value: 'all', label: 'All Models' }, ...runningModels.map(c => ({ value: c.template.id, label: c.template.name }))]}
+          onChange={setLogsSource}
+          options={sourceOptions}
         />
         <input
           className="form-input"
@@ -197,7 +213,7 @@ export default function LogsView() {
         {displayed.length === 0 ? (
           <div style={{ color: 'var(--text-muted)', textAlign: 'center', padding: 40 }}>
             <Terminal size={28} style={{ display: 'block', margin: '0 auto 8px', opacity: 0.5 }} />
-            No logs yet. Start a model to see server output, generation events, chat messages and lifecycle info here.
+            No logs yet. Start a model to see server output, generation events, chat messages and lifecycle info here. Engine builds from source log here too.
           </div>
         ) : (
           displayed.map((l, i) => <LogRow key={l.seq ?? i} l={l} name={liveName(l)} />)

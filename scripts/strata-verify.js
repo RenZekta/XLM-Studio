@@ -119,8 +119,9 @@ check('overrides win for host/api-key and data dir is passed', r.argv.join(' ').
   r.argv.join(' ').includes('--api-key k1') && r.argv.join(' ').includes('--data-dir D:\\data'))
 check('template family/model args beat detected values', S.buildStrataArgv({ ...base, args: { '--family': 'qwen', '--model': 'IQ3_S' } }).argv.join(' ').includes('--family qwen --model IQ3_S'))
 check('missing family is an error', 'error' in S.buildStrataArgv({ ...base, family: null, model: null }))
-const q = S.buildStrataQuickBaseline({ contextLength: 262144, hasVision: true })
-check('quick baseline caps context at 32768, int8, vision', q['--context'] === 32768 && q['--kv'] === 'int8' && q['--vision'] === 'yes')
+const q = S.buildStrataQuickBaseline({ contextLength: 262144 })
+check('quick baseline caps context at 32768 and uses int8', q['--context'] === 32768 && q['--kv'] === 'int8')
+check('quick baseline leaves image input on Automatic, like Full Auto', q['--vision'] === undefined && !('--vision' in q) && !('--vision' in S.buildStrataQuickBaseline({ contextLength: 8192 })))
 
 // -- memory estimator vs the reference formulas -------------------------------
 function ref(model, vram, ctx, kv) {
@@ -393,6 +394,71 @@ print(json.dumps(out))
 } else {
   skip('mirrored constants, variant table and schema flags')
 }
+
+// -- one instance per OS -------------------------------------------------------
+const GE = bundle('src/main/strataEngine.ts', 'strataengine')
+tasks.push((async () => {
+  const NATIVE = { win32: 'windows', darwin: 'macos', linux: 'linux' }[process.platform]
+  const OTHER = NATIVE === 'windows' ? 'linux' : 'windows'
+  const forkDir = path.join(tmp, 'engines', 'Strata')
+  const win = path.join(forkDir, 'Strata')
+  fs.mkdirSync(path.join(win, 'serve'), { recursive: true })
+  const g = (cwd, ...a) => execFileSync('git', ['-c', 'user.email=t@t', '-c', 'user.name=t', ...a], { cwd, encoding: 'utf8' }).trim()
+  g(win, 'init', '-q', '-b', 'main')
+  fs.writeFileSync(path.join(win, 'setup.py'), 'print(1)\n'); fs.writeFileSync(path.join(win, 'serve', 'server.py'), '')
+  fs.writeFileSync(path.join(win, '.gitignore'), '/.venv/\n/build/\n')
+  g(win, 'add', '.'); g(win, 'commit', '-q', '-m', 'one'); g(win, 'tag', 'v1.0.0')
+  fs.writeFileSync(path.join(win, 'setup.py'), 'print(2)\n'); g(win, 'commit', '-q', '-am', 'two')
+  g(win, 'remote', 'add', 'origin', 'https://github.com/o/Strata.git')
+  // what the other OS's launcher left in its clone
+  fs.mkdirSync(path.join(win, '.venv', 'Scripts'), { recursive: true }); fs.writeFileSync(path.join(win, '.venv', 'Scripts', 'python.exe'), '')
+  fs.mkdirSync(path.join(win, 'build'), { recursive: true }); fs.writeFileSync(path.join(win, 'build', 'CMakeCache.txt'), 'x')
+  // make it look like a clone made on the other OS
+  const cfgPath = path.join(win, '.git', 'config')
+  const flavour = { windows: '\tfilemode = false\n\tsymlinks = false\n\tignorecase = true\n', linux: '\tfilemode = true\n', macos: '\tfilemode = true\n\tignorecase = true\n\tprecomposeunicode = true\n' }
+  const setFlavour = (os) => fs.writeFileSync(cfgPath, fs.readFileSync(cfgPath, 'utf8').replace(/^\s*(filemode|symlinks|ignorecase|precomposeunicode)\s*=.*$/gmi, '').replace(/\[core\]\n/, '[core]\n' + flavour[os]))
+  setFlavour(OTHER)
+
+  const found = GE.gitEngineInstances(forkDir)
+  check('a clone is listed with the OS that made it', found.length === 1 && found[0].path === win && found[0].os === OTHER)
+  check('the other OS\'s clone is not this OS\'s instance', GE.instanceForOs(found, NATIVE) === undefined && GE.instanceForOs(found, OTHER)?.path === win)
+  check('it is the one to make this OS\'s from', GE.instanceToCopy(found, NATIVE)?.path === win && GE.instanceToCopy(found, OTHER) === undefined)
+  check('a folder that is not a clone is ignored', (() => { fs.mkdirSync(path.join(forkDir, 'notes'), { recursive: true }); fs.mkdirSync(path.join(forkDir, '.hidden', 'x'), { recursive: true }); return GE.gitEngineInstances(forkDir).length === 1 })())
+  check('the copy is named for its OS, and a taken name is skipped', (() => { const n1 = GE.instanceNameFor(forkDir, 'Strata', NATIVE); fs.mkdirSync(path.join(forkDir, n1)); const n2 = GE.instanceNameFor(forkDir, 'Strata', NATIVE); fs.rmSync(path.join(forkDir, n1), { recursive: true }); return n1 === `Strata-${NATIVE}` && n2 === `Strata-${NATIVE}-2` })())
+
+  const copy = path.join(forkDir, `Strata-${NATIVE}`)
+  const r = await GE.cloneGitEngineFrom(win, copy, 'o/Strata')
+  check('an instance is made from the other OS\'s clone', r.ok && GE.looksLikeStrataClone(copy), r.error)
+  check('at the same commit and branch, with the tags', g(copy, 'rev-parse', 'HEAD') === g(win, 'rev-parse', 'HEAD') && g(copy, 'symbolic-ref', '--short', 'HEAD') === 'main' && g(copy, 'tag') === 'v1.0.0')
+  check('a git engine is called by its release tag, with nothing added for commits past it', (await GE.gitVersionLabel(win)).startsWith('v1.0.0-1-g') && await GE.gitEngineVersionLabel(win) === 'v1.0.0' && await GE.gitEngineVersionLabel(copy) === 'v1.0.0')
+  // A release tagged on the commit the clone is already on arrives with a fetch and renames it.
+  const tagRemote = path.join(tmp, 'tag-remote'); fs.mkdirSync(tagRemote, { recursive: true })
+  g(tagRemote, 'init', '-q', '-b', 'main'); fs.writeFileSync(path.join(tagRemote, 'f'), '1'); g(tagRemote, 'add', '.'); g(tagRemote, 'commit', '-q', '-m', 'one'); g(tagRemote, 'tag', 'v1.0.0'); fs.writeFileSync(path.join(tagRemote, 'f'), '2'); g(tagRemote, 'commit', '-q', '-am', 'two')
+  const tagLocal = path.join(tmp, 'tag-local'); g(tmp, 'clone', '-q', tagRemote, tagLocal)
+  check('past the tag the clone is called by the tag alone', await GE.gitEngineVersionLabel(tagLocal) === 'v1.0.0' && (await GE.gitVersionLabel(tagLocal)).startsWith('v1.0.0-1-g'))
+  g(tagRemote, 'tag', 'v1.1.0')
+  const upd = await GE.updateGitEngine(tagLocal)
+  check('a release tagged on the commit it is on renames it at the next update, without a restart', !upd.error && upd.updated === false && await GE.gitEngineVersionLabel(tagLocal) === 'v1.1.0' && GE.baseTagOf(await GE.gitEngineVersionLabel(tagLocal)) === 'v1.1.0', JSON.stringify(upd))
+  check('with no release tag it is the short hash', await (async () => { const d = path.join(tmp, 'notag'); fs.mkdirSync(d, { recursive: true }); g(d, 'init', '-q', '-b', 'main'); fs.writeFileSync(path.join(d, 'f'), '1'); g(d, 'add', '.'); g(d, 'commit', '-q', '-m', 'x'); const l = await GE.gitEngineVersionLabel(d); return l === g(d, 'rev-parse', '--short', 'HEAD') })())
+  check('what the other OS\'s launcher made does not come along', !fs.existsSync(path.join(copy, '.venv')) && !fs.existsSync(path.join(copy, 'build')))
+  check('the copy is this OS\'s, and found as its instance', (() => { const all = GE.gitEngineInstances(forkDir); return GE.instanceForOs(all, NATIVE)?.path === copy && all.find(i => i.path === copy).os === NATIVE })())
+  check('the other OS\'s clone is left exactly as it was', fs.existsSync(path.join(win, '.venv', 'Scripts', 'python.exe')) && fs.existsSync(path.join(win, 'build', 'CMakeCache.txt')))
+  check('its origin is GitHub again, not the clone it came from', g(copy, 'config', '--get', 'remote.origin.url') === 'https://github.com/o/Strata.git')
+  check('it can be updated like any clone (the branch tracks origin)', g(copy, 'rev-parse', '--abbrev-ref', '@{u}') === 'origin/main')
+  check('an existing folder is not overwritten', (await GE.cloneGitEngineFrom(win, copy, 'o/Strata')).ok === false)
+  // a remote that is not a GitHub https one is replaced by the tracked repository's address
+  g(win, 'remote', 'set-url', 'origin', 'ext::sh -c touch% /tmp/pwned')
+  const copy2 = path.join(forkDir, 'Strata-copy2')
+  const r2 = await GE.cloneGitEngineFrom(win, copy2, 'o/Strata')
+  check('an odd remote is never copied over', r2.ok && g(copy2, 'config', '--get', 'remote.origin.url') === 'https://github.com/o/Strata.git' && !fs.existsSync('/tmp/pwned'), r2.error)
+  // a failed copy leaves nothing behind
+  const copy3 = path.join(forkDir, 'Strata-copy3')
+  const r3 = await GE.cloneGitEngineFrom(path.join(tmp, 'no-such-clone'), copy3, 'o/Strata')
+  check('a failed copy leaves no folder behind', r3.ok === false && !fs.existsSync(copy3))
+  // a clone whose system cannot be told is the asker's own
+  setFlavour(NATIVE); fs.writeFileSync(cfgPath, fs.readFileSync(cfgPath, 'utf8').replace(/^\s*filemode\s*=.*$/gm, ''))
+  check('a clone that cannot be placed is taken as this OS\'s, and not copied from', (() => { const all = GE.gitEngineInstances(forkDir).filter(i => i.path === win); return all[0].os === null && GE.instanceForOs(all, NATIVE)?.path === win && GE.instanceToCopy(all, NATIVE) === undefined })())
+})())
 
 function finish() {
   fs.rmSync(tmp, { recursive: true, force: true })

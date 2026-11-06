@@ -16,7 +16,7 @@ import type {
   ModelGroup, ModelEntry, MmprojFile, SpecDecodeSidecarFile, BackendVersion,
   CommandsSchema, TrackedBackend, TrackedBackendRelease,
   ThemePref, ReleaseInfo, BaseUrlOverride, McpSettings, KvCacheCheckpointSettings, CheckpointMode,
-  StrataSettings, StrataModelInfo, GitEngineStatus, InstalledOtherPlatform
+  StrataSettings, StrataModelInfo, GitEngineStatus, InstalledOtherPlatform, EngineInstallMode
 } from '../shared/types'
 import { MCP_TOOL_IDS } from '../shared/types'
 import { extractBackendTypeFromAssetName } from '../shared/backendType'
@@ -28,7 +28,15 @@ import { toolTemplateAction, launchCommandForId } from './mcpControl'
 import { randomBytes } from 'crypto'
 import { engineOf, type EngineId } from '../shared/engines'
 import { assetMatchesHost } from '../shared/assetPlatform'
-import { NATIVE_PLATFORM, platformOfBuildDir, installVersionName } from './buildPlatform'
+import { explainExitCode } from '../shared/exitCodes'
+import { mmprojQuant, sortMmprojs } from '../shared/mmprojRank'
+import { parseRepoLink, pickBranch, branchSlug, trackedDisplayName, splitBuildArgs, buildLogId, sourceBuildType, isCudaType, cudaTypeVersion } from '../shared/sourceBuild'
+import { findCudaRoot } from './cudaSdk'
+import { mergeEngineFolder } from './engineFolders'
+import { cloneOsOf } from './workDirs'
+import { mergeDefaultTracked } from '../shared/trackedMerge'
+import { setBackendKeyAliases } from '../shared/backendPin'
+import { NATIVE_PLATFORM, BACKEND_TYPE_MARKER, platformOfBuildDir, installVersionName } from './buildPlatform'
 import { strataTableHash, strataVerdict, bestStrataInfo, STRATA_NO_TABLE, type StrataTable, type StrataFingerprint } from '../shared/strata'
 import { fingerprintGguf } from './ggufTensors'
 import { resolveAppIcon } from './appIcon'
@@ -36,9 +44,17 @@ import { parseStrataCatalog, type StrataCatalog } from './strataCatalog'
 import { LineAssembler } from './lineAssembler'
 import {
   STRATA_DATA_DIRNAME, DEFAULT_STRATA_DATA, strataLauncherName, looksLikeStrataClone, gitAvailable,
-  gitVersionLabel, baseTagOf, compareTags, latestRemoteTag, updateGitEngine, githubCloneUrl, cloneGitEngine,
-  probeGitEngine, readRememberedDataDir, resolveStrataData, buildStrataSpawn
+  gitEngineVersionLabel, baseTagOf, compareTags, latestRemoteTag, updateGitEngine, githubCloneUrl, cloneGitEngine,
+  probeGitEngine, readRememberedDataDir, resolveStrataData, buildStrataSpawn,
+  gitEngineInstances, instanceForOs, instanceToCopy, instanceNameFor, cloneGitEngineFrom
 } from './strataEngine'
+import { prepareBuildTools, installBuildTools, buildToolsStatus, invalidateBuildToolsCaches, type ToolsPlanStatus, type ToolsContext } from './buildTools'
+import { findInstalledRocm, type RocmChannel } from './rocmSdk'
+import { ROCM_GPUS, gfxForGpuName, rocmGpu, type RocmSdkSource } from '../shared/rocm'
+import {
+  buildFromSource, detectToolchain, repoBranches, remoteBranchCommit, scanSourceBuilds, pruneSupersededBuilds, isSourceBuildDir, engineRuntimeEnv,
+  workDirs, type BuildPhase
+} from './sourceBuild'
 
 const APP_ROOT = app.isPackaged ? join(app.getPath('userData')) : join(process.cwd())
 const MODELS_DIR    = join(APP_ROOT, 'models')
@@ -51,10 +67,6 @@ const CHECKPOINTS_DIR = join(APP_ROOT, 'KV-Checkpoints')
 // file mean anything (which model/Template it belongs to, its saved token
 // count) needs one stable location that survives that folder changing.
 const CHECKPOINTS_INDEX_PATH = join(APP_ROOT, 'kv-checkpoints-index.json')
-// Sentinel file written into every backend "type" folder (vulkan, cuda,
-// rocm, ...) at extraction time -- see smartExtractBackend / scanBackendRoot
-// for why this disambiguation can't be done reliably by structure alone.
-const BACKEND_TYPE_MARKER = '.xlm-backend-type'
 const SETTINGS_PATH = join(APP_ROOT, 'settings.json')
 // Persisted GGUF metadata cache so metadata is available instantly
 // whenever the user accesses a model (no re-extraction on every view).
@@ -181,6 +193,8 @@ const DEFAULT_TRACKED: TrackedBackend[] = [
   }
 ]
 
+
+
 // Filesystem-safe folder name for a "owner/repo" tracked backend, guaranteed
 // not to collide with anything in `taken`. ggml-org/llama.cpp keeps the bare
 // repo name (matching the built-in official entry's folder) -- every other
@@ -191,11 +205,14 @@ const DEFAULT_TRACKED: TrackedBackend[] = [
 // files (their build numbers are unrelated but get compared as if they
 // were the same backend's version history), and its own update check ends
 // up comparing against whatever's left behind in that shared folder.
-function backendFolderNameFor(repo: string, taken: Set<string>): string {
+// A branch other than the default is appended as "@branch": the same repo on
+// two branches is two engines with unrelated builds.
+function backendFolderNameFor(repo: string, taken: Set<string>, branch?: string): string {
   const [owner, repoName] = repo.split('/')
   const isOfficial = (owner || '').toLowerCase() === 'ggml-org' && (repoName || '').toLowerCase() === 'llama.cpp'
   let base = isOfficial ? repoName : `${repoName}-${owner}`
   base = base.toLowerCase().replace(/[^a-z0-9.]+/g, '-').replace(/^-+|-+$/g, '') || 'backend'
+  if (branch) base += `@${branchSlug(branch)}`
   let folderName = base
   let n = 2
   while (taken.has(folderName)) { folderName = `${base}-${n}`; n++ }
@@ -217,7 +234,7 @@ function dedupeTrackedBackendFolders(tracked: TrackedBackend[]): TrackedBackend[
     if (t.isDefault) return t
     const key = t.folderName.toLowerCase()
     if (!seen.has(key)) { seen.add(key); return t }
-    const folderName = backendFolderNameFor(t.repo, seen)
+    const folderName = backendFolderNameFor(t.repo, seen, t.branch)
     seen.add(folderName)
     return { ...t, folderName }
   })
@@ -243,6 +260,17 @@ interface AppSettings {
   // using globalBackend): which repo's install new templates follow.
   globalEngineBackends?: Partial<Record<EngineId, { backendKey: string }>>
   autoUpdateTrackedEngines?: boolean
+  engineInstallMode?: EngineInstallMode
+  // Update the build tools (git, CMake, compiler, GPU SDK) before a build when
+  // a newer version is available.
+  autoUpdateBuildTools?: boolean
+  // Git engines (Strata) whose instance for an OS was made from another OS's once ("<trackedId>:<os>"),
+  // so one that is deleted afterwards is not made again.
+  seededGitInstances?: string[]
+  // Where the ROCm SDK for AMD GPUs is downloaded from.
+  rocmChannel?: RocmChannel
+  // Whether the ROCm SDK is downloaded as a tarball or installed with pip.
+  rocmSource?: RocmSdkSource
   strata?: StrataSettings
   launchOnStartup?: boolean
   autostartMainTemplates?: boolean
@@ -333,6 +361,11 @@ const DEFAULT_SETTINGS: AppSettings = {
   globalBackend: null,
   globalEngineBackends: {},
   autoUpdateTrackedEngines: false,
+  engineInstallMode: 'binary',
+  autoUpdateBuildTools: true,
+  seededGitInstances: [],
+  rocmChannel: 'stable',
+  rocmSource: 'tarball',
   strata: { pullBeforeLaunch: true, parallelOverride: null, data: { ...DEFAULT_STRATA_DATA } },
   mcp: {
     enabled: true,
@@ -405,16 +438,9 @@ async function loadSettings(): Promise<AppSettings> {
     // A custom entry for the same repo (added by hand before it became
     // built-in) is promoted in place, keeping its folder so installed
     // binaries and pinned templates still resolve.
-    for (const def of DEFAULT_TRACKED) {
-      const sameRepo = (t: TrackedBackend) => t.repo.toLowerCase() === def.repo.toLowerCase()
-      const idx = tracked.findIndex((t: TrackedBackend) => t.id === def.id || sameRepo(t))
-      if (idx === -1) { tracked.push(def); continue }
-      const existing: TrackedBackend = tracked[idx]
-      tracked[idx] = existing.id === def.id
-        ? { ...existing, ...def }
-        : { ...def, id: existing.id, folderName: existing.folderName }
-    }
-    const dedupedTracked = dedupeTrackedBackendFolders(tracked)
+    const merged = mergeDefaultTracked(tracked, DEFAULT_TRACKED)
+    const dedupedTracked = dedupeTrackedBackendFolders(merged)
+    setBackendKeyAliases(dedupedTracked)
     return {
       externalModelFolders: Array.isArray(data.externalModelFolders) ? data.externalModelFolders : [],
       externalBackendFolders: Array.isArray(data.externalBackendFolders) ? data.externalBackendFolders : [],
@@ -470,6 +496,11 @@ async function loadSettings(): Promise<AppSettings> {
         : null,
       globalEngineBackends: migrateGlobalEngineBackends(data.globalEngineBackends),
       autoUpdateTrackedEngines: !!data.autoUpdateTrackedEngines,
+      engineInstallMode: data.engineInstallMode === 'source' ? 'source' : 'binary',
+      autoUpdateBuildTools: data.autoUpdateBuildTools !== false,
+      seededGitInstances: Array.isArray(data.seededGitInstances) ? data.seededGitInstances.filter((x: unknown): x is string => typeof x === 'string') : [],
+      rocmChannel: data.rocmChannel === 'nightly' ? 'nightly' : 'stable',
+      rocmSource: data.rocmSource === 'pip' ? 'pip' : 'tarball',
       strata: migrateStrataSettings(data.strata),
       mcp: migrateMcpSettings(data.mcp),
       launchOnStartup: !!data.launchOnStartup,
@@ -743,7 +774,7 @@ async function scanModelFolder(folderPath: string, external: boolean): Promise<M
     return null
   }
   const models: ModelEntry[] = []
-  let mmproj: MmprojFile | null = null
+  const mmprojFiles: MmprojFile[] = []
   // Sidecar speculative-decoding files — kept separate from `models` (so the
   // Template Model File dropdown never shows them) but still returned to the
   // renderer (so the Models tab can show them, non-interactively, inside
@@ -754,8 +785,8 @@ async function scanModelFolder(folderPath: string, external: boolean): Promise<M
     if (isMmprojFile(e.name)) {
       try {
         const st = await fsPromises.stat(join(folderPath, e.name))
-        // If multiple mmproj files exist, keep the first one.
-        if (!mmproj) mmproj = { name: e.name, path: join(folderPath, e.name), size: st.size }
+        const quant = mmprojQuant(e.name)
+        mmprojFiles.push({ name: e.name, path: join(folderPath, e.name), size: st.size, ...(quant ? { quant } : {}) })
       } catch {}
       continue
     }
@@ -770,6 +801,9 @@ async function scanModelFolder(folderPath: string, external: boolean): Promise<M
       }
     } catch {}
   }
+  // Every projector is kept, the most precise first; that one is the default.
+  const mmprojs = sortMmprojs(mmprojFiles)
+  const mmproj: MmprojFile | null = mmprojs[0] ?? null
   if (models.length === 0 && !mmproj && specDecodeSidecars.length === 0) return null
   const modelSize = models.reduce((a, m) => a + m.size, 0)
   const mmprojSize = mmproj ? mmproj.size : 0
@@ -779,6 +813,7 @@ async function scanModelFolder(folderPath: string, external: boolean): Promise<M
     external,
     models,
     mmproj,
+    mmprojs,
     specDecodeSidecars,
     totalSize: modelSize + mmprojSize,
     modelSize
@@ -814,6 +849,7 @@ async function scanModelRoot(rootDir: string, rootExternal: boolean): Promise<Mo
           external: rootExternal,
           models: isSidecar ? [] : [{ name: e.name, path: join(rootDir, e.name), size: st.size }],
           mmproj: null,
+          mmprojs: [],
           specDecodeSidecars: isSidecar && tierDef ? [{ name: e.name, path: join(rootDir, e.name), size: st.size, tier: tierDef.tier, method: tierDef.method, label: tierDef.label }] : [],
           totalSize: st.size,
           modelSize: isSidecar ? 0 : st.size
@@ -964,7 +1000,7 @@ async function findGgufTool(): Promise<string | null> {
           versions = readdirSync(join(root.dir, forkDir.name), { withFileTypes: true })
         } catch { continue }
         for (const verDir of versions) {
-          if (!verDir.isDirectory()) continue
+          if (!verDir.isDirectory() || verDir.name.startsWith('.')) continue
           const dir = join(root.dir, forkDir.name, verDir.name)
           // Recursive search — finds the tool even when nested in build/bin/.
           const found = discoverToolByName(dir, GGUF_TOOL_NAMES)
@@ -982,6 +1018,7 @@ function runToolArgs(toolPath: string, args: string[]): Promise<{ stdout: string
     const child = spawn(toolPath, args, {
       stdio: ['pipe', 'pipe', 'pipe'],
       cwd: dirname(toolPath),
+      env: engineRuntimeEnv(dirname(toolPath)),
       windowsHide: true,
       timeout: 15000
     })
@@ -1161,14 +1198,18 @@ async function scanBackendRoot(rootDir: string, rootExternal: boolean, rootIndex
     } catch {
       l2Entries = []
     }
-    const l2Dirs = l2Entries.filter(d => d.isDirectory() && !d.name.startsWith('.staging-'))
+    // Dot folders hold staging copies, the source clone and build trees.
+    const l2Dirs = l2Entries.filter(d => d.isDirectory() && !d.name.startsWith('.'))
     let foundAnyNested = false
     for (const l2 of l2Dirs) {
       const l2Path = join(forkDir, l2.name)
       // A git-installed engine (Strata): a clone recognised by its files.
       if (looksLikeStrataClone(l2Path)) {
         foundAnyNested = true
-        const version = await gitVersionLabel(l2Path)
+        // Another OS's instance in a shared engines folder is not ours to list or launch.
+        const owner = cloneOsOf(l2Path)
+        if (owner && owner !== NATIVE_PLATFORM) continue
+        const version = await gitEngineVersionLabel(l2Path)
         out.push({
           id: `${rootIndex}::${e.name}::${l2.name}`,
           name: l2.name,
@@ -2572,6 +2613,8 @@ export function registerIpcHandlers(): void {
         }
         const left = readdirSync(typeDir, { withFileTypes: true }).some(v => v.isDirectory())
         if (!left) await rmrf(typeDir)
+        // The CMake build tree of this type is only useful for rebuilding it.
+        if (platform === NATIVE_PLATFORM) await rmrf(workDirs(join(root.dir, opts.backendKey)).build(opts.backendType))
       }
       return { success: true, deleted: deletedAny }
     } catch (err) {
@@ -2704,24 +2747,48 @@ export function registerIpcHandlers(): void {
   ipcMain.handle('add-tracked-backend', async (_e, link: string, manualEngine?: string) => {
     const trimmed = (link || '').trim()
     if (!trimmed) return { success: false, error: 'Empty link' }
-    // Accept either "owner/repo" or a full github URL.
-    let repo: string
-    const m = trimmed.match(/github\.com\/([^/]+\/[^/]+?)(?:\/|$)/)
-    if (m) repo = m[1]
-    else if (/^[^/\s]+\/[^/\s]+$/.test(trimmed)) repo = trimmed
-    else return { success: false, error: 'Unrecognised GitHub link. Use https://github.com/owner/repo or owner/repo.' }
+    // Accept "owner/repo", "owner/repo@branch" or a full github URL (which may
+    // point at a branch with /tree/<branch>).
+    const parsed = parseRepoLink(trimmed)
+    if (!parsed) return { success: false, error: 'Unrecognised GitHub link. Use https://github.com/owner/repo or owner/repo.' }
+    const repo = parsed.repo
+    // The branch is only kept when it is not the repo's default one: an entry
+    // without a branch always follows whatever the default branch is.
+    let branch: string | undefined
+    if (parsed.branchPath) {
+      const info = await repoBranches(repo)
+      if (info) {
+        const picked = pickBranch(parsed.branchPath, info.heads)
+        if (!picked) return { success: false, error: `Branch "${parsed.branchPath}" was not found in ${repo}.` }
+        if (picked !== info.defaultBranch) branch = picked
+      } else {
+        // git is missing or the remote did not answer: GitHub's API can still
+        // tell the default branch.
+        try {
+          const meta = await fetchJson(`https://api.github.com/repos/${repo}`) as { default_branch?: string }
+          if (parsed.branchPath !== meta.default_branch) branch = parsed.branchPath
+        } catch (err) {
+          return { success: false, error: `Could not check the branch: ${String((err as Error).message || err)}` }
+        }
+      }
+    }
     const s = await loadSettings()
-    if (s.trackedBackends.find(t => t.repo.toLowerCase() === repo.toLowerCase())) return { success: false, error: 'Already tracked' }
+    if (s.trackedBackends.find(t => t.repo.toLowerCase() === repo.toLowerCase() && (t.branch ?? '') === (branch ?? ''))) return { success: false, error: 'Already tracked' }
     const taken = new Set(s.trackedBackends.map(t => t.folderName.toLowerCase()))
-    const folderName = backendFolderNameFor(repo, taken)
-    const displayName = repo.split('/').pop() || repo
-    const id = folderName + '-' + Date.now().toString(36)
+    const folderName = backendFolderNameFor(repo, taken, branch)
+    const displayName = trackedDisplayName(repo.split('/').pop() || repo, branch)
+    const id = folderName.replace(/@/g, '-') + '-' + Date.now().toString(36)
     // Engines installed by cloning are recognised by the repo's files; a
     // manual choice from the Add dialog overrides the probe.
-    const probed = manualEngine ? null : await probeGitEngine(repo)
+    const probed = manualEngine ? null : await probeGitEngine(repo, branch)
     const engine: EngineId = manualEngine ? engineOf(manualEngine) : (probed?.engine ?? 'llama.cpp')
     const tracked: TrackedBackend = { id, repo, name: displayName, folderName, isDefault: false }
+    if (branch) tracked.branch = branch
     if (engine !== 'llama.cpp') { tracked.engine = engine; tracked.kind = 'git' }
+    // A branch of a built-in fork keeps that fork's parameter overrides.
+    const builtIn = DEFAULT_TRACKED.find(d => d.repo.toLowerCase() === repo.toLowerCase())
+    if (builtIn?.defaultOptions) tracked.defaultOptions = builtIn.defaultOptions
+    if (builtIn?.extraCommands) tracked.extraCommands = builtIn.extraCommands
     s.trackedBackends.push(tracked)
     await saveSettings(s)
     return { success: true, tracked }
@@ -3220,7 +3287,7 @@ export function registerIpcHandlers(): void {
       // `taskkill /F /T` instead, so detached doesn't matter there.
       const proc = strataSpawn && !('error' in strataSpawn)
         ? spawn(strataSpawn.command, strataSpawn.args, strataSpawn.options)
-        : spawn(exePath, finalArgs, { detached: process.platform !== 'win32', stdio: 'pipe', cwd: dirname(exePath), windowsHide: false })
+        : spawn(exePath, finalArgs, { detached: process.platform !== 'win32', stdio: 'pipe', cwd: dirname(exePath), windowsHide: false, env: engineRuntimeEnv(dirname(exePath)) })
       if (isStrata) {
         // setup, the server and the engine's narration all arrive on these
         // two pipes; whole lines go to the Logs view, one entry per line.
@@ -3341,7 +3408,7 @@ export function registerIpcHandlers(): void {
           })
         }
       }
-      proc.on('exit', () => {
+      proc.on('exit', (exitCode) => {
         // Guard against a STALE exit event: rapid stop→start→stop→start
         // cycles (exactly what benchmark/switch-template do, much faster
         // than a human clicking buttons ever would) can mean this process's
@@ -3360,7 +3427,10 @@ export function registerIpcHandlers(): void {
         const wasReady = serverReadyFlags.get(opts.id)
         serverReadyFlags.delete(opts.id)
         modelLoadingFlags.delete(opts.id)
-        emitAppLog(opts.id, opts.name, wasReady ? '■ Model stopped' : '■ Process exited')
+        // A server that dies at once is usually a missing library, which the
+        // operating system reports only as an exit code.
+        const why = !wasReady && exitCode ? explainExitCode(exitCode) : ''
+        emitAppLog(opts.id, opts.name, wasReady ? '■ Model stopped' : `■ Process exited${exitCode ? ` with code ${exitCode}${exitCode > 255 ? ` (0x${(exitCode >>> 0).toString(16).toUpperCase()})` : ''}` : ''}${why ? `: ${why}` : ''}`)
         BrowserWindow.getAllWindows().forEach(win => {
           win.webContents.send('model-exited', { id: opts.id })
         })
@@ -3716,19 +3786,239 @@ export function registerIpcHandlers(): void {
     processDownloadQueue()
   }
 
+  // ----- Source builds -----
+  // One compile at a time: it saturates every core. Builds run beside the
+  // binary downloads and git engine updates, which never wait for it. Progress
+  // goes out on the download-progress channel as (trackedId, "build:<type>").
+  interface QueuedBuild {
+    trackedId: string
+    type: string
+    extraArgs: string[]
+    // Started by a person (a build button) rather than by Update all or the
+    // startup auto-update: only then may it install or update build tools,
+    // which can ask for administrator rights.
+    userInitiated: boolean
+    installTools: boolean
+    gpuTarget?: string
+    pull?: boolean
+    sender: Electron.WebContents
+    resolve: (result: { success: boolean; path?: string; error?: string }) => void
+  }
+  const buildQueue: QueuedBuild[] = []
+  let activeBuild: { trackedId: string; type: string; abort: AbortController } | null = null
+
+  function sendBuildProgress(sender: Electron.WebContents, trackedId: string, type: string, phase: BuildPhase | 'queued' | 'done', percent: number, queuePosition?: number) {
+    sendDownloadProgress(sender, { percent, phase, trackedId, assetName: `build:${type}`, queuePosition })
+  }
+  function broadcastBuildQueue(): void {
+    buildQueue.forEach((q, i) => sendBuildProgress(q.sender, q.trackedId, q.type, 'queued', 0, i + 1))
+  }
+  function isBuildPending(trackedId: string, type: string): boolean {
+    return (activeBuild?.trackedId === trackedId && activeBuild.type === type)
+      || buildQueue.some(q => q.trackedId === trackedId && q.type === type)
+  }
+
+  async function toolsContext(gpuTarget?: string, type?: string): Promise<ToolsContext> {
+    const s = await loadSettings()
+    return { rootDir: await resolveMainBackendFolder(), gpuTarget, cudaSeries: type ? cudaTypeVersion(type) : undefined, rocmChannel: s.rocmChannel === 'nightly' ? 'nightly' : 'stable', rocmSource: s.rocmSource === 'pip' ? 'pip' : 'tarball' }
+  }
+
+  function enqueueBuild(sender: Electron.WebContents, job: { trackedId: string; type: string; extraArgs: string[]; userInitiated?: boolean; installTools?: boolean; gpuTarget?: string; pull?: boolean }) {
+    return new Promise<{ success: boolean; path?: string; error?: string }>(resolve => {
+      if (isBuildPending(job.trackedId, job.type)) return resolve({ success: false, error: 'This build is already running or queued.' })
+      buildQueue.push({ ...job, userInitiated: !!job.userInitiated, installTools: !!job.installTools, sender, resolve })
+      broadcastBuildQueue()
+      void processBuildQueue()
+    })
+  }
+
+  async function runQueuedBuild(q: QueuedBuild): Promise<void> {
+    // Claimed before the first await so a second pass through the queue cannot
+    // start another compile.
+    const abort = new AbortController()
+    activeBuild = { trackedId: q.trackedId, type: q.type, abort }
+    const send = (name: string) => (line: string, app?: boolean) => {
+      BrowserWindow.getAllWindows().forEach(win => {
+        if (!win.isDestroyed()) win.webContents.send('server-log', { id: buildLogId(q.trackedId, q.type), name, stream: app ? 'app' : 'stdout', line, ts: Date.now() })
+      })
+    }
+    try {
+      const t = (await loadSettings()).trackedBackends.find(x => x.id === q.trackedId)
+      if (!t || t.kind === 'git') return q.resolve({ success: false, error: 'This engine cannot be built from source.' })
+      const log = send(`Build: ${t.name} (${q.type})`)
+      log(`Build started: ${t.repo}${t.branch ? ` (${t.branch})` : ''}, ${q.type}`, true)
+      const killTree = (proc: import('child_process').ChildProcess) => killProcessTree(proc)
+      if (q.userInitiated) {
+        sendBuildProgress(q.sender, q.trackedId, q.type, 'tools', 0)
+        const toolsError = await prepareBuildTools(
+          q.type,
+          { install: q.installTools, update: (await loadSettings()).autoUpdateBuildTools !== false },
+          { log, killTree, signal: abort.signal, progress: percent => sendBuildProgress(q.sender, q.trackedId, q.type, 'tools', percent) },
+          await toolsContext(q.gpuTarget, q.type)
+        )
+        buildToolsCache.clear()
+        invalidateBuildToolsCaches()
+        if (abort.signal.aborted) return q.resolve({ success: false, error: 'Cancelled' })
+        if (toolsError) {
+          log(`Build failed: ${toolsError}`, true)
+          return q.resolve({ success: false, error: toolsError })
+        }
+      }
+      sendBuildProgress(q.sender, q.trackedId, q.type, 'cloning', 0)
+      const rootDir = await resolveMainBackendFolder()
+      // A ROCm SDK the app downloaded for this GPU's family is used for the build.
+      const family = q.type === 'rocm' && q.gpuTarget ? rocmGpu(q.gpuTarget)?.family : undefined
+      // The SDK the app downloaded for this GPU's family, else a usable one already on the machine.
+      const rocmRoot = q.type === 'rocm'
+        ? (family ? findInstalledRocm(rootDir, family, (await toolsContext()).rocmSource)?.root : undefined) ?? (await detectToolchain()).hipRoot ?? undefined
+        : undefined
+      const res = await buildFromSource(
+        { repo: t.repo, branch: t.branch, folderName: t.folderName, type: q.type, extraArgs: q.extraArgs, gpuTarget: q.gpuTarget, rocmRoot, cudaRoot: isCudaType(q.type) ? findCudaRoot(cudaTypeVersion(q.type))?.root : undefined, pull: q.pull, rootDir },
+        {
+          log,
+          progress: (phase, percent) => sendBuildProgress(q.sender, q.trackedId, q.type, phase, percent),
+          killTree,
+          signal: abort.signal
+        }
+      )
+      log(res.ok ? `Build finished: ${res.version}` : res.cancelled ? 'Build cancelled.' : `Build failed: ${res.error}`, true)
+      if (res.ok) {
+        BrowserWindow.getAllWindows().forEach(win => {
+          if (!win.isDestroyed()) win.webContents.send('backends-changed', { deleted: [] })
+        })
+      }
+      q.resolve(res.ok ? { success: true, path: res.versionDir } : { success: false, error: res.error })
+    } catch (err) {
+      q.resolve({ success: false, error: String((err as Error)?.message || err) })
+    } finally {
+      // Terminal event, as for downloads: drops the progress entry whatever
+      // the outcome.
+      sendBuildProgress(q.sender, q.trackedId, q.type, 'done', 100)
+      activeBuild = null
+    }
+  }
+
+  async function processBuildQueue(): Promise<void> {
+    if (activeBuild) return
+    const next = buildQueue.shift()
+    if (!next) return
+    broadcastBuildQueue()
+    await runQueuedBuild(next)
+    void processBuildQueue()
+  }
+
+  ipcMain.handle('build-from-source', (event, opts: { trackedId: string; type: string; extraArgs?: string; installTools?: boolean; gpuTarget?: string; pull?: boolean }) => {
+    if (!sourceBuildType(opts?.type)) return Promise.resolve({ success: false, error: `Unknown build type "${opts?.type}".` })
+    const parsed = splitBuildArgs(opts.extraArgs || '')
+    if ('error' in parsed) return Promise.resolve({ success: false, error: parsed.error })
+    return enqueueBuild(event.sender, { trackedId: opts.trackedId, type: opts.type, extraArgs: parsed.args, userInitiated: true, installTools: !!opts.installTools, gpuTarget: opts.gpuTarget, pull: opts.pull })
+  })
+  // A queued build is just removed from the queue; the running one is killed.
+  ipcMain.handle('cancel-source-build', (_e, trackedId: string, type: string) => {
+    const idx = buildQueue.findIndex(q => q.trackedId === trackedId && q.type === type)
+    if (idx !== -1) {
+      const [removed] = buildQueue.splice(idx, 1)
+      sendBuildProgress(removed.sender, trackedId, type, 'done', 0)
+      removed.resolve({ success: false, error: 'Cancelled' })
+      broadcastBuildQueue()
+    } else if (activeBuild?.trackedId === trackedId && activeBuild.type === type) {
+      activeBuild.abort.abort()
+    }
+    return { success: true }
+  })
+  // What the tools a build of this type needs look like. Asking the package
+  // manager about updates takes a moment, so an answer is reused briefly.
+  const buildToolsCache = new Map<string, { at: number; status: ToolsPlanStatus }>()
+  const buildToolsPending = new Map<string, Promise<ToolsPlanStatus>>()
+  ipcMain.handle('get-build-tools-plan', async (_e, type: string, gpuTarget?: string) => {
+    if (!sourceBuildType(type)) return null
+    const key = `${type}|${gpuTarget ?? ''}`
+    const hit = buildToolsCache.get(key)
+    if (hit && Date.now() - hit.at < 60_000) return hit.status
+    // Cards that ask for the same thing at the same moment share one answer.
+    const pending = buildToolsPending.get(key)
+    if (pending) return pending
+    const work = (async () => {
+      const status = await buildToolsStatus(type, await toolsContext(gpuTarget, type))
+      buildToolsCache.set(key, { at: Date.now(), status })
+      return status
+    })().finally(() => buildToolsPending.delete(key))
+    buildToolsPending.set(key, work)
+    return work
+  })
+  // The GPUs this machine reports, matched to ROCm targets, and every target
+  // that can be chosen by hand.
+  ipcMain.handle('get-rocm-gpus', async () => {
+    const detected: { name: string; gfx: string | null }[] = []
+    try {
+      const si = (await import('systeminformation')).default
+      const g = await si.graphics()
+      for (const c of g.controllers || []) {
+        const name = `${c.vendor || ''} ${c.model || ''}`.trim()
+        if (/amd|advanced micro|radeon|ati/i.test(name)) detected.push({ name, gfx: gfxForGpuName(name) })
+      }
+    } catch { /* detection is a convenience; the list can be used by hand */ }
+    return { detected, gpus: ROCM_GPUS }
+  })
+  let installingTools = false
+  ipcMain.handle('install-build-tools', async (_e, opts: { type: string; mode: 'install' | 'update'; gpuTarget?: string }) => {
+    if (!sourceBuildType(opts?.type)) return { success: false, error: `Unknown build type "${opts?.type}".` }
+    if (installingTools) return { success: false, error: 'Build tools are already being installed.' }
+    installingTools = true
+    const abort = new AbortController()
+    const log = (line: string, app?: boolean) => {
+      BrowserWindow.getAllWindows().forEach(win => {
+        if (!win.isDestroyed()) win.webContents.send('server-log', { id: 'build:tools', name: 'Build tools', stream: app ? 'app' : 'stdout', line, ts: Date.now() })
+      })
+    }
+    try {
+      const ctx = await toolsContext(opts.gpuTarget, opts.type)
+      const status = await buildToolsStatus(opts.type, ctx)
+      const wanted = status.tools.filter(t => opts.mode === 'install' ? !t.present : t.present && t.outdated).map(t => t.id)
+      if (!wanted.length) return { success: true }
+      log(`${opts.mode === 'install' ? 'Installing' : 'Updating'}: ${wanted.join(', ')}`, true)
+      const res = await installBuildTools(wanted, opts.mode, { log, killTree: proc => killProcessTree(proc), signal: abort.signal }, ctx)
+      log(res.ok ? 'Build tools are ready.' : `Failed: ${res.error}`, true)
+      return res.ok ? { success: true } : { success: false, error: res.error }
+    } finally {
+      installingTools = false
+      buildToolsCache.clear()
+      invalidateBuildToolsCaches()
+    }
+  })
+
   // ----- Git-installed engines (Strata) -----
-  // The clone of a git engine: the first folder under <root>/<folderName>/
-  // that has the engine's marker files.
+  // The clone of a git engine for this OS: a folder under <root>/<folderName>/ that
+  // has the engine's marker files and was made on this system (an engines folder
+  // can be shared with another OS, which has an instance of its own).
   async function findGitEngineClone(tracked: TrackedBackend): Promise<string | null> {
     for (const root of await backendRoots()) {
-      const forkDir = join(root.dir, tracked.folderName)
-      let subs: import('fs').Dirent[]
-      try { subs = readdirSync(forkDir, { withFileTypes: true }) } catch { continue }
-      for (const d of subs) {
-        if (d.isDirectory() && looksLikeStrataClone(join(forkDir, d.name))) return join(forkDir, d.name)
-      }
+      const found = instanceForOs(gitEngineInstances(join(root.dir, tracked.folderName)))
+      if (found) return found.path
     }
     return null
+  }
+
+  // Makes this OS's instance of a git engine: from the instance another OS left in
+  // the engines folder when there is one (a local copy, nothing fetched, and the
+  // environment and build output of the other system stay behind), else cloned.
+  async function createGitEngineInstance(t: TrackedBackend): Promise<{ success: boolean; path?: string; error?: string; copiedFrom?: string }> {
+    if (!(await gitAvailable())) return { success: false, error: 'git was not found. Install git and make sure it is on PATH.' }
+    const repoName = t.repo.split('/')[1]
+    for (const root of await backendRoots()) {
+      const forkDir = join(root.dir, t.folderName)
+      const instances = gitEngineInstances(forkDir)
+      if (instanceForOs(instances)) return { success: false, error: 'Already installed' }
+      const source = instanceToCopy(instances)
+      if (!source) continue
+      const dest = join(forkDir, instanceNameFor(forkDir, repoName))
+      const r = await cloneGitEngineFrom(source.path, dest, t.repo)
+      return r.ok ? { success: true, path: dest, copiedFrom: source.path } : { success: false, error: r.error }
+    }
+    const dest = join(await resolveMainBackendFolder(), t.folderName, repoName)
+    mkdirSync(dirname(dest), { recursive: true })
+    const r = await cloneGitEngine(t.repo, dest, t.branch)
+    return r.ok ? { success: true, path: dest } : { success: false, error: r.error }
   }
 
   function isEngineRunningFrom(cloneDir: string): boolean {
@@ -3751,11 +4041,35 @@ export function registerIpcHandlers(): void {
       status.error = String(err?.message || err)
     }
     if (clone) {
-      status.localVersion = await gitVersionLabel(clone)
+      status.localVersion = await gitEngineVersionLabel(clone)
       const baseTag = baseTagOf(status.localVersion)
       status.updateAvailable = !!(status.latestTag && baseTag && compareTags(status.latestTag, baseTag) > 0)
     }
     return status
+  }
+
+  // Build from Source mode: the state is the compiled builds on disk against
+  // the tip of the followed branch, not release assets.
+  async function fetchSourceStatus(tracked: TrackedBackend, base: TrackedBackendRelease): Promise<TrackedBackendRelease> {
+    if (!(await gitAvailable())) return { ...base, error: 'git was not found. Install git and make sure it is on PATH to build from source.' }
+    const remote = await remoteBranchCommit(tracked.repo, tracked.branch)
+    if (!remote.commit) return { ...base, error: remote.error || 'Could not reach GitHub' }
+    const roots = (await backendRoots()).map(r => r.dir)
+    // Removals, and folders that could not be removed, go to the Logs view.
+    await pruneSupersededBuilds(roots, tracked.folderName, line => {
+      BrowserWindow.getAllWindows().forEach(win => {
+        if (!win.isDestroyed()) win.webContents.send('server-log', { id: buildLogId(tracked.id, 'cleanup'), name: `Cleanup: ${tracked.name}`, stream: 'app', line, ts: Date.now() })
+      })
+    })
+    const builds = scanSourceBuilds(roots, tracked.folderName, remote.commit)
+    return {
+      ...base,
+      tagName: remote.commit.slice(0, 7),
+      name: `${remote.branch ?? 'default branch'} @ ${remote.commit.slice(0, 7)}`,
+      url: `https://github.com/${tracked.repo}${tracked.branch ? `/tree/${tracked.branch}` : ''}`,
+      isNewer: builds.some(b => b.outdated) ? true : builds.length > 0 ? false : undefined,
+      source: { gitAvailable: true, remoteCommit: remote.commit, builds }
+    }
   }
 
   async function fetchTrackedRelease(tracked: TrackedBackend): Promise<TrackedBackendRelease> {
@@ -3778,17 +4092,19 @@ export function registerIpcHandlers(): void {
         git
       }
     }
+    if (((await loadSettings()).engineInstallMode ?? 'binary') === 'source') return fetchSourceStatus(tracked, base)
+    // Release binaries are not per branch, so a branch entry can only be built.
+    if (tracked.branch) return { ...base, needsSource: 'branch' }
     try {
       const arch = process.arch
       function platformAssetsFor(rel: any): any[] {
         return (rel.assets || []).filter((a: any) => assetMatchesHost(a.name, process.platform, arch))
       }
       const releases = await fetchJson(`https://api.github.com/repos/${tracked.repo}/releases?per_page=20`) as any
-      if (!Array.isArray(releases) || releases.length === 0) {
-        return { ...base, error: 'Invalid response from GitHub' }
-      }
+      if (!Array.isArray(releases)) return { ...base, error: 'Invalid response from GitHub' }
+      if (releases.length === 0) return { ...base, needsSource: 'no-releases' }
       const release = selectLatestRelease<any>(releases, rel => platformAssetsFor(rel).length > 0)
-      if (!release) return { ...base, error: 'No releases found' }
+      if (!release) return { ...base, needsSource: 'no-releases' }
       const platformAssets = platformAssetsFor(release)
       // Per-asset install status: each asset represents a distinct GPU-
       // runtime variant (see extractBackendTypeFromAssetName), installed
@@ -3803,7 +4119,7 @@ export function registerIpcHandlers(): void {
           if (!existsSync(typeDir)) continue
           try {
             for (const v of readdirSync(typeDir, { withFileTypes: true })) {
-              if (v.isDirectory() && !v.name.startsWith('.staging-') && platformOfBuildDir(join(typeDir, v.name)) === NATIVE_PLATFORM) versions.push(v.name)
+              if (v.isDirectory() && !v.name.startsWith('.staging-') && !isSourceBuildDir(join(typeDir, v.name)) && platformOfBuildDir(join(typeDir, v.name)) === NATIVE_PLATFORM) versions.push(v.name)
             }
           } catch { /* ignore */ }
         }
@@ -3932,14 +4248,27 @@ export function registerIpcHandlers(): void {
 
   // Git engines are pulled in parallel, so two requests for the same clone
   // (a row's button during Update all) share one pull instead of racing in it.
+  // Whoever starts a pull, every window is told, so a row shows it as updating
+  // even when it was started by Update all or the startup auto-update.
   const gitUpdatesInFlight = new Map<string, ReturnType<typeof updateGitEngine>>()
-  function updateGitEngineOnce(dir: string): ReturnType<typeof updateGitEngine> {
+  function updateGitEngineOnce(dir: string, trackedId?: string): ReturnType<typeof updateGitEngine> {
     const running = gitUpdatesInFlight.get(dir)
     if (running) return running
-    const run = updateGitEngine(dir).finally(() => gitUpdatesInFlight.delete(dir))
+    const announce = (busy: boolean) => {
+      if (!trackedId) return
+      BrowserWindow.getAllWindows().forEach(win => {
+        if (!win.isDestroyed()) win.webContents.send('engine-update-state', { trackedId, busy })
+      })
+    }
+    announce(true)
+    const run = updateGitEngine(dir).finally(() => { gitUpdatesInFlight.delete(dir); announce(false) })
     gitUpdatesInFlight.set(dir, run)
     return run
   }
+
+  // When an engine last finished an update, so a startup check that began
+  // earlier does not put its older "update available" result back on screen.
+  const engineSettledAt = new Map<string, number>()
 
   // Brings every installed tracked engine up to its latest release: release
   // engines re-download their outdated variants (never a variant that is not
@@ -3953,6 +4282,7 @@ export function registerIpcHandlers(): void {
     // refreshed and that engine alone is re-checked, so its "update available"
     // badge clears at once instead of waiting for the rest of the run.
     const settled = async (t: TrackedBackend) => {
+      engineSettledAt.set(t.id, Date.now())
       BrowserWindow.getAllWindows().forEach(win => {
         if (!win.isDestroyed()) win.webContents.send('backends-changed', { deleted: [] })
       })
@@ -3971,7 +4301,7 @@ export function registerIpcHandlers(): void {
       if (!clone || isEngineRunningFrom(clone)) return
       const st = await gitEngineStatus(t)
       if (!st.updateAvailable) return
-      const r = await updateGitEngineOnce(clone)
+      const r = await updateGitEngineOnce(clone, t.id)
       if (r.error) errors.push(`${t.name}: ${r.error}`)
       else if (r.updated) { updated.push(t.name); void refreshStrataVerdicts() }
       if (r.error || r.updated) await settled(t)
@@ -3980,6 +4310,15 @@ export function registerIpcHandlers(): void {
       if (!sender || sender.isDestroyed()) return
       for (const t of s.trackedBackends.filter(x => x.kind !== 'git')) {
         const rel = await fetchTrackedRelease(t)
+        // Build from Source mode: rebuild what is behind its branch, with the
+        // arguments it was first built with.
+        for (const b of rel.source?.builds ?? []) {
+          if (!b.outdated) continue
+          const res = await enqueueBuild(sender, { trackedId: t.id, type: b.type, extraArgs: b.args, gpuTarget: b.gpuTarget })
+          if (res.success) updated.push(`${t.name} (${b.type})`)
+          else errors.push(`${t.name}: ${res.error}`)
+          await settled(t)
+        }
         for (const asset of rel.assets || []) {
           if (asset.status !== 'outdated') continue
           const res = await new Promise<{ success: boolean; error?: string }>(resolve => {
@@ -4012,16 +4351,12 @@ export function registerIpcHandlers(): void {
     const s = await loadSettings()
     const t = s.trackedBackends.find(x => x.id === trackedId)
     if (!t || t.kind !== 'git') return { success: false, error: 'Not a git-installed engine' }
-    if (!(await gitAvailable())) return { success: false, error: 'git was not found. Install git and make sure it is on PATH.' }
-    if (await findGitEngineClone(t)) return { success: false, error: 'Already installed' }
-    const dest = join(await resolveMainBackendFolder(), t.folderName, t.repo.split('/')[1])
-    mkdirSync(dirname(dest), { recursive: true })
-    const r = await cloneGitEngine(t.repo, dest, t.branch)
+    const r = await createGitEngineInstance(t)
     BrowserWindow.getAllWindows().forEach(win => {
       if (!win.isDestroyed()) win.webContents.send('backends-changed', { deleted: [] })
     })
-    if (r.ok) void refreshStrataVerdicts()
-    return r.ok ? { success: true, path: dest } : { success: false, error: r.error }
+    if (r.success) void refreshStrataVerdicts()
+    return r.success ? { success: true, path: r.path } : { success: false, error: r.error }
   })
 
   ipcMain.handle('update-git-engine', async (_e, trackedId: string) => {
@@ -4031,7 +4366,7 @@ export function registerIpcHandlers(): void {
     const clone = await findGitEngineClone(t)
     if (!clone) return { success: false, error: 'Not installed' }
     if (isEngineRunningFrom(clone)) return { success: false, error: 'A model is running from this install. Stop it first.' }
-    const r = await updateGitEngineOnce(clone)
+    const r = await updateGitEngineOnce(clone, t.id)
     BrowserWindow.getAllWindows().forEach(win => {
       if (!win.isDestroyed()) win.webContents.send('backends-changed', { deleted: [] })
     })
@@ -5295,6 +5630,10 @@ export function registerIpcHandlers(): void {
     const resolved = resolveStrataData(strata.data, await resolveMainBackendFolder())
     return {
       autoUpdateTrackedEngines: !!s.autoUpdateTrackedEngines,
+      engineInstallMode: (s.engineInstallMode === 'source' ? 'source' : 'binary') as EngineInstallMode,
+      autoUpdateBuildTools: s.autoUpdateBuildTools !== false,
+      rocmChannel: (s.rocmChannel === 'nightly' ? 'nightly' : 'stable') as RocmChannel,
+      rocmSource: (s.rocmSource === 'pip' ? 'pip' : 'tarball') as RocmSdkSource,
       strata,
       // What Strata will actually use, and what its own settings remember
       // (an existing install may point somewhere else).
@@ -5306,6 +5645,32 @@ export function registerIpcHandlers(): void {
   ipcMain.handle('set-auto-update-tracked-engines', async (_e, enabled: boolean) => {
     const s = await loadSettings()
     s.autoUpdateTrackedEngines = !!enabled
+    await saveSettings(s)
+    return { success: true }
+  })
+  ipcMain.handle('set-engine-install-mode', async (_e, mode: string) => {
+    const s = await loadSettings()
+    s.engineInstallMode = mode === 'source' ? 'source' : 'binary'
+    await saveSettings(s)
+    return { success: true }
+  })
+  ipcMain.handle('set-rocm-channel', async (_e, channel: string) => {
+    const s = await loadSettings()
+    s.rocmChannel = channel === 'nightly' ? 'nightly' : 'stable'
+    await saveSettings(s)
+    buildToolsCache.clear()
+    return { success: true }
+  })
+  ipcMain.handle('set-rocm-source', async (_e, source: string) => {
+    const s = await loadSettings()
+    s.rocmSource = source === 'pip' ? 'pip' : 'tarball'
+    await saveSettings(s)
+    buildToolsCache.clear()
+    return { success: true }
+  })
+  ipcMain.handle('set-auto-update-build-tools', async (_e, enabled: boolean) => {
+    const s = await loadSettings()
+    s.autoUpdateBuildTools = !!enabled
     await saveSettings(s)
     return { success: true }
   })
@@ -5462,18 +5827,55 @@ export function registerIpcHandlers(): void {
   loadSettings().then(async (s) => {
     if (!s.trackedBackends || s.trackedBackends.length === 0) return
     try {
-      const results = await Promise.all(s.trackedBackends.map(t => fetchTrackedRelease(t)))
+      // A repo that used to be tracked twice has its installs in two folders.
+      const roots = (await backendRoots()).map(r => r.dir)
+      for (const t of s.trackedBackends) {
+        for (const old of t.legacyFolders ?? []) {
+          const report = await mergeEngineFolder(roots, old, t.folderName)
+          if (report.failed.length) console.warn(`[engines] could not move ${report.failed.length} item(s) of "${old}" into "${t.folderName}"; they are tried again at the next start`)
+        }
+      }
+      // A git engine (Strata) that another OS installed in this shared engines folder gets
+      // an instance for this OS made from that one, once: the launcher would otherwise
+      // rebuild the other system's every time. One deleted afterwards stays deleted.
+      try {
+        const cur = await loadSettings()
+        const seeded = new Set(cur.seededGitInstances ?? [])
+        let seededAny = false
+        for (const t of cur.trackedBackends) {
+          const key = `${t.id}:${NATIVE_PLATFORM}`
+          if (t.kind !== 'git' || seeded.has(key)) continue
+          const hasOwn = (await findGitEngineClone(t)) !== null
+          const hasOther = (await backendRoots()).some(r => instanceToCopy(gitEngineInstances(join(r.dir, t.folderName))))
+          if (hasOwn || !hasOther) continue
+          const made = await createGitEngineInstance(t)
+          if (made.success) { seeded.add(key); seededAny = true; console.log(`[engines] made ${t.name} for ${NATIVE_PLATFORM} from ${made.copiedFrom}`) }
+          else console.warn(`[engines] could not make ${t.name} for ${NATIVE_PLATFORM}: ${made.error}`)
+        }
+        if (seededAny) {
+          const latest = await loadSettings()
+          await saveSettings({ ...latest, seededGitInstances: [...seeded] })
+          BrowserWindow.getAllWindows().forEach(win => { if (!win.isDestroyed()) win.webContents.send('backends-changed', { deleted: [] }) })
+        }
+      } catch (err) { console.warn('[engines] could not check the git engines for this OS:', err) }
+      // Optional: install what is outdated. It starts at once instead of after
+      // the check below: that check waits on one GitHub request per engine, and
+      // a git engine (Strata) has no reason to wait for any of them. Release
+      // downloads report progress to the first window, which exists by now.
+      let autoUpdate: Promise<unknown> = Promise.resolve()
+      if (s.autoUpdateTrackedEngines) {
+        const win = BrowserWindow.getAllWindows().find(w => !w.isDestroyed())
+        autoUpdate = updateTrackedEnginesImpl(win ? win.webContents : null)
+      }
+      const checkStartedAt = Date.now()
+      const checked = await Promise.all(s.trackedBackends.map(t => fetchTrackedRelease(t)))
+      const results = checked.filter(r => (engineSettledAt.get(r.trackedId) ?? 0) < checkStartedAt)
       BrowserWindow.getAllWindows().forEach(win => {
         if (!win.isDestroyed()) {
           win.webContents.send('backends-checked-silent', { results })
         }
       })
-      // Optional: install what the check just found. Release downloads
-      // report progress to the first window, which exists by now.
-      if (s.autoUpdateTrackedEngines) {
-        const win = BrowserWindow.getAllWindows().find(w => !w.isDestroyed())
-        await updateTrackedEnginesImpl(win ? win.webContents : null)
-      }
+      await autoUpdate
     } catch {}
   })
 

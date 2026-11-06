@@ -15,7 +15,7 @@
 // CmdParamsEditor's own effects fill these in once that data exists).
 
 import { detectBackendRuntimeType, defaultVramOverheadForBackend, DEFAULT_RAM_OVERHEAD_MB } from './backendOverhead'
-import { TURBOQUANT_BACKEND_KEY, isBeeLlamaBackendKey } from './backendForks'
+import { isTurboQuantBackendKey, isBeeLlamaBackendKey } from './backendForks'
 
 export interface CpuInfoLike {
   physicalCores?: number
@@ -40,7 +40,7 @@ export function defaultKvQuantFor(backendKey: string | undefined | null): string
   // See the identical note in CmdParamsEditor.tsx —
   // turbo3 was silently getting K upgraded to q8_0 by llama.cpp's own
   // asymmetry safety fallback; turbo4 avoids that and is the better default.
-  if (backendKey === TURBOQUANT_BACKEND_KEY) return 'turbo4'
+  if (isTurboQuantBackendKey(backendKey)) return 'turbo4'
   return isBeeLlamaBackendKey(backendKey) ? 'kvarn4' : 'q8_0'
 }
 
@@ -56,7 +56,7 @@ export function defaultKvQuantFor(backendKey: string | undefined | null): string
 // supported on some architectures; others fail closed at launch, in which case
 // a standard type can be picked from the dropdown.
 export function defaultKvQuantVFor(backendKey: string | undefined | null): string {
-  if (backendKey === TURBOQUANT_BACKEND_KEY) return 'turbo3'
+  if (isTurboQuantBackendKey(backendKey)) return 'turbo3'
   return isBeeLlamaBackendKey(backendKey) ? 'kvarn3' : 'q8_0'
 }
 

@@ -9,6 +9,12 @@ import { buildPlatformOfHost, type BuildPlatform } from '../shared/assetPlatform
 
 export const NATIVE_PLATFORM: BuildPlatform = buildPlatformOfHost(process.platform)
 
+// Sentinel file written into every backend "type" folder (vulkan, cuda,
+// rocm, ...) when a build is installed into it -- see smartExtractBackend /
+// scanBackendRoot for why this disambiguation can't be done reliably by
+// structure alone.
+export const BACKEND_TYPE_MARKER = '.xlm-backend-type'
+
 // Windows builds always carry .exe/.dll files, macOS ones .dylib, Linux ones
 // .so libraries. Null when nothing in the folder says which.
 export function detectBuildPlatform(dir: string, depth = 0): BuildPlatform | null {

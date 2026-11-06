@@ -31,6 +31,15 @@ export const CONTEXT_POWER_OF_TWO_STEPS: number[] = (() => {
   return steps
 })()
 
+// The 2x ladder up to a model's limit, with the limit itself as the last stop
+// when it is not a power of two: a model that supports 128 000 tokens would
+// otherwise top out at 65 536 and its real maximum could not be chosen.
+export function ladderUpTo(max: number, steps: number[] = CONTEXT_POWER_OF_TWO_STEPS, min = 0): number[] {
+  const ladder = steps.filter(s => s >= min && s <= max)
+  if (max > 0 && max >= min && !ladder.includes(max)) ladder.push(max)
+  return ladder
+}
+
 // Snap an arbitrary context value to the nearest step on the 2x ladder.
 export function snapToNearestPowerOfTwo(value: number, steps: number[] = CONTEXT_POWER_OF_TWO_STEPS): number {
   let closest = steps[0]

@@ -73,7 +73,13 @@ export default function SelectMenu({ options, value, onChange, placeholder = 'Se
     }
     // The list does not move with the page, so scrolling the page (but not
     // the list itself) or resizing the window closes it, as a native menu does.
-    const onScroll = (e: Event) => { if (!panelRef.current?.contains(e.target as Node)) close() }
+    // Only a scroll that can move the button counts: another area scrolling by
+    // itself (a log list following new lines) leaves the button where it is.
+    const onScroll = (e: Event) => {
+      const t = e.target as Node
+      if (panelRef.current?.contains(t)) return
+      if (t === document || t === document.documentElement || t.contains(ref.current)) close()
+    }
     document.addEventListener('mousedown', onPointerDown)
     window.addEventListener('scroll', onScroll, true)
     window.addEventListener('resize', close)

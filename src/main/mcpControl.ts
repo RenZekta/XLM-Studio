@@ -14,6 +14,7 @@ import { applyNgramModifierToggle, getNgramModifierState, NGRAM_MAP_K4V_FLAGS, N
 import type { Template, CheckpointMode, CommandsSchema } from '../shared/types'
 import { applyMmprojOffloadFlag, MMPROJ_OFFLOAD_MODE_KEY, getMmprojOffloadMode, resolveMmprojOffloadToRam } from '../shared/mmprojOffload'
 import { applySpecDraftKvDefaults } from '../shared/specDraftKv'
+import { resolvePinned } from '../shared/backendPin'
 import { engineOf, ENGINES, type EngineId } from '../shared/engines'
 import { buildStrataArgv, buildStrataQuickBaseline, strataGgufDir, strataInfoFor } from '../shared/strata'
 
@@ -134,7 +135,7 @@ async function resolveBackend(template: Template): Promise<any> {
   if (backends.length === 0) {
     throw new ToolError(engine === 'llama.cpp'
       ? 'No backends installed - install a backend in the Backends tab first.'
-      : `${ENGINES[engine].label} is not installed - install it in the Engine tracker first.`)
+      : `${ENGINES[engine].label} is not installed - install it in the Engine Tracker first.`)
   }
   const settings = await D().loadSettings()
   // llama.cpp keeps its global selection in globalBackend; every other
@@ -144,42 +145,17 @@ async function resolveBackend(template: Template): Promise<any> {
     ? settings.globalBackend
     : (otherGlobal ? { backendKey: otherGlobal.backendKey, backendVersion: undefined, backendType: undefined } : null)
   if (template.backendKey) {
-    // backendKey+version alone stopped being unique once multi-backend-type
-    // support shipped (the same fork+version can exist under several type
-    // folders at once, e.g. a vulkan and a rocm build of the same release),
-    // so match backendType too whenever the template actually recorded one.
-    // Templates saved before that field existed (backendType undefined)
-    // fall back to the old key+version match, which stays ambiguous only
-    // for those.
-    if ((template as any).backendType !== undefined) {
-      const exact = backends.find((b: any) =>
-        b.backendKey === template.backendKey &&
-        b.name === template.backendVersion &&
-        (b.backendType ?? null) === ((template as any).backendType ?? null)
-      )
-      if (exact) return exact
-    }
-    // Ambiguous pin: a fork+version with no (or no matching) recorded type.
-    // Before grabbing whichever installed variant happens to sort first,
-    // prefer whichever matches the Global Backend's own type IF the Global
-    // Backend is ALSO this same fork+version -- the template is very likely
-    // just tracking "whatever's active" and lost its type somewhere (e.g.
-    // template-edit changing backendVersion without a type, or a template
-    // saved by an older version of this preset/create logic that pinned
-    // key+version but not type). If the Global Backend points at a
-    // different fork+version entirely, this can't help and falls through.
-    if (globalBackend?.backendKey === template.backendKey && globalBackend?.backendVersion === template.backendVersion) {
-      const globalTyped = backends.find((b: any) =>
-        b.backendKey === template.backendKey &&
-        b.name === template.backendVersion &&
-        (b.backendType ?? null) === (globalBackend.backendType ?? null)
-      )
-      if (globalTyped) return globalTyped
-    }
-    const byKeyAndVersion = backends.find((b: any) => b.backendKey === template.backendKey && b.name === template.backendVersion)
-    if (byKeyAndVersion) return byKeyAndVersion
-    const byKey = backends.find((b: any) => b.backendKey === template.backendKey)
-    if (byKey) return byKey
+    // A pin names a repo, a backend type and a version. The repo and type are
+    // what the template means; the version only picks among builds of them (a
+    // version folder is replaced by an update or rebuild). A pin that cannot be
+    // met is an error, not the global backend, which is another engine.
+    const { build, missing } = resolvePinned(engine, {
+      backendKey: template.backendKey,
+      backendType: (template as any).backendType,
+      backendVersion: template.backendVersion
+    }, backends)
+    if (build) return build
+    throw new ToolError(`The backend pinned in this template is not available: ${missing}. It was not started on a different backend.`)
   }
   if (globalBackend?.backendKey) {
     if (globalBackend.backendType !== undefined) {
@@ -471,6 +447,8 @@ export async function toolInfoModels() {
         }
       }),
       mmproj: g.mmproj ? { name: g.mmproj.name, path: g.mmproj.path, sizeBytes: g.mmproj.size } : null,
+      // Every projector in the folder, the default (most precise) first; a template can use any of them via mmprojPath.
+      mmprojs: (g.mmprojs ?? []).map(m => ({ name: m.name, path: m.path, sizeBytes: m.size, quant: m.quant ?? null })),
       specDecodeSidecars: (g.specDecodeSidecars || []).map((s: any) => ({ name: s.name, path: s.path, sizeBytes: s.size }))
     }))
   }

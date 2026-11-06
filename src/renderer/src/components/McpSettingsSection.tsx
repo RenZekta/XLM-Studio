@@ -113,7 +113,8 @@ export default function McpSettingsSection() {
             </div>
           </div>
 
-          <div className="settings-row" style={{ flexDirection: 'column', alignItems: 'flex-start', gap: 8 }}>
+          {/* No bottom border: the Tools block below draws its own top edge. */}
+          <div className="settings-row" style={{ flexDirection: 'column', alignItems: 'flex-start', gap: 8, borderBottom: 'none' }}>
             <span className="mmproj-widget-label">Benchmark history to keep per Template</span>
             <div style={{ display: 'flex', alignItems: 'center', gap: 12, width: '100%' }}>
               <input

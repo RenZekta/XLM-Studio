@@ -7,7 +7,7 @@ import CmdParamsEditor from './CmdParamsEditor'
 import EngineParamsEditor from './EngineParamsEditor'
 import { ENGINES, engineOf } from '../../../shared/engines'
 import { buildStrataArgv, strataGgufDir, strataInfoFor } from '../../../shared/strata'
-import { resolveEngineBackend } from '../utils/engineBackends'
+import { resolveEngineBackend, resolveLlamaTarget } from '../utils/engineBackends'
 import { effectiveTemplatePort, starColorForPort } from '../utils/templatePort'
 import { CUSTOM_ARGS_KEY, customArgsLaunchTokens } from '../../../shared/customArgs'
 interface Props {
@@ -112,7 +112,7 @@ export default function ModelCard({ card, selected, cut }: Props) {
     if (cardEngine !== 'llama.cpp') {
       const build = resolveEngineBackend(cardEngine, { backendKey: card.template.backendKey }, backends, activeBackend, useStore.getState().engineGlobals)
       if (!build || !build.exe) {
-        alert(`${ENGINES[cardEngine].label} is not installed. Install it from Settings > Engine tracker.`)
+        alert(`${ENGINES[cardEngine].label} is not installed. Install it from Settings > Engine Tracker.`)
         return
       }
       const modelPath = card.template.modelPath
@@ -143,30 +143,19 @@ export default function ModelCard({ card, selected, cut }: Props) {
       else { alert(`Failed to run: ${engineRes.error}`); setCardStatus(card.template.id, 'error') }
       return
     }
-    // backendVersion (the version subfolder name) is only unique within a
-    // single fork -- forks that track the same upstream can cut releases
-    // under an identical version tag. backendKey pins the fork itself, so it
-    // takes precedence. Since multi-backend-type support shipped, backendKey
-    // + version ALONE also stopped being unique (the same fork+version can
-    // exist under several type folders at once, e.g. a vulkan and a rocm
-    // build of the same release) -- so backendType is checked too whenever
-    // the template actually has one recorded, and only falls back to the
-    // old key+version-only match for templates saved before that field
-    // existed (or when the exact pinned variant is no longer installed).
-    let targetBackend = card.template.backendKey
-      ? backends.find(b =>
-          b.backendKey === card.template.backendKey &&
-          b.name === card.template.backendVersion &&
-          (card.template.backendType === undefined || (b.backendType ?? null) === (card.template.backendType ?? null))
-        )
-      : undefined
-    if (!targetBackend && card.template.backendKey) {
-      targetBackend = backends.find(b => b.backendKey === card.template.backendKey && b.name === card.template.backendVersion)
+    // The Template's pin decides the engine: its repo and backend type, and the
+    // version of them when that is still installed (a version folder is replaced
+    // by an update or rebuild). A pin that cannot be met is reported instead of
+    // being started on the sidebar's global backend, which is another engine.
+    const resolved = resolveLlamaTarget(
+      { backendKey: card.template.backendKey, backendType: card.template.backendType, backendVersion: card.template.backendVersion },
+      backends, activeBackend, useStore.getState().engineGlobals
+    )
+    if (resolved.missing) {
+      alert(`The backend pinned in this Template is not available: ${resolved.missing}. It was not started on a different backend. Install it from Settings > Engine Tracker, or edit the Template to pick another backend or follow the global one.`)
+      return
     }
-    if (!targetBackend && card.template.backendVersion) {
-      targetBackend = backends.find(b => b.name === card.template.backendVersion || b.version === card.template.backendVersion || b.id === card.template.backendVersion)
-    }
-    if (!targetBackend && activeBackend) targetBackend = activeBackend
+    const targetBackend = resolved.build
     if (!targetBackend || !targetBackend.exe) {
       alert('Backend not found or has no executable.')
       return

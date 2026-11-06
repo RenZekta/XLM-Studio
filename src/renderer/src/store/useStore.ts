@@ -1,4 +1,5 @@
 import { create } from 'zustand'
+import { setBackendKeyAliases } from '../../../shared/backendPin'
 import type { EngineId } from '../../../shared/engines'
 import type {
   Template, TemplateFolder, BackendVersion, CommandsSchema, ReleaseInfo, RunningStatus,
@@ -52,6 +53,9 @@ interface AppStore {
   // different backends AND different variants of the same backend don't
   // clobber each other's progress display.
   downloadProgress: Record<string, { percent: number; phase: string; queuePosition?: number }>
+  // Git engines being updated right now, whoever started it (a row's button,
+  // Update all, or the startup auto-update).
+  engineUpdating: Record<string, boolean>
   templateSearch: string
   modelDownloads: Record<string, ModelDownloadInfo>
   hubQuery: string
@@ -114,6 +118,7 @@ interface AppStore {
   setPaths: (p: { models: string; templates: string; backend: string; mainModelFolder: string; mainBackendFolder: string }) => void
   setUpdateDismissed: (v: boolean) => void
   setCheckingUpdate: (v: boolean) => void
+  setEngineUpdating: (trackedId: string, busy: boolean) => void
   setDownloadProgress: (trackedId: string, data: { percent: number; phase: string; queuePosition?: number } | null) => void
   setTemplateSearch: (q: string) => void
   upsertModelDownload: (d: ModelDownloadInfo) => void
@@ -166,6 +171,10 @@ interface AppStore {
   // manual "Clear" button.
   appendLogs: (entries: { id: string; name: string; stream: 'stdout' | 'stderr' | 'app'; line: string; ts: number }[]) => void
   clearLogs: () => void
+  // Which source the Logs view shows ('all', a running Template or an engine
+  // build); kept here so it survives switching to another tab and back.
+  logsSource: string
+  setLogsSource: (source: string) => void
 }
 
 export const useStore = create<AppStore>((set) => ({
@@ -173,7 +182,7 @@ export const useStore = create<AppStore>((set) => ({
   commandsSchema: null, releaseInfo: null, paths: null,
   templateFolders: [], currentFolderId: null,
   view: 'cards', showCreateModal: false, editingTemplate: null, prefillModelPath: null,
-  updateDismissed: false, checkingUpdate: false, downloadProgress: {},
+  updateDismissed: false, checkingUpdate: false, downloadProgress: {}, engineUpdating: {},
   templateSearch: '', modelDownloads: {},
   hubQuery: '', hubResults: [], hubSelectedModelId: null, hubSort: 'downloads', hubDirection: -1,
   compactSidebarEnabled: localStorage.getItem('compactSidebar') === 'true',
@@ -203,6 +212,7 @@ export const useStore = create<AppStore>((set) => ({
   quickBaselineActive: true,  // Quick settings is the default baseline
   presetMode: 'quick',        // default to Quick (matches quickBaselineActive)
   logs: [],
+  logsSource: 'all',
 
   setCompactSidebarEnabled: (enabled) => {
     localStorage.setItem('compactSidebar', String(enabled))
@@ -236,6 +246,13 @@ export const useStore = create<AppStore>((set) => ({
   setPaths: (p) => set({ paths: p }),
   setUpdateDismissed: (v) => set({ updateDismissed: v }),
   setCheckingUpdate: (v) => set({ checkingUpdate: v }),
+  setEngineUpdating: (trackedId, busy) => set((s) => {
+    if (!!s.engineUpdating[trackedId] === busy) return {}
+    const next = { ...s.engineUpdating }
+    if (busy) next[trackedId] = true
+    else delete next[trackedId]
+    return { engineUpdating: next }
+  }),
   setDownloadProgress: (trackedId, data) => set((s) => {
     if (data === null) {
       if (!(trackedId in s.downloadProgress)) return {}
@@ -279,7 +296,7 @@ export const useStore = create<AppStore>((set) => ({
   setExternalBackendFolders: (f) => set({ externalBackendFolders: f }),
   setMainModelFolder: (f) => set({ mainModelFolder: f }),
   setMainBackendFolder: (f) => set({ mainBackendFolder: f }),
-  setTrackedBackends: (t) => set({ trackedBackends: t }),
+  setTrackedBackends: (t) => { setBackendKeyAliases(t); set({ trackedBackends: t }) },
   // The update banner reads releaseInfo, which mirrors the llama.cpp tracker
   // result; keeping them in one setter means every refresh path (Settings
   // tracker, banner, startup check) closes or opens the banner consistently.
@@ -340,5 +357,6 @@ export const useStore = create<AppStore>((set) => ({
     const next = s.logs.concat(entries.map(e => ({ ...e, seq: ++logSeq })))
     return { logs: next.length > 10000 ? next.slice(-10000) : next }
   }),
-  clearLogs: () => set({ logs: [] })
+  clearLogs: () => set({ logs: [] }),
+  setLogsSource: (source) => set({ logsSource: source })
 }))

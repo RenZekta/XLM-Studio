@@ -13,7 +13,7 @@ import {
   STRATA_COMMON_FLAGS, STRATA_NATIVE_CONTEXT, STRATA_VARIANTS
 } from '../../../shared/strata'
 import { resolveEngineBackend } from '../utils/engineBackends'
-import { formatWithSpaces, CONTEXT_POWER_OF_TWO_STEPS, snapToNearestPowerOfTwo } from '../utils/contextFormat'
+import { formatWithSpaces, snapToNearestPowerOfTwo, ladderUpTo } from '../utils/contextFormat'
 import { markTemplateSavePending, markTemplateSaveDone } from '../utils/templateSync'
 import { activeServerOverrides, findPortConflict } from '../utils/templatePort'
 import ServerParamsBlock from './ServerParamsBlock'
@@ -74,7 +74,7 @@ export default function EngineParamsEditor({
   disabled: disabledProp, backendKey: backendKeyProp, headerPortalTarget
 }: Props) {
   const {
-    updateCard, cards, models, ggufMetadata, backends, activeBackend, engineGlobals,
+    updateCard, cards, ggufMetadata, backends, activeBackend, engineGlobals,
     vramInfo, systemRam, modelDefaults, baseUrlOverride, paramViewMode, setParamViewMode
   } = useStore()
   const card = templateId ? cards.find(c => c.template.id === templateId) : null
@@ -154,8 +154,7 @@ export default function EngineParamsEditor({
   // ----- Presets (same model as the llama.cpp editor) -----
   // A Template saved before Manual was removed (marker 'clear') is FULL AUTO.
   const preset: Preset = args.__lastPreset === 'quick' ? 'quick' : 'fullauto'
-  const hasVision = !!models.find(g => g.models.some(m => m.path === modelPath))?.mmproj
-  const quickArgs = buildStrataQuickBaseline({ contextLength: meta?.contextLength, hasVision })
+  const quickArgs = buildStrataQuickBaseline({ contextLength: meta?.contextLength })
   // The value a field has in the SELECTED preset: its explicit value there,
   // else the engine default.
   const baselineOf = (arg: string) => (preset === 'quick' && quickArgs[arg] !== undefined ? quickArgs[arg] : defaults[arg])
@@ -191,7 +190,7 @@ export default function EngineParamsEditor({
   // Like the llama.cpp slider: the model's own context from its metadata, and
   // up to 2 097 152 while YaRN scaling is managed automatically.
   const ctxSliderMax = yarnAuto ? CTX_YARN_MAX : nativeCtx
-  const ctxLadder = CONTEXT_POWER_OF_TWO_STEPS.filter(s => s <= ctxSliderMax)
+  const ctxLadder = ladderUpTo(ctxSliderMax)
   useEffect(() => {
     if (disabled || !yarnAuto) return
     const cur = argsRef.current

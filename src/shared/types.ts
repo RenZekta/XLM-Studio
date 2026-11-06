@@ -23,6 +23,8 @@ export interface MmprojFile {
   name: string
   path: string
   size: number
+  // The precision read from the file name ("BF16", "F16", "Q8_0"), when it has one.
+  quant?: string
 }
 
 // A sidecar draft/speculative-head file detected alongside models in the
@@ -45,7 +47,10 @@ export interface ModelGroup {
   folderPath: string    // absolute path to the folder
   external: boolean     // true when the folder is under an external model folder
   models: ModelEntry[]  // .gguf/.bin/.ggml files excluding mmproj and spec-decode sidecars
+  // The projector used by default: the most precise one found (see mmprojRank).
   mmproj: MmprojFile | null
+  // Every projector found in the folder, best first; mmproj is the first of them.
+  mmprojs: MmprojFile[]
   specDecodeSidecars: SpecDecodeSidecarFile[]
   totalSize: number     // sum of models + mmproj
   modelSize: number     // sum of models only
@@ -304,6 +309,10 @@ export interface TrackedBackend {
   repo: string            // "owner/repo"
   name: string            // display name e.g. "llama.cpp"
   folderName: string      // subfolder name under BACKEND_DIR for this backend
+  // Folders that used to be this repo's under another tracker entry (a custom
+  // entry made before the repo became built-in). Their contents are moved into
+  // folderName, and a Template pinned to one of these names resolves here.
+  legacyFolders?: string[]
   isDefault: boolean      // true for built-in entries (cannot be deleted)
   // Optional default options injected into the commands.json for select params,
   // keyed by the param arg name (e.g. "--cache-type-k").
@@ -314,8 +323,32 @@ export interface TrackedBackend {
   // Absent means a llama.cpp-style release engine.
   engine?: EngineId
   kind?: InstallKind
-  // Git engines: branch to follow (default: the repo's default branch).
+  // Branch to follow. Absent means the repo's default branch, so an entry only
+  // carries one when it was added from a link to some other branch.
   branch?: string
+}
+
+// How llama.cpp-style engines are installed: release assets are downloaded as
+// binaries, or the repository is cloned and compiled on this machine.
+export type EngineInstallMode = 'binary' | 'source'
+
+// A build compiled from the repository, as found on disk.
+export interface SourceBuild {
+  type: string
+  version: string
+  commit: string | null
+  // The extra CMake arguments it was compiled with; a rebuild reuses them.
+  args: string[]
+  // The GPU target it was compiled for (ROCm builds).
+  gpuTarget?: string
+  // The branch has moved on since this was compiled.
+  outdated: boolean
+}
+
+export interface SourceStatus {
+  gitAvailable: boolean
+  remoteCommit: string | null
+  builds: SourceBuild[]
 }
 
 // Update state of a git-installed engine (compared by release tag).
@@ -335,6 +368,11 @@ export interface TrackedBackendRelease extends ReleaseInfo {
   folderName: string
   // Set for git-installed engines, whose state is the clone, not assets.
   git?: GitEngineStatus
+  // Set when the engine is checked in Build from Source mode.
+  source?: SourceStatus
+  // Set when there is nothing to download for this engine: the repository has
+  // no releases, or the entry follows a branch (binaries are not per branch).
+  needsSource?: 'no-releases' | 'branch'
   // Builds installed here that were made for another operating system (a
   // shared engines folder on a dual-boot PC). They are not counted as
   // installed for this machine's assets, but can still be listed and removed.

@@ -1,6 +1,6 @@
 import React, { useMemo } from 'react'
 import { RotateCcw } from 'lucide-react'
-import { formatWithSpaces, parseSpacedNumber, snapToNearestPowerOfTwo, indexOnLadder } from '../utils/contextFormat'
+import { formatWithSpaces, parseSpacedNumber, snapToNearestPowerOfTwo, indexOnLadder, ladderUpTo } from '../utils/contextFormat'
 
 interface Props {
   value: any
@@ -44,7 +44,8 @@ export default function HybridSlider({
   }, [value, isAuto, recommended, defaultVal, min])
 
   const clampedSlider = Math.min(max, Math.max(min, numericVal))
-  const steps = useMemo(() => (ladderSteps || []).filter(s => s >= min && s <= max), [ladderSteps, min, max])
+  // The slider's own maximum is always a stop, powers of two or not.
+  const steps = useMemo(() => (ladderSteps && ladderSteps.length ? ladderUpTo(max, ladderSteps, min) : []), [ladderSteps, min, max])
 
   function handleSlider(v: number) {
     onChange(v)

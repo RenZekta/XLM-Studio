@@ -1308,13 +1308,15 @@ body.card-dragging, body.card-dragging * { cursor: grabbing !important; user-sel
   color: var(--text-muted);
   margin-left: 6px;
 }
+.tracker-branch { margin-top: 12px; padding-top: 12px; border-top: 1px solid var(--border); }
+.tracker-branch-header { display: flex; align-items: center; gap: 6px; margin-bottom: 6px; font-size: 12px; font-weight: 600; color: var(--text-secondary); }
 .tracker-release {
   font-size: 12px;
   color: var(--text-secondary);
   margin-top: 6px;
 }
-.tracker-release .up-to-date { color: var(--success); font-weight: 600; margin-left: 6px; }
-.tracker-release .new-badge { color: var(--warning); font-weight: 600; margin-left: 6px; }
+.tracker-release .up-to-date, .tracker-assets-row .up-to-date { color: var(--success); font-weight: 600; margin-left: 6px; }
+.tracker-release .new-badge, .tracker-assets-row .new-badge { color: var(--warning); font-weight: 600; margin-left: 6px; }
 .tracker-assets-row {
   display: flex;
   align-items: center;
@@ -1475,6 +1477,26 @@ body.card-dragging, body.card-dragging * { cursor: grabbing !important; user-sel
    ========================================================================== */
 .cmd-row { position: relative; overflow: visible; }
 .cmd-row.changed-param {
+  border-color: rgba(59,130,246,.4);
+  background: rgba(59,130,246,.03);
+}
+/* The blue block shown around a changed parameter is one look for every row:
+   Context Size is a card of its own, so it already has the base look. These two
+   classes give the same look to rows that used to override it inline.
+   - cmd-row-flat: a row inside a section card (Speculative Decoding and its
+     modifiers). Unchanged it has no box; changed it gets the outline and tint.
+     Its padding keeps the label clear of the bar at the left edge.
+   - cmd-row-card: a row that is a card of its own, a little tighter than the
+     default one (Reasoning Budget, MoE, memory overhead). */
+.cmd-row.cmd-row-flat {
+  padding: 6px 10px 6px 14px;
+  border-color: transparent;
+  background: transparent;
+}
+.cmd-row.cmd-row-flat:not(.changed-param):hover { border-color: transparent; }
+.cmd-row.cmd-row-card { padding: 8px 12px 8px 14px; }
+.cmd-row.cmd-row-flat.changed-param,
+.cmd-row.cmd-row-card.changed-param {
   border-color: rgba(59,130,246,.4);
   background: rgba(59,130,246,.03);
 }

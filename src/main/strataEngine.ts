@@ -1,7 +1,10 @@
 import { execFile, type SpawnOptions } from 'child_process'
-import { existsSync, readFileSync } from 'fs'
+import { existsSync, readFileSync, readdirSync, statSync, promises as fsPromises } from 'fs'
 import { homedir } from 'os'
 import { join } from 'path'
+import { NATIVE_PLATFORM } from './buildPlatform'
+import { cloneOsOf } from './workDirs'
+import type { BuildPlatform } from '../shared/assetPlatform'
 import https from 'https'
 import type { EngineId, InstallKind } from '../shared/engines'
 import type { StrataDataSettings } from '../shared/types'
@@ -28,12 +31,56 @@ export function looksLikeStrataClone(dir: string): boolean {
 }
 
 // --------------------------------------------------------------------------
+// One instance per OS
+// --------------------------------------------------------------------------
+// The launcher makes a Python environment (.venv) and builds inside the clone,
+// and both are specific to an OS. In an engines folder shared by several systems
+// (dual boot) one clone would be rebuilt by each system after the other used it,
+// and the two environments would be made on top of each other. So every OS has a
+// clone of its own, beside the others in <engines>/<repo>/. Which OS a clone
+// belongs to is read from its git config (see cloneOsOf), so a copy made by git
+// on the new system is recognised as that system's with no marker to keep.
+
+export interface GitEngineInstance { path: string; os: BuildPlatform | null }
+
+// Every clone of a git engine in a repo folder, with the OS that made it.
+export function gitEngineInstances(forkDir: string): GitEngineInstance[] {
+  let subs: import('fs').Dirent[]
+  try { subs = readdirSync(forkDir, { withFileTypes: true }) } catch { return [] }
+  return subs
+    .filter(d => d.isDirectory() && !d.name.startsWith('.'))
+    .map(d => join(forkDir, d.name))
+    .filter(looksLikeStrataClone)
+    .map(path => ({ path, os: cloneOsOf(path) }))
+}
+
+// The instance of an OS (this one by default): one made on it, else one whose
+// system cannot be told, which is taken to be the asker's.
+export function instanceForOs(instances: GitEngineInstance[], os: BuildPlatform = NATIVE_PLATFORM): GitEngineInstance | undefined {
+  return instances.find(i => i.os === os) ?? instances.find(i => i.os === null)
+}
+
+// An instance of another OS to make this one's from, the most recently used first.
+export function instanceToCopy(instances: GitEngineInstance[], os: BuildPlatform = NATIVE_PLATFORM): GitEngineInstance | undefined {
+  const others = instances.filter(i => i.os !== null && i.os !== os)
+  const stamp = (i: GitEngineInstance) => { try { return statSync(join(i.path, '.git', 'HEAD')).mtimeMs } catch { return 0 } }
+  return others.sort((a, b) => stamp(b) - stamp(a))[0]
+}
+
+// The name for this OS's instance next to the original ("Strata" -> "Strata-linux").
+export function instanceNameFor(forkDir: string, repoName: string, os: BuildPlatform = NATIVE_PLATFORM): string {
+  let name = `${repoName}-${os}`
+  for (let n = 2; existsSync(join(forkDir, name)); n++) name = `${repoName}-${os}-${n}`
+  return name
+}
+
+// --------------------------------------------------------------------------
 // git
 // --------------------------------------------------------------------------
 
-interface GitResult { ok: boolean; stdout: string; stderr: string }
+export interface GitResult { ok: boolean; stdout: string; stderr: string }
 
-function git(args: string[], cwd?: string, opts: { timeoutMs?: number; httpsOnly?: boolean } = {}): Promise<GitResult> {
+export function git(args: string[], cwd?: string, opts: { timeoutMs?: number; httpsOnly?: boolean } = {}): Promise<GitResult> {
   return new Promise(resolve => {
     const env: NodeJS.ProcessEnv = { ...process.env, GIT_TERMINAL_PROMPT: '0' }
     if (opts.httpsOnly) env.GIT_ALLOW_PROTOCOL = 'https'
@@ -48,7 +95,7 @@ export async function gitAvailable(): Promise<boolean> {
 
 // The commit HEAD points at, read from .git directly so listing installs
 // does not spawn git.
-function readHeadCommit(dir: string): string | null {
+export function readHeadCommit(dir: string): string | null {
   try {
     const head = readFileSync(join(dir, '.git', 'HEAD'), 'utf8').trim()
     if (!head.startsWith('ref: ')) return head || null
@@ -64,6 +111,12 @@ function readHeadCommit(dir: string): string | null {
 }
 
 const describeCache = new Map<string, string>()
+
+// A fetch can add a release tag to the commit the clone is already on, which
+// changes its label without changing its commit, so labels are forgotten then.
+function forgetDescribed(dir: string): void {
+  for (const key of describeCache.keys()) if (key.startsWith(`${dir}|`)) describeCache.delete(key)
+}
 
 // "v0.1.41", "v0.1.41-12-gabc1234" or a short hash when the clone has no tags.
 export async function gitVersionLabel(dir: string): Promise<string> {
@@ -98,6 +151,16 @@ export function baseTagOf(label: string): string | null {
   return versionParts(tag) ? tag : null
 }
 
+// What a git engine (Strata) is called: its release tag alone ("v0.2.10"), with
+// nothing added for commits past it (git describe gives "v0.2.10-3-g1a2b3c4").
+// The engine is a clone of the repository's branch, so being a few commits past
+// the last release is the normal state, and the tag is what the update check
+// compares anyway. A clone with no release tag is called by its short hash.
+export async function gitEngineVersionLabel(dir: string): Promise<string> {
+  const label = await gitVersionLabel(dir)
+  return baseTagOf(label) ?? label
+}
+
 export async function latestRemoteTag(remote: string): Promise<string | null> {
   const r = await git(['ls-remote', '--tags', '--refs', remote], undefined, { timeoutMs: 30000 })
   if (!r.ok) throw new Error(r.stderr || 'git ls-remote failed')
@@ -128,6 +191,7 @@ export async function updateGitEngine(dir: string): Promise<GitUpdateResult> {
   if (!upstream.ok || !upstream.stdout) return { updated: false, skipped: `branch ${branch.stdout} has no upstream`, before, after: before }
   const fetched = await git(['fetch', '--tags', '--prune'], dir)
   if (!fetched.ok) return { updated: false, error: fetched.stderr, before, after: before }
+  forgetDescribed(dir)
   const merged = await git(['merge', '--ff-only', '@{u}'], dir)
   if (!merged.ok) {
     const reset = await git(['reset', '--hard', '@{u}'], dir)
@@ -153,6 +217,36 @@ export async function cloneGitEngine(slug: string, destDir: string, branch?: str
   args.push('--', url, destDir)
   const r = await git(args, undefined, { timeoutMs: 10 * 60 * 1000, httpsOnly: true })
   return r.ok ? { ok: true } : { ok: false, error: r.stderr }
+}
+
+// A GitHub https remote, the only kind a copy is given as its origin.
+const GITHUB_REMOTE = /^https:\/\/github\.com\/[A-Za-z0-9._-]+\/[A-Za-z0-9._-]+?(?:\.git)?\/?$/
+
+// Makes an instance from a clone made on another OS, without fetching it again:
+// git clones it locally, so only what git tracks comes over, checked out the way
+// this system does it (its line endings, its file modes) and at the commit the
+// other one is on. Nothing the launcher made there (the environment, build
+// output) is carried across; the first start on this OS makes that once. The
+// copy's origin is set back to the real remote, so updating works as for any
+// clone. `slug` is the fallback when the source's remote is not a GitHub one.
+export async function cloneGitEngineFrom(source: string, destDir: string, slug?: string): Promise<{ ok: boolean; error?: string }> {
+  if (existsSync(destDir)) return { ok: false, error: `${destDir} already exists` }
+  const remote = (await git(['config', '--get', 'remote.origin.url'], source, { timeoutMs: 10000 })).stdout
+  const url = GITHUB_REMOTE.test(remote) ? remote : slug ? githubCloneUrl(slug) : null
+  // safe.directory: the source may be on a drive owned by another account.
+  const r = await git(['-c', `safe.directory=${source}`, 'clone', '--local', '--', source, destDir], undefined, { timeoutMs: 10 * 60 * 1000 })
+  if (!r.ok) {
+    await fsPromises.rm(destDir, { recursive: true, force: true }).catch(() => {})
+    return { ok: false, error: r.stderr }
+  }
+  if (url) {
+    const set = await git(['remote', 'set-url', 'origin', url], destDir, { timeoutMs: 10000 })
+    if (!set.ok) {
+      await fsPromises.rm(destDir, { recursive: true, force: true }).catch(() => {})
+      return { ok: false, error: set.stderr }
+    }
+  }
+  return { ok: true }
 }
 
 // --------------------------------------------------------------------------

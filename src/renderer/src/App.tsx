@@ -162,6 +162,10 @@ export default function App() {
       })
     } catch {}
 
+    try {
+      window.api?.onEngineUpdateState?.((d) => useStore.getState().setEngineUpdating(d.trackedId, d.busy))
+    } catch {}
+
     // Reconcile the Templates list whenever the main process writes a
     // template outside of this window's own action — in particular
     // MCP/skill-triggered template-create/-duplicate/-edit, which write

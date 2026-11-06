@@ -354,12 +354,13 @@ export function buildStrataArgv(input: StrataLaunchInput): { argv: string[] } | 
 // ---------------------------------------------------------------------------
 
 // The llama.cpp Quick baseline restricted to what Strata has an equivalent
-// for: context size, KV precision (q8_0 maps to int8) and image input.
-export function buildStrataQuickBaseline(opts: { contextLength?: number | null; hasVision?: boolean }): Record<string, string | number | boolean | null> {
+// for: context size and KV precision (q8_0 maps to int8). Image input is not in
+// it: Automatic (nothing sent) is what Quick and Full Auto both use, so Strata
+// picks the reader itself, with the encoder on the CPU, instead of Quick taking
+// the GPU reader ("yes") for every model that has a projector.
+export function buildStrataQuickBaseline(opts: { contextLength?: number | null }): Record<string, string | number | boolean | null> {
   const ctx = opts.contextLength && opts.contextLength > 0 ? Math.min(opts.contextLength, 32768) : 32768
-  const out: Record<string, string | number | boolean | null> = { '--context': ctx, '--kv': 'int8' }
-  if (opts.hasVision) out['--vision'] = 'yes'
-  return out
+  return { '--context': ctx, '--kv': 'int8' }
 }
 
 // ---------------------------------------------------------------------------
