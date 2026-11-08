@@ -566,7 +566,7 @@ async function backendRoots(): Promise<{ dir: string; external: boolean }[]> {
   return roots
 }
 
-const runningProcesses = new Map<string, { proc: ChildProcess; port: number; modelPath?: string; templateName?: string; checkpointsActive?: boolean; engine?: EngineId; cloneDir?: string }>
+const runningProcesses = new Map<string, { proc: ChildProcess; port: number; modelPath?: string; templateName?: string; checkpointsActive?: boolean; apiKey?: string; engine?: EngineId; cloneDir?: string }>
 let sharedChatWindow: BrowserWindow | null = null
 
 // Per-model flags so we only emit each "important" app-log event once per run.
@@ -1750,20 +1750,37 @@ function sanitizeCheckpointNamePart(s: string): string {
   return s.replace(/[/\\:*?"<>|\x00-\x1f]/g, '_').replace(/\s+/g, ' ').trim().slice(0, 100) || 'unnamed'
 }
 
+// A slot's KV state can be gigabytes, so save/restore get far longer than an
+// ordinary API call before being abandoned.
+const SLOT_IO_TIMEOUT_MS = 120_000
+
 // POST a JSON body to a local llama-server instance and parse the JSON
 // response. Slot save/restore are single request/response calls (no SSE),
-// unlike the streaming chat completion used by the benchmark tool.
-function postJsonLocal(port: number, path: string, body: unknown, timeoutMs = 8000): Promise<any> {
+// unlike the streaming chat completion used by the benchmark tool. llama-server
+// reports failures as a 4xx/5xx with a JSON error body, so those reject rather
+// than resolve. The slot endpoints sit behind --api-key, hence the optional key.
+function postJsonLocal(port: number, path: string, body: unknown, opts: { timeoutMs?: number; apiKey?: string } = {}): Promise<any> {
   return new Promise((resolvePromise, reject) => {
     const payload = JSON.stringify(body)
     const req = http.request({
       hostname: '127.0.0.1', port, path, method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(payload) },
-      timeout: timeoutMs
+      headers: {
+        'Content-Type': 'application/json',
+        'Content-Length': Buffer.byteLength(payload),
+        ...(opts.apiKey ? { Authorization: `Bearer ${opts.apiKey}` } : {})
+      },
+      timeout: opts.timeoutMs ?? 8000
     }, (res) => {
       let data = ''
       res.on('data', (c) => (data += c))
-      res.on('end', () => { try { resolvePromise(JSON.parse(data)) } catch (e) { reject(e) } })
+      res.on('end', () => {
+        const status = res.statusCode ?? 0
+        let parsed: any = null
+        try { parsed = JSON.parse(data) } catch {}
+        if (status >= 400) reject(new Error(parsed?.error?.message || `HTTP ${status}`))
+        else if (parsed === null) reject(new Error('Invalid JSON response'))
+        else resolvePromise(parsed)
+      })
     })
     req.on('error', reject)
     req.on('timeout', () => { req.destroy(); reject(new Error('Request timed out')) })
@@ -1805,7 +1822,7 @@ function resolveCheckpointEnabled(globalEnabled: boolean, checkpointMode: Checkp
 // --slot-save-path support, disk full, server already gone) is logged and
 // otherwise ignored, since it must never block Stop.
 async function saveSlotCheckpoint(opts: {
-  port: number; modelPath: string; templateId: string; templateName: string; enabled: boolean
+  port: number; modelPath: string; templateId: string; templateName: string; enabled: boolean; apiKey?: string
 }): Promise<void> {
   try {
     if (!opts.enabled || !opts.modelPath) return
@@ -1814,7 +1831,7 @@ async function saveSlotCheckpoint(opts: {
     const dir = await resolveCheckpointFolder()
     const filename = checkpointFileName(opts.modelPath, cfg.mode, opts.templateName)
     const filePath = join(dir, filename)
-    const res = await postJsonLocal(opts.port, '/slots/0?action=save', { filename })
+    const res = await postJsonLocal(opts.port, '/slots/0?action=save', { filename }, { timeoutMs: SLOT_IO_TIMEOUT_MS, apiKey: opts.apiKey })
     // llama.cpp's save response has reported the saved token count under a
     // couple of different key names across versions -- try each rather than
     // pinning to one.
@@ -1831,6 +1848,7 @@ async function saveSlotCheckpoint(opts: {
     emitAppLog(opts.templateId, opts.templateName, `💾 KV cache checkpoint saved — ${tokens != null ? `${tokens} tokens` : filename}${saveMs != null ? ` (${saveMs.toFixed(1)}ms)` : ''}`)
   } catch (err) {
     console.error('[kv-checkpoints] save failed:', err)
+    emitAppLog(opts.templateId, opts.templateName, `⚠ KV cache checkpoint save failed: ${err instanceof Error ? err.message : String(err)}`)
   }
 }
 
@@ -1865,7 +1883,7 @@ function findCheckpointForTemplate(dir: string, modelPath: string, mode: 'model'
 // corrupt llama-server's buffer). ctxSize of 0 means native/unbounded, so
 // the guard never applies. Never throws.
 async function restoreSlotCheckpoint(opts: {
-  port: number; modelPath: string; templateId: string; templateName: string; ctxSize: number; enabled: boolean
+  port: number; modelPath: string; templateId: string; templateName: string; ctxSize: number; enabled: boolean; apiKey?: string
 }): Promise<void> {
   try {
     if (!opts.enabled || !opts.modelPath) return
@@ -1881,7 +1899,7 @@ async function restoreSlotCheckpoint(opts: {
       saveCheckpointIndex()
       return
     }
-    const res = await postJsonLocal(opts.port, '/slots/0?action=restore', { filename: basename(filePath) })
+    const res = await postJsonLocal(opts.port, '/slots/0?action=restore', { filename: basename(filePath) }, { timeoutMs: SLOT_IO_TIMEOUT_MS, apiKey: opts.apiKey })
     // Same key-name tolerance as the save path -- llama.cpp has used
     // different field names for the restored token count across versions.
     const tokens = typeof res?.n_restored === 'number' ? res.n_restored
@@ -1892,26 +1910,46 @@ async function restoreSlotCheckpoint(opts: {
     emitAppLog(opts.templateId, opts.templateName, `⏪ KV cache checkpoint restored — ${tokens != null ? `${tokens} tokens` : basename(filePath)}${restoreMs != null ? ` (${restoreMs.toFixed(1)}ms)` : ''}`)
   } catch (err) {
     console.error('[kv-checkpoints] restore failed:', err)
+    emitAppLog(opts.templateId, opts.templateName, `⚠ KV cache checkpoint restore failed: ${err instanceof Error ? err.message : String(err)}`)
   }
 }
 
-// Poll this Template's own serverReadyFlags entry (set by runModelImpl's
-// stdout listener) until the server has actually announced it's listening,
-// then restore. Runs detached from runModelImpl's return so a checkpoint
-// restore never delays the Start response itself; capped so a Template that
-// never becomes ready (crashes, hangs on load) doesn't poll forever.
+// GET /health answers 200 once the model is loaded and the slots exist (503
+// while loading) and is exempt from --api-key. Log lines announcing readiness
+// vary by llama.cpp build and by stream, so this is the readiness signal the
+// restore waits on.
+function probeHealth(port: number): Promise<boolean> {
+  return new Promise((resolvePromise) => {
+    const req = http.get({ hostname: '127.0.0.1', port, path: '/health', timeout: 2000 }, (res) => {
+      res.resume()
+      resolvePromise(res.statusCode === 200)
+    })
+    req.on('error', () => resolvePromise(false))
+    req.on('timeout', () => req.destroy())
+  })
+}
+
+// Wait for this Template's server to report healthy, then restore. Runs
+// detached from runModelImpl's return so a checkpoint restore never delays
+// the Start response itself. Stops polling if the process it was started for
+// exits or is replaced by a newer one for the same Template id, and is capped
+// so a server that never becomes ready (crashes, hangs on load) isn't polled
+// forever.
 function restoreCheckpointWhenReady(opts: {
-  templateId: string; port: number; modelPath: string; templateName: string; ctxSize: number; enabled: boolean
+  templateId: string; port: number; modelPath: string; templateName: string; ctxSize: number; enabled: boolean; apiKey?: string
 }): void {
   const startedAt = Date.now()
   const timeoutMs = 10 * 60 * 1000
-  const poll = () => {
-    if (serverReadyFlags.get(opts.templateId)) {
-      restoreSlotCheckpoint({ port: opts.port, modelPath: opts.modelPath, templateId: opts.templateId, templateName: opts.templateName, ctxSize: opts.ctxSize, enabled: opts.enabled })
+  const proc = runningProcesses.get(opts.templateId)?.proc
+  const stillCurrent = () => !!proc && runningProcesses.get(opts.templateId)?.proc === proc
+  const poll = async () => {
+    if (!stillCurrent() || Date.now() - startedAt > timeoutMs) return
+    if (await probeHealth(opts.port)) {
+      if (!stillCurrent()) return
+      await restoreSlotCheckpoint(opts)
       return
     }
-    if (!runningProcesses.has(opts.templateId) || Date.now() - startedAt > timeoutMs) return
-    setTimeout(poll, 300)
+    setTimeout(poll, 500)
   }
   poll()
 }
@@ -3331,6 +3369,16 @@ export function registerIpcHandlers(): void {
         proc.stdout?.on('end', () => outAsm.end().forEach(emitLine('stdout')))
         proc.stderr?.on('end', () => errAsm.end().forEach(emitLine('stderr')))
       } else {
+        // llama-server builds differ on which stream carries the "listening"
+        // line (recent ones log everything to stderr), so both are scanned.
+        const detectServerReady = (line: string) => {
+          if (serverReadyFlags.get(opts.id)) return
+          const lower = line.toLowerCase()
+          if (lower.includes('server is listening') || lower.includes('http server listening') || lower.includes('listening on') || lower.includes('all slots are initialized') || lower.includes('main: server listening')) {
+            serverReadyFlags.set(opts.id, true)
+            emitAppLog(opts.id, opts.name, `Server ready - listening on port ${finalPort}`)
+          }
+        }
         // Stream server logs to all renderer windows for the Logs tab.
         proc.stderr?.on('data', (d) => {
           const line = d.toString()
@@ -3346,6 +3394,7 @@ export function registerIpcHandlers(): void {
               const trimmed = line.replace(/\s+/g, ' ').trim().slice(0, 300)
               if (trimmed) emitAppLog(opts.id, opts.name, `⚠ ${trimmed}`)
             }
+            detectServerReady(line)
           } catch {}
         })
         proc.stdout?.on('data', (d) => {
@@ -3364,10 +3413,7 @@ export function registerIpcHandlers(): void {
               emitAppLog(opts.id, opts.name, 'Model loaded — preparing server...')
             }
             // HTTP server listening (ready to accept requests).
-            if (!serverReadyFlags.get(opts.id) && (lower.includes('server is listening') || lower.includes('http server listening') || lower.includes('listening on') || lower.includes('all slots are initialized') || lower.includes('main: server listening'))) {
-              serverReadyFlags.set(opts.id, true)
-              emitAppLog(opts.id, opts.name, `Server ready - listening on port ${finalPort}`)
-            }
+            detectServerReady(line)
             // Chat completion request (user message hitting the API).
             if (lower.includes('chat/completions') || lower.includes('/v1/chat/completions')) {
               if (lower.includes('post') || lower.includes('request') || lower.includes(' 200 ')) {
@@ -3408,13 +3454,14 @@ export function registerIpcHandlers(): void {
         modelPath: (isStrata ? opts.modelPath : extractArgValue(finalArgs, '--model', '-m')) || undefined,
         templateName: opts.name,
         checkpointsActive: kvCheckpointsEnabled,
+        apiKey: (!isStrata && extractArgValue(finalArgs, '--api-key')) || undefined,
         engine: isStrata ? 'strata' : undefined,
         cloneDir: isStrata ? opts.backendPath : undefined
       })
       // Begin polling this instance's /metrics endpoint.
       startTracking(opts.id, finalPort, opts.name, isStrata ? 'strata' : 'llama.cpp')
       // Kick off the KV cache checkpoint restore (if one applies) in the
-      // background -- it waits on serverReadyFlags itself, so it never
+      // background -- it waits on the server's /health itself, so it never
       // delays this function's own return.
       if (!opts.skipCheckpoint && kvCheckpointsEnabled) {
         const modelPathForCheckpoint = extractArgValue(finalArgs, '--model', '-m')
@@ -3423,7 +3470,8 @@ export function registerIpcHandlers(): void {
         if (modelPathForCheckpoint) {
           restoreCheckpointWhenReady({
             templateId: opts.id, port: finalPort, modelPath: modelPathForCheckpoint,
-            templateName: opts.name, ctxSize, enabled: kvCheckpointsEnabled
+            templateName: opts.name, ctxSize, enabled: kvCheckpointsEnabled,
+            apiKey: extractArgValue(finalArgs, '--api-key') || undefined
           })
         }
       }
@@ -3685,7 +3733,7 @@ export function registerIpcHandlers(): void {
     if (!opts?.skipCheckpoint && entry.modelPath) {
       await saveSlotCheckpoint({
         port, modelPath: entry.modelPath, templateId: id, templateName: entry.templateName || id,
-        enabled: !!entry.checkpointsActive
+        enabled: !!entry.checkpointsActive, apiKey: entry.apiKey
       })
     }
     // Kill the whole process tree (children included) and wait for the process
