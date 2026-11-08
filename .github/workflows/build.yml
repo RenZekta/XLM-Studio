@@ -1,50 +1,68 @@
 name: Build Installers and Release
 
+# Fully automatic releases, driven by the .github/VERSION file.
+#
+#   New version   Edit .github/VERSION (e.g. 2.2.0 -> 2.3.0) and push to main.
+#                 The installers are built on Windows, Linux and macOS, then a
+#                 release and tag 2.3.0 are created with auto-generated notes.
+#
+#   Same version  Push to main without touching .github/VERSION.
+#                   - App code changed: the installers are rebuilt and replace
+#                     the ones on the release, and the tag moves to the new
+#                     commit, so the source archive matches too.
+#                   - Only docs and dev scripts changed: nothing is rebuilt and
+#                     only the tag moves.
+#                   - Nothing changed since the tag: nothing happens.
+#
+# package.json and package-lock.json are filled in from .github/VERSION by
+# scripts/sync-version.js, so the version is never edited anywhere else. The
+# release is only touched after all three platforms built successfully.
+# Run it by hand any time: Actions -> Build Installers and Release -> Run
+# workflow (optionally forcing a rebuild). Logic lives in
+# .github/scripts/release.sh.
+
 on:
   push:
-    branches:
-      - main
+    branches: [main]
   workflow_dispatch:
+    inputs:
+      force_rebuild:
+        description: Rebuild and replace the installers even if nothing changed
+        type: boolean
+        default: false
 
 permissions:
-  contents: write
+  contents: read
+
+concurrency:
+  group: release
+  cancel-in-progress: false
 
 jobs:
-  create-release:
+  plan:
+    if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     outputs:
-      tag_name: ${{ steps.bump_version.outputs.new_tag }}
+      action: ${{ steps.plan.outputs.action }}
     steps:
       - name: Check out Git repository
         uses: actions/checkout@v4
         with:
-          fetch-depth: 0
+          fetch-depth: 0   # full history + tags, to compare against the release tag
 
-      - name: Bump Version
-        id: bump_version
-        run: |
-          NEW_TAG=$(node -p "require('./package.json').version")
-          echo "new_tag=$NEW_TAG" >> $GITHUB_OUTPUT
-
-      - name: Create GitHub Release
-        id: create_release
-        uses: softprops/action-gh-release@v2
-        with:
-          tag_name: ${{ steps.bump_version.outputs.new_tag }}
-          name: Release ${{ steps.bump_version.outputs.new_tag }}
-          body: |
-            ![XLM Studio](https://github.com/${{ github.repository }}/raw/main/assets/github-banner.png)
-
-          draft: false
-          prerelease: false
-          generate_release_notes: true
+      - name: Decide what to do
+        id: plan
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ github.token }}
+          FORCE_REBUILD: ${{ inputs.force_rebuild }}
+        run: bash .github/scripts/release.sh plan
 
   build:
-    needs: create-release
+    needs: plan
+    if: needs.plan.outputs.action == 'create' || needs.plan.outputs.action == 'rebuild'
     runs-on: ${{ matrix.os }}
     strategy:
+      fail-fast: false   # a failed platform can be re-run alone
       matrix:
         os: [windows-latest, ubuntu-latest, macos-latest]
 
@@ -61,23 +79,50 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
-      - name: Update version
-        run: npm version ${{ needs.create-release.outputs.tag_name }} --allow-same-version --no-git-tag-version || true
-
       - name: Build and Package
         run: npm run package
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           CSC_IDENTITY_AUTO_DISCOVERY: false
 
-      - name: Upload Artifacts to Release
-        uses: softprops/action-gh-release@v2
+      - name: Keep installers for the release job
+        uses: actions/upload-artifact@v4
         with:
-          tag_name: ${{ needs.create-release.outputs.tag_name }}
-          files: |
+          name: installers-${{ matrix.os }}
+          path: |
             dist/*.exe
             dist/*.zip
             dist/*.AppImage
             dist/*.dmg
+          if-no-files-found: error
+          retention-days: 1
+
+  publish:
+    needs: [plan, build]
+    if: >-
+      ${{ !cancelled()
+      && needs.plan.result == 'success'
+      && needs.plan.outputs.action != 'none'
+      && (needs.build.result == 'success' || needs.build.result == 'skipped') }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Check out Git repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Download installers
+        if: needs.plan.outputs.action != 'retag'
+        uses: actions/download-artifact@v4
+        with:
+          pattern: installers-*
+          merge-multiple: true
+          path: installers
+
+      - name: Create or refresh the release
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_ACTION: ${{ needs.plan.outputs.action }}
+        run: bash .github/scripts/release.sh publish installers

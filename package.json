@@ -8,9 +8,11 @@
   "author": "Ren Zekta",
   "license": "MPL-2.0",
   "scripts": {
+    "predev": "node scripts/sync-version.js",
     "dev": "electron-vite dev",
     "build": "electron-vite build",
     "preview": "electron-vite preview",
+    "prepackage": "node scripts/sync-version.js",
     "package": "electron-vite build && electron-builder"
   },
   "dependencies": {

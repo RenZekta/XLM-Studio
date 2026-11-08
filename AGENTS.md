@@ -68,6 +68,17 @@ preview, and actual process launch — before changing any one piece of it.
 Several bugs in this codebase came from those five places drifting out of
 sync with each other.
 
+## Versioning and releases
+
+`.github/VERSION` is the only place a release version is edited. Do not change
+the `version` field in `package.json` or `package-lock.json` by hand:
+`scripts/sync-version.js` copies it there before `npm run dev` and
+`npm run package`. Pushing to `main` releases it through
+`.github/workflows/build.yml`: a new version creates the release and tag, and
+a push on the same version rebuilds the installers (or only moves the tag when
+just docs changed) so the release's source archive stays current. The logic is
+in `.github/scripts/release.sh`. Tags are the bare version (`2.2.0`).
+
 ## Typechecking
 
 Never run `tsc -b` (or `tsc --build`) in this repo to typecheck. This project
