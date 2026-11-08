@@ -1,12 +1,15 @@
 import React, { useState, useEffect, useCallback, useRef, useMemo } from 'react'
 import { useStore } from '../store/useStore'
 import { useOutsideClick } from '../hooks/useOutsideClick'
+import SegmentedToggle from './SegmentedToggle'
+import ChartHoverLayer, { HoverSeries, HoverLine } from './ChartHoverLayer'
+import ChartViewControl, { ChartView } from './ChartViewControl'
+import { logTicks, niceTicks, TIME_STEPS } from '../utils/chartHover'
 import {
   Activity, ChevronDown, ChevronUp, Download, Upload, Maximize2, X, GitCompare
 } from 'lucide-react'
 import {
-  ResponsiveContainer, ComposedChart, Line, XAxis, YAxis, CartesianGrid,
-  Tooltip, Legend
+  ResponsiveContainer, ComposedChart, Line, XAxis, YAxis, CartesianGrid, Legend
 } from 'recharts'
 
 // Monitoring tab. Tracks generation speed and prefill (prompt-
@@ -52,6 +55,21 @@ function fmtDuration(startedAt: number, endedAt: number | null) {
   return `${sec}s`
 }
 
+// Elapsed seconds as m:ss, or h:mm:ss from one hour up.
+function fmtElapsed(sec: number) {
+  const s = Math.max(0, Math.round(sec))
+  const h = Math.floor(s / 3600), m = Math.floor((s % 3600) / 60), r = s % 60
+  const pad = (n: number) => String(n).padStart(2, '0')
+  return h > 0 ? `${h}:${pad(m)}:${pad(r)}` : `${m}:${pad(r)}`
+}
+function fmtTps(v: number) {
+  return String(Math.round(v * 100) / 100)
+}
+
+// X axis of both charts: the size the speed is measured against, or the time
+// since the session started.
+type XMode = 'context' | 'time'
+
 // Width shared by the Active Sessions and Session History buttons/menus.
 const DROPDOWN_WIDTH = 280
 
@@ -62,6 +80,7 @@ export default function MonitoringView() {
   const [history, setHistory] = useState<HistorySessionSummary[]>([])
   const [selected, setSelected] = useState<SelKey[]>([])
   const [compareMode, setCompareMode] = useState(false)
+  const [xMode, setXMode] = useState<XMode>('context')
   const [activeDropdownOpen, setActiveDropdownOpen] = useState(false)
   const [historyDropdownOpen, setHistoryDropdownOpen] = useState(false)
   const [dataCache, setDataCache] = useState<Record<string, SessionData>>({})
@@ -289,6 +308,13 @@ export default function MonitoringView() {
               <GitCompare size={13} /> Compare multiple sessions
             </label>
 
+            <SegmentedToggle
+              label="Speed vs:"
+              options={[{ value: 'context', label: 'Context' }, { value: 'time', label: 'Time' }]}
+              value={xMode}
+              onChange={setXMode}
+            />
+
             <div style={{ flex: 1 }} />
 
             {/* Export / Import / Export all */}
@@ -359,8 +385,8 @@ export default function MonitoringView() {
         </div>
       ) : (
         <>
-          <TsChart sessions={selectedSessions} onFullscreen={() => setFullscreenChart('ts')} />
-          <PrefillChart sessions={selectedSessions} onFullscreen={() => setFullscreenChart('prefill')} />
+          <TsChart sessions={selectedSessions} xMode={xMode} onFullscreen={() => setFullscreenChart('ts')} />
+          <PrefillChart sessions={selectedSessions} xMode={xMode} onFullscreen={() => setFullscreenChart('prefill')} />
         </>
       )}
 
@@ -377,8 +403,8 @@ export default function MonitoringView() {
               explicitly instead, computed from the viewport. */}
           <div style={{ flex: 1, minHeight: 0 }}>
             {fullscreenChart === 'ts'
-              ? <TsChart sessions={selectedSessions} fullscreen heightPx={window.innerHeight - 140} />
-              : <PrefillChart sessions={selectedSessions} fullscreen heightPx={window.innerHeight - 140} />}
+              ? <TsChart sessions={selectedSessions} xMode={xMode} fullscreen heightPx={window.innerHeight - 140} />
+              : <PrefillChart sessions={selectedSessions} xMode={xMode} fullscreen heightPx={window.innerHeight - 140} />}
           </div>
         </div>
       )}
@@ -386,163 +412,233 @@ export default function MonitoringView() {
   )
 }
 
-// Shared custom tooltip so the T/s and Prefill charts can clearly label
-// which session (and, for prefill, whether the point is a cold or cached/
-// warm burst) a hovered point belongs to, instead of relying on color/shape
-// alone.
-function ChartTooltip({ active, payload }: any) {
-  if (!active || !payload || !payload.length) return null
-  const p = payload[0]?.payload
-  if (!p) return null
+type ChartSession = { key: SelKey; data: SessionData }
+interface ChartProps {
+  sessions: ChartSession[]
+  xMode: XMode
+  onFullscreen?: () => void
+  fullscreen?: boolean
+  heightPx?: number
+}
+
+// Seconds since the session started, so runs recorded at different times
+// line up on one time axis.
+function elapsedSec(p: { ts: number }, s: ChartSession) {
+  return Math.max(0, (p.ts - s.data.startedAt) / 1000)
+}
+
+// Right side of a chart's title row: the fullscreen button, or in fullscreen
+// the zoom controls hint and a reset button once the view has been changed.
+function ChartTitleActions({ fullscreen, onFullscreen, view, onReset }: {
+  fullscreen?: boolean; onFullscreen?: () => void; view: ChartView | null; onReset: () => void
+}) {
+  if (!fullscreen) {
+    return onFullscreen
+      ? <button className="btn btn-ghost btn-icon" title="Fullscreen" onClick={onFullscreen}><Maximize2 size={14} /></button>
+      : null
+  }
   return (
-    <div style={{ background: 'var(--surface)', border: '1px solid var(--border)', borderRadius: 6, padding: '6px 10px', fontSize: 12 }}>
-      <div style={{ fontWeight: 600, marginBottom: 2 }}>{p.__seriesLabel}</div>
-      {p.contextTokens !== undefined && <div>Context: {p.contextTokens.toLocaleString()} tok</div>}
-      {p.genTps !== undefined && <div>Speed: {p.genTps} t/s</div>}
-      {p.promptSize !== undefined && <div>Prompt size: {p.promptSize.toLocaleString()} tok</div>}
-      {p.promptTps !== undefined && <div>Throughput: {p.promptTps} t/s</div>}
-      {p.cached !== undefined && <div style={{ color: p.cached ? '#10b981' : '#f59e0b', fontWeight: 600 }}>{p.cached ? 'Cached (warm)' : 'Cold'}</div>}
+    <div style={{ display: 'flex', alignItems: 'center', gap: 10, fontWeight: 400, fontSize: 11, color: 'var(--text-muted)' }}>
+      <span>Scroll: zoom. Ctrl+scroll: stretch horizontally. Drag: pan. Double-click: reset.</span>
+      {view && <button className="btn btn-ghost" style={{ fontSize: 11, padding: '2px 8px' }} onClick={onReset}>Reset view</button>}
     </div>
   )
 }
 
-// ----- T/s chart: X = context size (tokens), Y = generation speed (t/s) -----
-function TsChart({ sessions, onFullscreen, fullscreen, heightPx }: { sessions: { key: SelKey; data: SessionData }[]; onFullscreen?: () => void; fullscreen?: boolean; heightPx?: number }) {
+// Sizes the chart and provides the HTML layer that hover windows are
+// rendered into.
+function HoverChartFrame({ heightPx, children }: { heightPx?: number; children: (windowRoot: HTMLElement | null) => React.ReactNode }) {
+  const [windowRoot, setWindowRoot] = useState<HTMLDivElement | null>(null)
+  return (
+    <div style={{ position: 'relative', width: '100%', height: heightPx ?? 320 }}>
+      {children(windowRoot)}
+      <div ref={setWindowRoot} style={{ position: 'absolute', inset: 0, pointerEvents: 'none', zIndex: 5 }} />
+    </div>
+  )
+}
+
+// ----- Decode chart: X = context size (tokens) or time, Y = decode speed (t/s) -----
+function TsChart({ sessions, xMode, onFullscreen, fullscreen, heightPx }: ChartProps) {
+  const timeMode = xMode === 'time'
+  const [view, setView] = useState<ChartView | null>(null)
+  const [dragging, setDragging] = useState(false)
+  useEffect(() => setView(null), [timeMode])
+  // Points are sorted by X so the line is a proper left-to-right curve: a
+  // later point with a smaller context size than an earlier one (a shorter
+  // follow-up prompt, say) would otherwise make it double back.
+  const series: HoverSeries<GenPoint>[] = sessions.map((s, i) => ({
+    id: keyId(s.key),
+    label: s.data.templateNameSnapshot,
+    color: SERIES_COLORS[i % SERIES_COLORS.length],
+    points: s.data.genPoints
+      .map(p => ({ x: timeMode ? elapsedSec(p, s) : p.contextTokens, y: p.genTps, data: p }))
+      .sort((a, b) => a.x - b.x)
+  }))
+
+  const describe = (ser: HoverSeries<GenPoint>, smp: { x: number; y: number; approx: boolean; point: { data: GenPoint } | null }) => {
+    const lines: HoverLine[] = [{ text: ser.label, bold: true }]
+    if (timeMode) {
+      lines.push({ text: `Time: ${fmtElapsed(smp.x)}` })
+      if (smp.point) lines.push({ text: `Context: ${smp.point.data.contextTokens.toLocaleString()} tok` })
+    } else {
+      lines.push({ text: `Context: ${smp.x.toLocaleString()} tok` })
+    }
+    lines.push({ text: `${smp.approx ? 'Decode (approx.)' : 'Decode'}: ${fmtTps(smp.y)} t/s` })
+    return lines
+  }
+
   return (
     <div className="settings-section">
       <div className="settings-section-title" style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
-        <span>Generation Speed vs Context Size</span>
-        {!fullscreen && onFullscreen && (
-          <button className="btn btn-ghost btn-icon" title="Fullscreen" onClick={onFullscreen}><Maximize2 size={14} /></button>
-        )}
+        <span>Decode Speed vs {timeMode ? 'Time' : 'Context Size'}</span>
+        <ChartTitleActions fullscreen={fullscreen} onFullscreen={onFullscreen} view={view} onReset={() => setView(null)} />
       </div>
-      <div style={{ width: '100%', height: heightPx ?? 320 }}>
-        <ResponsiveContainer>
-          {/* ComposedChart + <Line> connects points of the same session with
-              a line in that session's color. The X axis here is context
-              size, not time, so each session's points are sorted by X before
-              drawing — otherwise a later point with a smaller context size
-              than an earlier one (e.g. a shorter follow-up prompt after a
-              longer one) would make the line double back leftward instead of
-              tracing speed-vs-size as a proper left-to-right function curve. */}
-          <ComposedChart margin={{ top: 10, right: 20, bottom: 10, left: 0 }}>
-            <CartesianGrid strokeDasharray="3 3" stroke="var(--border)" />
-            <XAxis type="number" dataKey="contextTokens" name="Context size" unit=" tok" stroke="var(--text-muted)" tick={{ fontSize: 11 }} />
-            <YAxis type="number" dataKey="genTps" name="Generation speed" unit=" t/s" stroke="var(--text-muted)" tick={{ fontSize: 11 }} />
-            <Tooltip content={<ChartTooltip />} />
-            {sessions.length > 1 && <Legend wrapperStyle={{ fontSize: 11 }} />}
-            {sessions.map((s, i) => {
-              const color = SERIES_COLORS[i % SERIES_COLORS.length]
-              const data = [...s.data.genPoints]
-                .sort((a, b) => a.contextTokens - b.contextTokens)
-                .map(p => ({ ...p, __seriesLabel: s.data.templateNameSnapshot }))
-              return (
+      <HoverChartFrame heightPx={heightPx}>
+        {(windowRoot) => (
+          <ResponsiveContainer>
+            <ComposedChart accessibilityLayer={false} margin={{ top: 10, right: 20, bottom: 10, left: 0 }}>
+              <CartesianGrid strokeDasharray="3 3" stroke="var(--border)" />
+              <XAxis
+                type="number" dataKey="x" domain={view ? view.x : [0, 'auto']} allowDataOverflow={!!view}
+                name={timeMode ? 'Time' : 'Context size'}
+                ticks={view ? niceTicks(view.x[0], view.x[1], 7, timeMode ? TIME_STEPS : undefined) : undefined}
+                unit={timeMode ? undefined : ' tok'}
+                tickFormatter={timeMode ? fmtElapsed : undefined}
+                allowDecimals={!timeMode}
+                stroke="var(--text-muted)" tick={{ fontSize: 11 }}
+              />
+              <YAxis type="number" dataKey="y" name="Decode speed" unit=" t/s" domain={view ? view.y : [0, 'auto']} ticks={view ? niceTicks(view.y[0], view.y[1]) : undefined} allowDataOverflow={!!view} stroke="var(--text-muted)" tick={{ fontSize: 11 }} />
+              {sessions.length > 1 && <Legend wrapperStyle={{ fontSize: 11 }} />}
+              {series.map(s => (
                 <Line
-                  key={keyId(s.key)}
+                  key={s.id}
                   type="linear"
-                  name={s.data.templateNameSnapshot}
-                  data={data}
-                  dataKey="genTps"
-                  stroke={color}
+                  name={s.label}
+                  data={s.points}
+                  dataKey="y"
+                  stroke={s.color}
                   strokeWidth={2}
-                  dot={{ r: 3, fill: color, strokeWidth: 0 }}
-                  activeDot={{ r: 5 }}
+                  dot={{ r: 3, fill: s.color, strokeWidth: 0 }}
+                  activeDot={false}
                   connectNulls
                   isAnimationActive={false}
                 />
-              )
-            })}
-          </ComposedChart>
-        </ResponsiveContainer>
-      </div>
+              ))}
+              {fullscreen && <ChartViewControl view={view} onView={setView} onDragging={setDragging} />}
+              <ChartHoverLayer<GenPoint, HoverSeries<GenPoint>> series={series} windowRoot={windowRoot} suppress={dragging} describe={describe} />
+            </ComposedChart>
+          </ResponsiveContainer>
+        )}
+      </HoverChartFrame>
       {sessions.every(s => s.data.genPoints.length === 0) && (
         <div style={{ fontSize: 12, color: 'var(--text-muted)', textAlign: 'center', marginTop: 8 }}>
-          No generation activity recorded yet for the selected session(s) — send a message via the model's chat UI to see data here.
+          No generation activity recorded yet for the selected session(s) - send a message via the model's chat UI to see data here.
         </div>
       )}
     </div>
   )
 }
 
-// ----- Prefill chart: X = prompt size (log scale), Y = throughput (t/s), split cold/warm -----
-function PrefillChart({ sessions, onFullscreen, fullscreen, heightPx }: { sessions: { key: SelKey; data: SessionData }[]; onFullscreen?: () => void; fullscreen?: boolean; heightPx?: number }) {
+interface PrefillSeries extends HoverSeries<PrefillPoint> { cached: boolean }
+
+// ----- Prefill chart: X = prompt size (log scale when the range is wide) or time, Y = prefill speed (t/s), split cold/warm -----
+function PrefillChart({ sessions, xMode, onFullscreen, fullscreen, heightPx }: ChartProps) {
+  const timeMode = xMode === 'time'
+  const [view, setView] = useState<ChartView | null>(null)
+  const [dragging, setDragging] = useState(false)
+
+  // Cold is a SOLID line in the session's color and warm a DASHED line in the
+  // same color, so the session stays identifiable; hover windows also say
+  // "Cold" or "Cached (warm)" explicitly.
+  const series: PrefillSeries[] = sessions.flatMap((s, i) => {
+    const color = SERIES_COLORS[i % SERIES_COLORS.length]
+    const build = (cached: boolean): PrefillSeries => ({
+      id: `${keyId(s.key)}:${cached ? 'warm' : 'cold'}`,
+      label: `${s.data.templateNameSnapshot} \u2014 ${cached ? 'warm' : 'cold'}`,
+      color,
+      cached,
+      points: s.data.prefillPoints
+        .filter(p => p.cached === cached)
+        .map(p => ({ x: timeMode ? elapsedSec(p, s) : p.promptSize, y: p.promptTps, data: p }))
+        .sort((a, b) => a.x - b.x)
+    })
+    const cold = build(false)
+    const warm = build(true)
+    return warm.points.length > 0 ? [cold, warm] : [cold]
+  })
+
+  // Log scale needs the plotted values to span a wide ratio to generate
+  // sensible ticks: with a narrow range recharts can produce a single tick
+  // (or none) and the axis labels vanish. Use log only once the largest
+  // prompt size is at least 10x the smallest; time is always linear.
+  const allSizes = sessions.flatMap(s => s.data.prefillPoints.map(p => p.promptSize)).filter(n => n > 0)
+  const minSize = allSizes.length ? Math.min(...allSizes) : 1
+  const maxSize = allSizes.length ? Math.max(...allSizes) : 1
+  const useLog = !timeMode && allSizes.length >= 2 && maxSize / Math.max(1, minSize) >= 10
+  useEffect(() => setView(null), [timeMode, useLog])
+
+  const describe = (ser: PrefillSeries, smp: { x: number; y: number; approx: boolean; point: { data: PrefillPoint } | null }) => {
+    const lines: HoverLine[] = [{ text: ser.label, bold: true }]
+    if (timeMode) {
+      lines.push({ text: `Time: ${fmtElapsed(smp.x)}` })
+      if (smp.point) lines.push({ text: `Prompt size: ${smp.point.data.promptSize.toLocaleString()} tok` })
+    } else {
+      lines.push({ text: `Prompt size: ${smp.x.toLocaleString()} tok` })
+    }
+    lines.push({ text: `${smp.approx ? 'Prefill (approx.)' : 'Prefill'}: ${fmtTps(smp.y)} t/s` })
+    lines.push({ text: ser.cached ? 'Cached (warm)' : 'Cold', bold: true, color: ser.cached ? '#10b981' : '#f59e0b' })
+    return lines
+  }
+
   return (
     <div className="settings-section">
       <div className="settings-section-title" style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
-        <span>Prefill Speed vs Prompt Size</span>
-        {!fullscreen && onFullscreen && (
-          <button className="btn btn-ghost btn-icon" title="Fullscreen" onClick={onFullscreen}><Maximize2 size={14} /></button>
-        )}
+        <span>Prefill Speed vs {timeMode ? 'Time' : 'Prompt Size'}</span>
+        <ChartTitleActions fullscreen={fullscreen} onFullscreen={onFullscreen} view={view} onReset={() => setView(null)} />
       </div>
-      {/* Cold/warm is distinguished by line style, not color, since the line
-          color is the same per session regardless of cache state. */}
       <div style={{ fontSize: 11, color: 'var(--text-muted)', marginBottom: 8 }}>
-        "Cached (warm)" is a heuristic — llama-server doesn't report cache hits directly, so bursts far faster than this session's own typical cold-prefill speed are inferred as cache hits.
-        {' '}Solid line = cold, dashed line = cached (warm) — hover any point for the exact value.
+        "Cached (warm)" is a heuristic - llama-server doesn't report cache hits directly, so bursts far faster than this session's own typical cold-prefill speed are inferred as cache hits.
+        {' '}Solid line = cold, dashed line = cached (warm). Hover the chart to read values; "(approx.)" marks a value interpolated between recorded points.
       </div>
-      {(() => {
-        // Log scale needs the plotted values to span a wide ratio
-        // to generate sensible tick marks — with only a narrow range of
-        // prompt sizes seen so far (e.g. early in a session), recharts'
-        // log-scale tick generator could produce just ONE tick (or none),
-        // which is what "x-axis labels disappeared" actually was. Only use
-        // log scale once the range genuinely warrants it (>10x between
-        // smallest and largest prompt size seen); otherwise use a normal
-        // linear scale, which always ticks sensibly regardless of range.
-        const allSizes = sessions.flatMap(s => s.data.prefillPoints.map(p => p.promptSize)).filter(n => n > 0)
-        const minSize = allSizes.length ? Math.min(...allSizes) : 1
-        const maxSize = allSizes.length ? Math.max(...allSizes) : 1
-        const useLog = allSizes.length >= 2 && maxSize / Math.max(1, minSize) >= 10
-        return (
-          <div style={{ width: '100%', height: heightPx ?? 320 }}>
-            <ResponsiveContainer>
-              <ComposedChart margin={{ top: 10, right: 20, bottom: 10, left: 0 }}>
-                <CartesianGrid strokeDasharray="3 3" stroke="var(--border)" />
-                <XAxis
-                  type="number" dataKey="promptSize" name="Prompt size" unit=" tok"
-                  scale={useLog ? 'log' : 'linear'}
-                  domain={useLog ? ['auto', 'auto'] : [0, 'auto']}
-                  allowDecimals={false}
-                  tickCount={6}
-                  stroke="var(--text-muted)" tick={{ fontSize: 11 }}
+      <HoverChartFrame heightPx={heightPx}>
+        {(windowRoot) => (
+          <ResponsiveContainer>
+            <ComposedChart accessibilityLayer={false} margin={{ top: 10, right: 20, bottom: 10, left: 0 }}>
+              <CartesianGrid strokeDasharray="3 3" stroke="var(--border)" />
+              <XAxis
+                type="number" dataKey="x"
+                name={timeMode ? 'Time' : 'Prompt size'}
+                unit={timeMode ? undefined : ' tok'}
+                tickFormatter={timeMode ? fmtElapsed : undefined}
+                scale={useLog ? 'log' : 'linear'}
+                domain={view ? view.x : useLog ? [minSize / 1.15, maxSize * 1.15] : [0, 'auto']}
+                allowDataOverflow={!!view}
+                ticks={useLog
+                  ? logTicks(view ? view.x[0] : minSize / 1.15, view ? view.x[1] : maxSize * 1.15)
+                  : view ? niceTicks(view.x[0], view.x[1], 7, timeMode ? TIME_STEPS : undefined) : undefined}
+                allowDecimals={false}
+                tickCount={6}
+                stroke="var(--text-muted)" tick={{ fontSize: 11 }}
+              />
+              <YAxis type="number" dataKey="y" name="Prefill speed" unit=" t/s" domain={view ? view.y : [0, 'auto']} ticks={view ? niceTicks(view.y[0], view.y[1]) : undefined} allowDataOverflow={!!view} stroke="var(--text-muted)" tick={{ fontSize: 11 }} />
+              <Legend wrapperStyle={{ fontSize: 11 }} />
+              {series.map(s => (
+                <Line
+                  key={s.id}
+                  type="linear" name={s.label} data={s.points} dataKey="y"
+                  stroke={s.color} strokeWidth={2}
+                  strokeDasharray={s.cached ? '5 4' : undefined}
+                  dot={{ r: 3, fill: s.color, strokeWidth: s.cached ? 1 : 0, stroke: s.cached ? 'var(--surface)' : undefined }}
+                  activeDot={false}
+                  connectNulls isAnimationActive={false}
                 />
-                <YAxis type="number" dataKey="promptTps" name="Throughput" unit=" t/s" stroke="var(--text-muted)" tick={{ fontSize: 11 }} />
-                <Tooltip content={<ChartTooltip />} />
-                <Legend wrapperStyle={{ fontSize: 11 }} />
-                {sessions.map((s, i) => {
-                  const base = SERIES_COLORS[i % SERIES_COLORS.length]
-                  // Cold is a SOLID line in the session's color, warm is a
-                  // DASHED line in the same color (so you can still tell
-                  // which SESSION it belongs to), and the shared
-                  // ChartTooltip explicitly labels "Cold" vs "Cached (warm)".
-                  const cold = s.data.prefillPoints.filter(p => !p.cached)
-                    .sort((a, b) => a.promptSize - b.promptSize)
-                    .map(p => ({ ...p, __seriesLabel: `${s.data.templateNameSnapshot} — cold` }))
-                  const warm = s.data.prefillPoints.filter(p => p.cached)
-                    .sort((a, b) => a.promptSize - b.promptSize)
-                    .map(p => ({ ...p, __seriesLabel: `${s.data.templateNameSnapshot} — warm` }))
-                  return (
-                    <React.Fragment key={keyId(s.key)}>
-                      <Line
-                        type="linear" name={`${s.data.templateNameSnapshot} — cold`} data={cold} dataKey="promptTps"
-                        stroke={base} strokeWidth={2} dot={{ r: 3, fill: base, strokeWidth: 0 }} activeDot={{ r: 5 }}
-                        connectNulls isAnimationActive={false}
-                      />
-                      {warm.length > 0 && (
-                        <Line
-                          type="linear" name={`${s.data.templateNameSnapshot} — warm`} data={warm} dataKey="promptTps"
-                          stroke={base} strokeWidth={2} strokeDasharray="5 4" dot={{ r: 3, fill: base, strokeWidth: 1, stroke: 'var(--surface)' }} activeDot={{ r: 5 }}
-                          connectNulls isAnimationActive={false}
-                        />
-                      )}
-                    </React.Fragment>
-                  )
-                })}
-              </ComposedChart>
-            </ResponsiveContainer>
-          </div>
-        )
-      })()}
+              ))}
+              {fullscreen && <ChartViewControl view={view} xLog={useLog} onView={setView} onDragging={setDragging} />}
+              <ChartHoverLayer<PrefillPoint, PrefillSeries> series={series} xLog={useLog} windowRoot={windowRoot} suppress={dragging} describe={describe} />
+            </ComposedChart>
+          </ResponsiveContainer>
+        )}
+      </HoverChartFrame>
       {sessions.every(s => s.data.prefillPoints.length === 0) && (
         <div style={{ fontSize: 12, color: 'var(--text-muted)', textAlign: 'center', marginTop: 8 }}>
           No prompt-processing activity recorded yet for the selected session(s).

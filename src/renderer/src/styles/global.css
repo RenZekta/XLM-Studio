@@ -1892,3 +1892,11 @@ input[type="radio"] { accent-color: #3b82f6; }
 
 
 
+
+/* Clicking a chart must not draw a focus frame around it; the charts have no
+   keyboard interaction. */
+.recharts-wrapper:focus,
+.recharts-wrapper *:focus,
+.recharts-surface:focus {
+  outline: none;
+}

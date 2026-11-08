@@ -39,7 +39,7 @@ export default function AboutView() {
           </h2>
           <div className="about-card" style={{ background: 'var(--surface)', border: '1px solid var(--border)', borderRadius: 'var(--radius)', padding: 20 }}>
             <p style={{ marginBottom: 16, lineHeight: 1.6 }}>
-              XLM Studio is a fork of Hexllama, focused on better user experience and enhanced control over models and backends. Reimagined by Ren Zekta.
+              XLM Studio is a fork of Hexllama, focused on better user experience and enhanced control over models and engines. Reimagined by Ren Zekta.
             </p>
             <div style={{ display: 'flex', gap: 12, flexWrap: 'wrap' }}>
               <button className="btn btn-ghost btn-sm" onClick={() => openLink('https://github.com/RenZekta')}>
