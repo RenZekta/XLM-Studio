@@ -1,5 +1,5 @@
 {
-  "version": "2026.10.strata-1",
+  "version": "2026.11.strata-2",
   "categories": [
     {
       "name": "Model",
@@ -63,17 +63,19 @@
         {
           "arg": "--kv",
           "label": "KV Cache Precision",
-          "description": "KV cache precision above 8K context (up to 8K it is fp16). int8 is Strata's name for the 8-bit KV cache that llama.cpp calls q8_0: the same thing, so the web UI may show \"q8_0\" for it. q4_0 is 4-bit (Hadamard-rotated, half the memory); k8v4 stores K as 8-bit and V as 4-bit.",
+          "description": "KV cache precision above 8K context (up to 8K it is fp16). int8 is Strata's name for the 8-bit KV cache that llama.cpp calls q8_0: the same thing, so the web UI may show \"q8_0\" for it. q4_0 is 4-bit (Hadamard-rotated, half the memory); k8v4 stores K as 8-bit and V as 4-bit. fp16 is 16-bit, twice the memory of int8.",
           "type": "select",
           "options": [
             "int8",
             "q4_0",
-            "k8v4"
+            "k8v4",
+            "fp16"
           ],
           "optionLabels": {
             "int8": "int8 (8-bit, = q8_0)",
             "q4_0": "q4_0 (4-bit)",
-            "k8v4": "k8v4 (K 8-bit, V 4-bit)"
+            "k8v4": "k8v4 (K 8-bit, V 4-bit)",
+            "fp16": "fp16 (16-bit, twice the memory)"
           }
         },
         {
@@ -130,6 +132,22 @@
           ]
         },
         {
+          "arg": "--cuda",
+          "label": "CUDA Toolkit",
+          "description": "NVIDIA only. Auto uses CUDA 13, or CUDA 12 for cards CUDA 13 does not support. CUDA 12 also runs on older drivers.",
+          "type": "select",
+          "options": [
+            "auto",
+            "12",
+            "13"
+          ],
+          "optionLabels": {
+            "auto": "Auto",
+            "12": "CUDA 12 (experimental)",
+            "13": "CUDA 13"
+          }
+        },
+        {
           "arg": "--gpus",
           "label": "GPUs",
           "description": "Several GPUs sharing one model, as nvidia-smi numbers them: \"0,2\" or \"all\". The first is the main one.",
@@ -149,6 +167,35 @@
           "description": "With several GPUs: where each later GPU's layers start (\"18\" or \"16,32\"). Default: placed from each GPU's free VRAM.",
           "type": "string",
           "placeholder": "auto"
+        },
+        {
+          "arg": "--gpu-roles",
+          "label": "GPU Roles",
+          "description": "A role for each GPU: main, helper or off, for example 1=main,0=helper. GPUs not listed are off. Cannot be combined with GPUs or Single GPU.",
+          "type": "string",
+          "placeholder": "1=main,0=helper"
+        },
+        {
+          "arg": "--no-remote-expert-opt",
+          "label": "No Remote Expert Optimization",
+          "description": "With two or more GPUs, leaves out --remote-expert-opt, which setup adds there.",
+          "type": "boolean",
+          "default": false
+        },
+        {
+          "arg": "--replicas",
+          "label": "Replicas",
+          "description": "Runs N independent engines, each on an equal share of the chosen GPUs, with requests spread across them. Each holds its own copy of the model in RAM. Stays saved until removed from the model's strata-*.json.",
+          "type": "number",
+          "min": 2,
+          "placeholder": "Off"
+        },
+        {
+          "arg": "--replica-profile",
+          "label": "Replica Profile",
+          "description": "One engine per GPU instead of a single layer split, for Qwen3.8 IQ3_S, IQ3_XXS and Q2_0. Replicas and a manual Layer Split override it. It does not set Parallel Requests (8 for two engines, 4 for more). Stays saved until removed from the model's strata-*.json.",
+          "type": "boolean",
+          "default": false
         },
         {
           "arg": "--vram-reserve-mib",
@@ -189,7 +236,7 @@
         {
           "arg": "--resident-budget-gib",
           "label": "Resident Budget (GiB)",
-          "description": "For the Unsloth variants: the GiB of experts kept in RAM. Default: the RAM less 24 GB.",
+          "description": "For the Unsloth variants: the GiB of experts kept in RAM, the rest being read from the file. Default: the RAM less 24 GB, at least 8. Not set when every expert fits in RAM.",
           "type": "number",
           "min": 1,
           "placeholder": "Auto"
@@ -200,6 +247,38 @@
       "name": "Speculative Decoding",
       "icon": "GitBranch",
       "commands": [
+        {
+          "arg": "--mtp",
+          "label": "MTP Draft Layer",
+          "description": "The model's own draft layer. Off gives about 1 GB of VRAM back to the expert cache, at the cost of generation speed. With Drafter on Auto, Off also disables DFlash2.",
+          "type": "select",
+          "options": [
+            "on",
+            "off"
+          ],
+          "optionLabels": {
+            "on": "On",
+            "off": "Off"
+          }
+        },
+        {
+          "arg": "--drafter",
+          "label": "Drafter",
+          "description": "The speculative decoding drafter. Auto: Strata chooses best for the model and GPU based on measured speed. Drafters are downloaded at runtime.",
+          "type": "select",
+          "options": [
+            "auto",
+            "mtp",
+            "dflash2",
+            "off"
+          ],
+          "optionLabels": {
+            "auto": "Auto",
+            "mtp": "MTP",
+            "dflash2": "DFlash2",
+            "off": "Off"
+          }
+        },
         {
           "arg": "--draft-vocab",
           "label": "Draft Vocabulary",
@@ -242,6 +321,146 @@
           "description": "Require this key from clients. Several keys: key1,key2.",
           "type": "string",
           "placeholder": "none"
+        }
+      ]
+    },
+    {
+      "name": "Image Generation",
+      "icon": "Image",
+      "commands": [
+        {
+          "arg": "--images",
+          "label": "Image Generation",
+          "description": "Serves POST /v1/images/generations with Qwen-Image-2.1-Turbo. Setup compiles the image engine (needs build tools) and downloads about 10-13 GB of models, under the Qwen Research License. Off removes the image setup.",
+          "type": "select",
+          "options": [
+            "qwen-image",
+            "no"
+          ],
+          "optionLabels": {
+            "qwen-image": "Qwen-Image 2.1 Turbo",
+            "no": "Off"
+          },
+          "emptyLabel": "Leave as is"
+        },
+        {
+          "arg": "--image-quant",
+          "label": "Image Model Quant",
+          "description": "Precision of the image denoiser: Q4_K_M (4.2 GB) up to 8 GB of GPU memory, Q6_K (6.3 GB) up to 12 GB, Q8_0 (7.6 GB) above. Auto picks by GPU memory.",
+          "type": "select",
+          "options": [
+            "Q4_K_M",
+            "Q6_K",
+            "Q8_0"
+          ],
+          "emptyLabel": "Auto"
+        },
+        {
+          "arg": "--image-backend",
+          "label": "Image Backend",
+          "description": "CUDA for NVIDIA, HIP for AMD on Linux, Vulkan for AMD APUs, Intel Arc and AMD on Windows, CPU as the fallback. Auto picks one.",
+          "type": "select",
+          "options": [
+            "cuda",
+            "hip",
+            "vulkan",
+            "cpu"
+          ],
+          "optionLabels": {
+            "cuda": "CUDA",
+            "hip": "HIP",
+            "vulkan": "Vulkan",
+            "cpu": "CPU"
+          },
+          "emptyLabel": "Auto"
+        },
+        {
+          "arg": "--image-gpu-policy",
+          "label": "Image GPU Policy",
+          "description": "What happens to the text model while an image is made. Auto keeps it loaded if the image job fits beside it, else shrinks its expert cache, else unloads it. Unload saves the conversation and restores it on the next start.",
+          "type": "select",
+          "options": [
+            "auto",
+            "keep",
+            "shrink",
+            "unload"
+          ],
+          "default": "auto"
+        },
+        {
+          "arg": "--image-native",
+          "label": "Native Image Runner (Experimental)",
+          "description": "EXPERIMENTAL: Strata's own DiT runner on CUDA or HIP instead of stable-diffusion.cpp.",
+          "type": "select",
+          "options": [
+            "off",
+            "on"
+          ],
+          "default": "off"
+        }
+      ]
+    },
+    {
+      "name": "Setup & Files",
+      "icon": "Wrench",
+      "commands": [
+        {
+          "arg": "--models-dir",
+          "label": "Models Folder",
+          "description": "Where setup stores downloaded files such as the vision projector and image models. Default: the models folder in the data folder.",
+          "type": "string",
+          "placeholder": "<data folder>/models"
+        },
+        {
+          "arg": "--source",
+          "label": "Download Source",
+          "description": "Where model files are downloaded from. ModelScope serves the same files for mainland China, checked against its published SHA-256.",
+          "type": "select",
+          "options": [
+            "auto",
+            "huggingface",
+            "modelscope"
+          ],
+          "optionLabels": {
+            "auto": "Auto",
+            "huggingface": "Hugging Face",
+            "modelscope": "ModelScope"
+          }
+        },
+        {
+          "arg": "--calibrate",
+          "label": "Calibrate Before Start",
+          "description": "Tunes the engine for this PC (15 to 30 minutes, longer on a slow GPU), then starts the model. Only applies to a model that is already installed.",
+          "type": "boolean",
+          "default": false
+        },
+        {
+          "arg": "--build",
+          "label": "Build Engine",
+          "description": "Compile the engine instead of using the ready-made one.",
+          "type": "boolean",
+          "default": false
+        },
+        {
+          "arg": "--prebuilt",
+          "label": "Ready-made Engine Location",
+          "description": "Location of the ready-made engine: a base URL or a local folder.",
+          "type": "string",
+          "placeholder": "URL or folder"
+        },
+        {
+          "arg": "--dsv41-package",
+          "label": "DeepSeek Engine Package",
+          "description": "DeepSeek: the downloaded engine package (.tar.gz, .zip or an unpacked folder), checked and installed instead of fetched.",
+          "type": "string",
+          "placeholder": "Package file or folder"
+        },
+        {
+          "arg": "--feed",
+          "label": "Update Feed",
+          "description": "Where the signed update feed for the DeepSeek engine package is: an https URL or a local folder.",
+          "type": "string",
+          "placeholder": "URL or folder"
         }
       ]
     }

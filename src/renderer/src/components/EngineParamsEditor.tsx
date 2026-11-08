@@ -1,6 +1,6 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
-import { Box, Cpu, Database, GitBranch, Lock, RotateCcw, Server, Wind, Zap } from 'lucide-react'
+import { Box, Cpu, Database, GitBranch, Image as ImageIcon, Lock, RotateCcw, Server, Wind, Wrench, Zap } from 'lucide-react'
 import { useStore } from '../store/useStore'
 import SegmentedToggle from './SegmentedToggle'
 import HybridSlider from './HybridSlider'
@@ -9,10 +9,11 @@ import { strataInfoFor, strataVisionReader } from '../../../shared/strata'
 import type { CommandParam, CommandsSchema, StrataSettings, Template } from '../../../shared/types'
 import { ENGINES, type EngineId } from '../../../shared/engines'
 import {
-  buildStrataArgv, buildStrataQuickBaseline, estimateStrataMemory, strataDefaults, strataGgufDir,
-  STRATA_COMMON_FLAGS, STRATA_NATIVE_CONTEXT, STRATA_VARIANTS
+  buildStrataArgv, buildStrataQuickBaseline, estimateStrataMemory, strataDefaults, strataGgufDir, strataLaunchWarnings,
+  STRATA_NATIVE_CONTEXT, STRATA_VARIANTS, strataIsCommon
 } from '../../../shared/strata'
 import { resolveEngineBackend } from '../utils/engineBackends'
+import { syncYarnAuto } from '../../../shared/yarnAuto'
 import { formatWithSpaces, snapToNearestPowerOfTwo, ladderUpTo } from '../utils/contextFormat'
 import { markTemplateSavePending, markTemplateSaveDone } from '../utils/templateSync'
 import { activeServerOverrides, findPortConflict } from '../utils/templatePort'
@@ -50,7 +51,8 @@ type Preset = 'fullauto' | 'quick'
 
 const CATEGORY_ICONS: Record<string, React.ReactNode> = {
   Box: <Box size={14} />, Cpu: <Cpu size={14} />, Zap: <Zap size={14} />, Database: <Database size={14} />,
-  Wind: <Wind size={14} />, Server: <Server size={14} />, GitBranch: <GitBranch size={14} />
+  Wind: <Wind size={14} />, Server: <Server size={14} />, GitBranch: <GitBranch size={14} />,
+  Image: <ImageIcon size={14} />, Wrench: <Wrench size={14} />
 }
 
 // Server parameters kept in `args`; the port is the Template's own field.
@@ -192,18 +194,10 @@ export default function EngineParamsEditor({
   const ctxSliderMax = yarnAuto ? CTX_YARN_MAX : nativeCtx
   const ctxLadder = ladderUpTo(ctxSliderMax)
   useEffect(() => {
-    if (disabled || !yarnAuto) return
+    if (disabled) return
     const cur = argsRef.current
-    const target = Number(cur['--context']) || effectiveCtx
-    const next = { ...cur }
-    if (target > nativeCtx) {
-      next['--rope-scaling'] = 'yarn'
-      next['--rope-scale'] = Math.round(Math.max(1, target / nativeCtx) * 100) / 100
-    } else {
-      delete next['--rope-scaling']
-      delete next['--rope-scale']
-    }
-    if (!same(next['--rope-scaling'], cur['--rope-scaling']) || !same(next['--rope-scale'], cur['--rope-scale'])) commit(next)
+    const next = syncYarnAuto(cur, { active: yarnAuto, target: Number(cur['--context']) || effectiveCtx, native: nativeCtx, origCtxFlag: false })
+    if (next) commit(next)
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [yarnAuto, effectiveCtx, nativeCtx, disabled])
 
@@ -249,6 +243,7 @@ export default function EngineParamsEditor({
   const hostOverride = serverOverrides.host
   const apiKeyOverride = serverOverrides.apiKey
   const parallelOverride = strataCfg?.strata.parallelOverride ?? null
+  const launchWarnings = strataLaunchWarnings({ ...args, '--drafter': effective('--drafter'), '--mtp': effective('--mtp') }, family)
 
   const preview = useMemo((): { tokens: PreviewToken[]; error?: string } => {
     if (!modelPath) return { tokens: [] }
@@ -403,7 +398,7 @@ export default function EngineParamsEditor({
   }
 
   const visibleCategories = (schema?.categories || [])
-    .map(cat => ({ ...cat, commands: cat.commands.filter(c => !SERVER_ARGS.includes(c.arg) && (paramViewMode === 'full' || STRATA_COMMON_FLAGS.has(c.arg))) }))
+    .map(cat => ({ ...cat, commands: cat.commands.filter(c => !SERVER_ARGS.includes(c.arg) && (paramViewMode === 'full' || strataIsCommon(c.arg, cat.name))) }))
     .filter(cat => cat.commands.length > 0)
 
   const header = (
@@ -456,6 +451,9 @@ export default function EngineParamsEditor({
       {guardWarning && (
         <div className="cpu-info-banner" style={{ color: 'var(--warning)' }}>{guardWarning}</div>
       )}
+      {launchWarnings.map(w => (
+        <div key={w} className="cpu-info-banner" style={{ color: 'var(--warning)' }}>{w}</div>
+      ))}
       {verdict && verdict.kind !== 'known' && verdict.kind !== 'layout' && (
         <div className="cpu-info-banner" style={{ color: 'var(--warning)' }}>
           This file is not one Strata is known to run. Launching it may be refused by Strata's setup.

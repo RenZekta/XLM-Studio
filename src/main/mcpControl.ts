@@ -16,7 +16,8 @@ import { applyMmprojOffloadFlag, MMPROJ_OFFLOAD_MODE_KEY, getMmprojOffloadMode, 
 import { applySpecDraftKvDefaults } from '../shared/specDraftKv'
 import { resolvePinned } from '../shared/backendPin'
 import { engineOf, ENGINES, type EngineId } from '../shared/engines'
-import { buildStrataArgv, buildStrataQuickBaseline, strataGgufDir, strataInfoFor } from '../shared/strata'
+import { syncYarnAuto } from '../shared/yarnAuto'
+import { buildStrataArgv, buildStrataQuickBaseline, strataGgufDir, strataInfoFor, strataIsCommon } from '../shared/strata'
 
 // Speculative-decoding tier table — mirrors src/main/ipc.ts's own
 // SPEC_TIER_DEFS/classifySidecarFilename (and CmdParamsEditor.tsx's
@@ -627,7 +628,12 @@ export async function toolTemplateEdit(args: { templates: string[]; changes: Rec
         const kLower = k.toLowerCase()
         if (kLower === 'n-gram map (k4v)' || kLower === 'ngram-map-k4v') { newArgs = applyNgramModifierToggle(newArgs, 'map-k4v', !!v); continue }
         if (kLower === 'n-gram modifier' || kLower === 'ngram-mod') { newArgs = applyNgramModifierToggle(newArgs, 'mod', !!v); continue }
-        if (kLower === 'automatic yarn scaling control' || kLower === 'yarn-auto-scale') { newArgs['__yarnAutoScale'] = !!v; continue }
+        if (kLower === 'automatic yarn scaling control' || kLower === 'yarn-auto-scale') {
+          newArgs['__yarnAutoScale'] = !!v
+          // Turning it off clears what it wrote now; turning it on is computed once the editor knows the native context.
+          if (!v) newArgs = syncYarnAuto(newArgs, { active: false, target: 0, native: 0, origCtxFlag: true }) ?? newArgs
+          continue
+        }
         // "Offload mmproj to RAM" per-Template mode, same Follow global /
         // Disabled / Enabled choice as the UI. Accepts the mode name, or a
         // plain boolean (true = Enabled, false = Disabled); null/"follow"/
@@ -1065,10 +1071,19 @@ async function paramsView(t: Template, view: 'common' | 'full') {
   let entries = Object.entries(args).filter(([k]) => !k.startsWith('__'))
   // "Common" returns the same curated flag subset the UI's Common
   // Parameters view shows (COMMON_PARAM_FLAGS, shared with
-  // CmdParamsEditor.tsx) — only flags actually SET on the template AND in
+  // CmdParamsEditor.tsx, or strataIsCommon for Strata) — only flags actually SET on the template AND in
   // that curated set. "Full" returns every parameter that's actually set,
   // with nothing filtered out.
-  if (view === 'common') entries = entries.filter(([k]) => COMMON_PARAM_FLAGS.has(k))
+  if (view === 'common') {
+    if (engineOf(t) === 'strata') {
+      const schema = await getCommandsSchemaFor(t)
+      const common = new Set<string>()
+      for (const cat of schema?.categories || []) for (const c of cat.commands) if (strataIsCommon(c.arg, cat.name)) common.add(c.arg)
+      entries = entries.filter(([k]) => common.has(k))
+    } else {
+      entries = entries.filter(([k]) => COMMON_PARAM_FLAGS.has(k))
+    }
+  }
   const { flagToParam } = await getSchemaLookup(t)
   const customText = typeof args[CUSTOM_ARGS_KEY] === 'string' ? (args[CUSTOM_ARGS_KEY] as string) : ''
   const parameters: Record<string, unknown>[] = entries.map(([flag, value]) => {

@@ -36,6 +36,7 @@ const G = bundle('src/main/ggufTensors.ts', 'gguf')
 const L = bundle('src/main/lineAssembler.ts', 'lines')
 const E = bundle('src/shared/engines.ts', 'engines')
 const C = bundle('src/main/strataCatalog.ts', 'catalog')
+const DM = bundle('src/main/strataDrafting.ts', 'drafting')
 
 // -- engine registry ---------------------------------------------------------
 check('engineOf defaults legacy records to llama.cpp', E.engineOf({}) === 'llama.cpp' && E.engineOf(undefined) === 'llama.cpp' && E.engineOf('bogus') === 'llama.cpp')
@@ -86,12 +87,22 @@ const M = bundle('src/main/strataMetrics.ts', 'metrics')
   const d = S.strataDefaults({ variant: 'IQ3_S', family: 'qwen', vramTotalGb: 24, ramTotalGb: 64 })
   check('defaults show the real values, not placeholders', d['--kv'] === 'int8' && d['--parallel'] === 1 && d['--draft-vocab'] === 'cjk' && d['--host'] === '127.0.0.1' &&
     d['--vram-reserve-mib'] === 700 && d['--vision'] === undefined && d['--low-ram'] === 'auto' && d['--model'] === 'IQ3_S' && d['--family'] === 'qwen')
+  check('the drafter defaults to Auto, Strata\'s own choice', d['--drafter'] === 'auto')
+  check('defaults for the selects setup keeps or decides itself', d['--mtp'] === 'on' && d['--cuda'] === 'auto' && d['--source'] === 'auto' && d['--image-gpu-policy'] === 'auto' && d['--image-native'] === 'off' && d['--images'] === undefined && d['--image-quant'] === undefined)
   check('rope defaults follow the context (yarn only beyond the trained 262144)',
     S.strataDefaults({ variant: 'IQ3_S', vramTotalGb: 24, ramTotalGb: 64, context: 262144 })['--rope-scaling'] === 'none' &&
     S.strataDefaults({ variant: 'IQ3_S', vramTotalGb: 24, ramTotalGb: 64, context: 524288 })['--rope-scaling'] === 'yarn' &&
     S.strataDefaults({ variant: 'IQ3_S', vramTotalGb: 24, ramTotalGb: 64, context: 524288 })['--rope-scale'] === 2)
   check('image tokens default depends on where the encoder runs', S.strataDefaults({ vramTotalGb: 24, ramTotalGb: 64, vision: 'cpu' })['--vision-tokens'] === 300 && d['--vision-tokens'] === 1024)
   check('the resident budget default exists only for the Unsloth variants', S.strataDefaults({ variant: 'UD-IQ4_XS', vramTotalGb: 24, ramTotalGb: 64 })['--resident-budget-gib'] === 40 && d['--resident-budget-gib'] === undefined)
+  {
+    const sch = JSON.parse(fs.readFileSync(path.join(root, 'resources', 'commands.strata.json'), 'utf8'))
+    const spec = sch.categories.find(c => c.name === 'Speculative Decoding')
+    const common = sch.categories.flatMap(c => c.commands.filter(p => S.strataIsCommon(p.arg, c.name)).map(p => p.arg))
+    check('Speculative Decoding is in the Common view whole, as in llama.cpp mode', !!spec && spec.commands.length > 0 && spec.commands.every(p => common.includes(p.arg)) && common.includes('--drafter') && common.includes('--mtp'))
+    check('Common keeps its flags, and leaves out Server, image, setup and the other Full-only ones', ['--context', '--kv', '--parallel', '--low-ram', '--vision'].every(f => common.includes(f)) &&
+      !['--host', '--api-key', '--images', '--calibrate', '--replicas', '--cuda', '--gpu-roles', '--resident-budget-gib'].some(f => common.includes(f)))
+  }
   check('Server flags are not in the Common view and context is', !S.STRATA_COMMON_FLAGS.has('--host') && !S.STRATA_COMMON_FLAGS.has('--api-key') && S.STRATA_COMMON_FLAGS.has('--context') && S.STRATA_COMMON_FLAGS.has('--kv'))
 }
 
@@ -99,7 +110,7 @@ const M = bundle('src/main/strataMetrics.ts', 'metrics')
 const base = { ggufDir: 'A:\\m', port: 1234, family: 'coder', model: 'IQ1_M', args: {} }
 let r = S.buildStrataArgv(base)
 check('argv has identity flags and sticky resets', r.argv && r.argv.join(' ') ===
-  '--yes --no-browser --family coder --model IQ1_M --gguf-dir A:\\m --port 1234 --parallel 1 --draft-vocab cjk', r.argv && r.argv.join(' '))
+  '--yes --no-browser --family coder --model IQ1_M --gguf-dir A:\\m --port 1234 --parallel 1 --draft-vocab cjk --mtp on', r.argv && r.argv.join(' '))
 r = S.buildStrataArgv({ ...base, args: { '--context': 65536, '--kv': 'q4_0', '--parallel': 3, '--vision': '', '--low-ram': null, '__lastPreset': 'quick', '--flag-on': true, '--flag-off': false } })
 const joined = r.argv.join(' ')
 check('argv carries set flags, skips empty/internal/false', joined.includes('--context 65536') && joined.includes('--kv q4_0') && joined.includes('--parallel 3') &&
@@ -119,6 +130,67 @@ check('overrides win for host/api-key and data dir is passed', r.argv.join(' ').
   r.argv.join(' ').includes('--api-key k1') && r.argv.join(' ').includes('--data-dir D:\\data'))
 check('template family/model args beat detected values', S.buildStrataArgv({ ...base, args: { '--family': 'qwen', '--model': 'IQ3_S' } }).argv.join(' ').includes('--family qwen --model IQ3_S'))
 check('missing family is an error', 'error' in S.buildStrataArgv({ ...base, family: null, model: null }))
+{
+  const j = S.buildStrataArgv({ ...base, args: { '--drafter': 'dflash2' } }).argv.join(' ')
+  check('an explicit drafter is sent once, and nothing is sent for it when left out', (j.match(/--drafter/g) || []).length === 1 && j.includes('--drafter dflash2') &&
+    !S.buildStrataArgv(base).argv.join(' ').includes('--drafter'), j)
+  const W = S.strataDrafterWarning
+  check('no drafter warning for Auto, MTP or Off, or for DFlash2 on a supported family, however many requests',
+    W(undefined, 'qwen') === '' && W('mtp', 'coder') === '' && W('off', 'nvfp4') === '' && W('dflash2', 'qwen') === '' && W('dflash2', 'unsloth') === '' && W('dflash2', 'gyro') === '' && W('dflash2', '') === '')
+  check('DFlash2 on a family it was not made for is warned about', /supports only/.test(W('dflash2', 'coder')) && /supports only/.test(W('dflash2', 'nvfp4')))
+}
+{
+  const argvOf = args => S.buildStrataArgv({ ...base, args }).argv
+  const j2 = a => argvOf(a).join(' ')
+  check('MTP off replaces the sticky MTP reset, once', (j2({ '--mtp': 'off' }).match(/--mtp/g) || []).length === 1 && j2({ '--mtp': 'off' }).includes('--mtp off') && j2({}).includes('--mtp on'))
+  // Switches go out bare, values go out beside their flag, an unset or false one goes out not at all.
+  const v = j2({ '--replica-profile': true, '--calibrate': true, '--no-remote-expert-opt': true, '--build': false, '--replicas': 2, '--gpu-roles': '1=main,0=helper', '--cuda': 12, '--models-dir': 'D:\\m', '--images': 'qwen-image', '--image-quant': 'Q6_K' })
+  check('new flags are sent as setup takes them', ['--replica-profile --calibrate', '--replicas 2', '--gpu-roles 1=main,0=helper', '--cuda 12', '--models-dir D:\\m', '--images qwen-image', '--image-quant Q6_K'].every(x => v.includes(x)) && !v.includes('--build'), v)
+  check('an unset image or storage choice sends nothing', !/--images|--image-|--models-dir|--source|--cuda|--replicas|--gpu-roles/.test(j2({ '--images': '', '--image-quant': null })))
+  // One-shot actions and the data-folder rewriters never reach setup, even from a stored Template.
+  const bad = j2({ '--setup': true, '--no-start': true, '--check': true, '--update': true, '--rollback-engine': true, '--inspect': 'x.gguf', '--prepare-pack': 'p', '--browser': true, '--move-data': true, '--set-default-data-dir': true, '--yes': 'no', '--port': 1, '--gguf-dir': 'evil' })
+  check('actions and XLM-owned flags in a Template never reach setup', !/--setup|--no-start|--check|--update|--rollback|--inspect|--prepare-pack|--browser|--move-data|--set-default|--yes no|--port 1 |evil/.test(bad), bad)
+  const P = bundle('src/shared/importCommand.ts', 'importcommand').parseStrataCommand
+  const imp = P('START-HERE.bat --setup --yes --no-start --family qwen --model IQ3_S --gpus 0,1 --replica-profile --calibrate --mtp off --cuda 12 --move-data --data-dir D:\\d --inspect a.gguf --images qwen-image')
+  check('a pasted command keeps Template flags (switches too) and sets aside the rest', imp.args['--replica-profile'] === true && imp.args['--calibrate'] === true && imp.args['--mtp'] === 'off' && imp.args['--cuda'] === 12 &&
+    imp.args['--gpus'] === '0,1' && imp.args['--images'] === 'qwen-image' && imp.args['--family'] === 'qwen' &&
+    ['--setup', '--yes', '--no-start', '--move-data', '--data-dir', '--inspect'].every(f => imp.ignored.includes(f)) &&
+    !['--setup', '--no-start', '--move-data', '--inspect', '--data-dir', '--yes'].some(f => f in imp.args), JSON.stringify(imp))
+  const WL = S.strataLaunchWarnings
+  check('no warning for a plain Template', WL({}, 'qwen').length === 0 && WL({ '--gpu-roles': '1=main,0=helper' }, 'qwen').length === 0 && WL({ '--gpus': '0,1', '--replicas': 2, '--layer-split': 'auto' }, 'qwen').length === 0 &&
+    WL({ '--images': 'qwen-image', '--image-quant': 'Q6_K' }, 'qwen').length === 0)
+  check('GPU Roles with GPUs or Single GPU is warned about as a launch that stops', /GPU Roles cannot be combined/.test(WL({ '--gpu-roles': '1=main', '--gpus': '0,1' }, 'qwen').join()) && /GPU Roles cannot be combined/.test(WL({ '--gpu-roles': '1=main', '--gpu': 0 }, 'qwen').join()))
+  check('Replicas and Replica Profile conflicts are warned about', /Layer Split would apply/.test(WL({ '--replicas': 2, '--layer-split': '3,1' }, 'qwen').join()) &&
+    /override Replica Profile/.test(WL({ '--replica-profile': true, '--replicas': 2 }, 'qwen').join()) && /override Replica Profile/.test(WL({ '--replica-profile': true, '--layer-split': '3,1' }, 'qwen').join()) &&
+    WL({ '--replica-profile': true }, 'qwen').length === 0)
+  check('image options without Image Generation are warned about', /no effect unless Image Generation/.test(WL({ '--image-backend': 'cpu' }, 'qwen').join()) && /no effect unless/.test(WL({ '--images': 'no', '--image-native': 'on' }, 'qwen').join()))
+  check('a named MTP beside MTP Draft Layer Off is warned about; DFlash2, Auto and Off are not', /MTP Draft Layer Off is ignored/.test(WL({ '--drafter': 'mtp', '--mtp': 'off' }, 'qwen').join()) &&
+    WL({ '--drafter': 'dflash2', '--mtp': 'off' }, 'qwen').length === 0 && WL({ '--drafter': 'auto', '--mtp': 'off' }, 'qwen').length === 0 && WL({ '--drafter': 'off', '--mtp': 'off' }, 'qwen').length === 0 && WL({ '--mtp': 'off' }, 'qwen').length === 0)
+}
+{
+  // setup is sent --drafter only as dflash2.
+  const sp = DM.splitDrafter
+  check('splitDrafter: setup is sent --drafter only for DFlash2, and the choice is read either way',
+    sp(['--yes', '--drafter', 'dflash2', '--port', '1']).argv.join(' ') === '--yes --drafter dflash2 --port 1' && sp(['--drafter', 'dflash2']).mode === 'dflash2' &&
+    sp(['--yes', '--drafter', 'mtp', '--port', '1']).argv.join(' ') === '--yes --port 1' && sp(['--drafter', 'mtp']).mode === 'mtp' &&
+    sp(['--yes', '--drafter', 'off', '--mtp', 'on']).argv.join(' ') === '--yes --mtp on' && sp(['--drafter', 'off']).mode === 'off' &&
+    sp(['--drafter', 'auto', '--x', '1']).argv.join(' ') === '--x 1' && sp(['--x', '1']).mode === 'auto' && sp(['--x', '1']).argv.join(' ') === '--x 1' &&
+    sp(['--drafter', 'DFlash2']).mode === 'dflash2' && sp(['--drafter', 'nonsense', '--x', '1']).mode === 'auto' && sp(['--x', '--drafter']).argv.join(' ') === '--x' && sp(['--x', '--drafter']).mode === 'auto')
+  const cfg = JSON.stringify({ exe: 'x', args: ['--mtp', 'D:/mtp/rt'], mtp: true, parallel: 1, draft_vocab: 'cjk' }, null, 1)
+  const w1 = DM.withDrafting(cfg, 'dflash2')
+  const back = JSON.parse(w1.text)
+  check('withDrafting saves the choice and keeps every other key', w1.changed && w1.previous === 'auto' && back.drafting === 'dflash2' && back.parallel === 1 && back.draft_vocab === 'cjk' && back.args.join() === '--mtp,D:/mtp/rt' && /^\{\n \"/.test(w1.text))
+  check('withDrafting changes nothing when the file already says so (so it is not rewritten each launch)', DM.withDrafting(w1.text, 'dflash2').changed === false && DM.withDrafting(cfg, 'auto').changed === false &&
+    DM.withDrafting(JSON.stringify({ drafting: 'DFlash2' }), 'dflash2').changed === false)
+  check('withDrafting puts a saved choice back to Auto, and reads a file with a BOM', DM.withDrafting(w1.text, 'auto').changed === true && JSON.parse(DM.withDrafting(w1.text, 'auto').text).drafting === 'auto' && DM.withDrafting('\uFEFF' + cfg, 'mtp').changed === true)
+  check('withDrafting gives up on a file that is not a JSON object', DM.withDrafting('not json', 'mtp') === null && DM.withDrafting('[1]', 'mtp') === null && DM.withDrafting('null', 'mtp') === null)
+  const tg = { qwen: '', unsloth: 'unsloth-', gyro: 'gyro-' }
+  check('the run config is strata-<family tag><model>.json, lower case, and unknown families have none',
+    DM.runConfigPath('/c', tg, 'unsloth', 'UD-IQ2_XS').replace(/\\/g, '/') === '/c/strata-unsloth-ud-iq2_xs.json' && DM.runConfigPath('/c', tg, 'qwen', 'IQ3_S').replace(/\\/g, '/') === '/c/strata-iq3_s.json' &&
+    DM.runConfigPath('/c', tg, 'nope', 'X') === null && DM.runConfigPath('/c', tg, 'qwen', '') === null)
+  check('the pack check runs strata.py from the clone, for DFlash2 only when it is needed', DM.draftingFetchArgv('/c', '/c/strata-a.json', '/d').join(' ') === '/c/strata.py drafting fetch --if-needed --mode dflash2 --config /c/strata-a.json --data-dir /d' ||
+    DM.draftingFetchArgv('/c', '/c/strata-a.json', '/d').join(' ').replace(/\\/g, '/') === '/c/strata.py drafting fetch --if-needed --mode dflash2 --config /c/strata-a.json --data-dir /d')
+}
 const q = S.buildStrataQuickBaseline({ contextLength: 262144 })
 check('quick baseline caps context at 32768 and uses int8', q['--context'] === 32768 && q['--kv'] === 'int8')
 check('quick baseline leaves image input on Automatic, like Full Auto', q['--vision'] === undefined && !('--vision' in q) && !('--vision' in S.buildStrataQuickBaseline({ contextLength: 8192 })))
@@ -127,7 +199,7 @@ check('quick baseline leaves image input on Automatic, like Full Auto', q['--vis
 function ref(model, vram, ctx, kv) {
   const arena = S.STRATA_VARIANTS[model].arenaGb
   const kvTok = 13 * (S.STRATA_KV_CELL_BYTES[kv] || 1056)
-  return Math.max(0, Math.min(arena, vram - 5 - Math.max(0, ctx - 32768) * kvTok / 1e9))
+  return Math.max(0, Math.min(arena, vram - 5 - 1 - Math.max(0, ctx - 32768) * kvTok / 1e9))
 }
 let worst = 0
 for (const model of Object.keys(S.STRATA_VARIANTS)) for (const vram of [8, 12, 16, 24, 32]) for (const ctx of [8192, 32768, 131072, 262144]) for (const kv of ['int8', 'q4_0', 'k8v4']) {
@@ -352,16 +424,41 @@ if (hasStrata) {
   const num = (re) => { const m = setup.match(re); return m ? parseFloat(m[1]) : NaN }
   check('LOW_RAM_HEADROOM_GB', num(/^LOW_RAM_HEADROOM_GB = ([0-9.]+)/m) === S.STRATA_LOW_RAM_HEADROOM_GB)
   check('KV cell bytes (q4_0, k8v4)', num(/KV_CELL_BYTES = \{"q4_0": (\d+)/) === S.STRATA_KV_CELL_BYTES.q4_0 && num(/"k8v4": (\d+)\}/) === S.STRATA_KV_CELL_BYTES.k8v4)
-  check('13 KV cells per token and ~5 GB base VRAM', /kv_tok = 13 \* KV_CELL_BYTES/.test(setup) && /vram_gb - 5 - longer/.test(setup))
+  check('13 KV cells per token and ~5 GB base VRAM', /kv_tok = 13 \* KV_CELL_BYTES/.test(setup) && /vram_gb - 5 - \(MTP_VRAM_GB if mtp else 0\.0\) - longer/.test(setup))
+  check('MTP_VRAM_GB', num(/^MTP_VRAM_GB = ([0-9.]+)/m) === S.STRATA_MTP_VRAM_GB)
+  check('RAM left beside the resident budget and beside every expert', num(/^UNSLOTH_RAM_LEFT_GB = (\d+)/m) === 24 && num(/^UNSLOTH_RESIDENT_BESIDE_GB = (\d+)/m) === 16)
   check('IQ3 RAM headroom of 24 GB', /ctx \* 13 \* 1056 \/ 1e9 \+ 24/.test(setup))
-  const mi = setup.indexOf('MODELS = {'), mj = setup.indexOf('\n}\n', mi)
-  const block = setup.slice(mi, mj)
-  let tableOk = true
-  for (const [name, v] of Object.entries(S.STRATA_VARIANTS)) {
-    const m = block.match(new RegExp('"' + name + '": \\{[\\s\\S]*?"ram_gb": (\\d+)[\\s\\S]*?"arena_gb": ([0-9.]+)'))
-    if (!m || parseFloat(m[2]) !== v.arenaGb || parseInt(m[1], 10) !== v.ramGb) { tableOk = false; console.log('      variant differs: ' + name) }
+  const models = JSON.parse(execFileSync('python3', ['-c', `
+import sys, json
+sys.path.insert(0, ${JSON.stringify(strataDir)})
+import setup
+print(json.dumps({k: {"arenaGb": v["arena_gb"], "ramGb": v["ram_gb"], "budget": bool(v.get("budget")), "nvidiaOnly": bool(v.get("nvidia_only"))} for k, v in setup.MODELS.items()}))
+`]).toString())
+  const tableDiffs = []
+  for (const [name, v] of Object.entries(models)) {
+    const mine = S.STRATA_VARIANTS[name]
+    if (!mine) tableDiffs.push(name + ' missing')
+    else if (mine.arenaGb !== v.arenaGb || mine.ramGb !== v.ramGb || mine.budget !== v.budget || mine.nvidiaOnly !== v.nvidiaOnly) tableDiffs.push(name + ' differs')
   }
-  check('variant table (arena GB, RAM GB)', tableOk)
+  for (const name of Object.keys(S.STRATA_VARIANTS)) if (!models[name]) tableDiffs.push(name + ' not in setup.py')
+  check('variant table matches setup.py MODELS (arena GB, RAM GB, budget, NVIDIA only)', tableDiffs.length === 0, tableDiffs.join(', '))
+  // The resident budget against setup's resident_budget_gib / unsloth_budget (no unified-memory GPU).
+  const budgets = JSON.parse(execFileSync('python3', ['-c', `
+import sys, json
+sys.path.insert(0, ${JSON.stringify(strataDir)})
+import setup
+out = []
+for model, d in setup.MODELS.items():
+    if not d.get("budget"):
+        continue
+    for ram in range(16, 201, 4):
+        for kv in (0.0, 1.7, 6.9):
+            out.append([model, ram, kv, setup.resident_budget_gib(model, ram, kv) if setup.unsloth_budget(model, ram) else None])
+print(json.dumps(out))
+`]).toString())
+  const budgetWrong = budgets.filter(([model, ram, kv, want]) => S.strataResidentBudgetGib(model, ram, kv) !== want)
+  check(`resident budget agrees with setup.py (${budgets.length} cases)`, budgetWrong.length === 0, JSON.stringify(budgetWrong.slice(0, 3)))
+  check('only Unsloth-style files get a resident budget', S.strataResidentBudgetGib('IQ3_S', 64) === null && S.strataResidentBudgetGib('UD-IQ4_XS', 0) === null && S.strataResidentBudgetGib('UD-IQ4_XS', 32) === 8)
   // The recommended context against Strata's own ram_ctx / low_ram_wanted.
   const expected = JSON.parse(execFileSync('python3', ['-c', `
 import sys, json
@@ -382,12 +479,77 @@ print(json.dumps(out))
 `]).toString())
   const wrong = expected.filter(([model, vram, ram, rec]) => S.strataRecommendedContext({ variant: model, vramTotalGb: vram, ramTotalGb: ram }) !== rec)
   check(`recommended context agrees with setup.py (${expected.length} cases)`, wrong.length === 0, JSON.stringify(wrong.slice(0, 3)))
-  let help = ''
-  try { help = execFileSync('python3', [path.join(strataDir, 'setup.py'), '--help'], { encoding: 'utf8' }) } catch (e) { help = String(e.stdout || '') }
   const schema = JSON.parse(fs.readFileSync(path.join(root, 'resources', 'commands.strata.json'), 'utf8'))
-  const missing = []
-  for (const c of schema.categories) for (const p of c.commands) if (!help.includes(p.arg)) missing.push(p.arg)
-  check('every schema flag exists in setup.py --help', missing.length === 0, missing.join(' '))
+  // Every add_argument of setup.py, hidden flags included.
+  const setupArgs = JSON.parse(execFileSync('python3', ['-c', `
+import ast, json
+tree = ast.parse(open(${JSON.stringify(path.join(strataDir, 'setup.py'))}, encoding="utf-8").read())
+out = []
+def lit(n):
+    try: return ast.literal_eval(n)
+    except Exception: return None
+for n in ast.walk(tree):
+    if isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute) and n.func.attr == "add_argument":
+        kw = {k.arg: k.value for k in n.keywords}
+        t = kw.get("type")
+        out.append({"flag": lit(n.args[0]), "action": lit(kw["action"]) if "action" in kw else None,
+                    "type": ast.unparse(t) if t is not None else None, "choices": lit(kw["choices"]) if "choices" in kw else None})
+print(json.dumps(out))
+`]).toString())
+  const bySetup = Object.fromEntries(setupArgs.map(a => [a.flag, a]))
+  const params = schema.categories.flatMap(c => c.commands)
+  const grouped = new Set([...params.map(p => p.arg), ...S.STRATA_OWN_FLAGS, ...S.STRATA_ACTION_FLAGS])
+  // Defined but never read anywhere in setup.py, and hidden from --help.
+  grouped.add('--skip-build')
+  const ungrouped = Object.keys(bySetup).filter(f => !grouped.has(f))
+  check('every setup.py flag is a Template parameter, one XLM sets itself, or a leave-out action', ungrouped.length === 0, ungrouped.join(' '))
+  const gone = [...params.map(p => p.arg), ...S.STRATA_OWN_FLAGS, ...S.STRATA_ACTION_FLAGS].filter(f => !bySetup[f])
+  check('every flag XLM names exists in setup.py', gone.length === 0, gone.join(' '))
+  const both = params.map(p => p.arg).filter(f => S.STRATA_OWN_FLAGS.has(f) && !['--family', '--model', '--host', '--api-key'].includes(f) || S.STRATA_ACTION_FLAGS.has(f))
+  check('no Template parameter is also a flag the launch sets or leaves out', both.length === 0, both.join(' '))
+  const kinds = []
+  for (const p of params) {
+    const a = bySetup[p.arg]
+    if (!a) continue
+    const isSwitch = a.action === 'store_true' || a.action === 'store_false'
+    if ((p.type === 'boolean') !== isSwitch) kinds.push(p.arg + ' (switch)')
+    if (p.type === 'number' && !/int|float/.test(a.type || '')) kinds.push(p.arg + ' (number)')
+    // setup's own alias for "no" (--vision none) is read by strataVisionReader but not offered twice.
+    const known = p.arg === '--vision' ? ['none'] : []
+    if (Array.isArray(a.choices) && p.type === 'select' && p.arg !== '--drafter') {
+      const have = new Set(p.options)
+      if (a.choices.some(c => !have.has(c) && !known.includes(c)) || p.options.some(o => !a.choices.includes(o))) kinds.push(p.arg + ' (choices)')
+    }
+  }
+  check('Template parameters have the type and choices setup.py gives them', kinds.length === 0, kinds.join(' '))
+  check('KV cell bytes for every precision (setup.py UD_FIT_KV_BYTES)', (() => {
+    const m = setup.match(/^UD_FIT_KV_BYTES = \{([^}]*)\}/m)
+    if (!m) return false
+    const want = Object.fromEntries([...m[1].matchAll(/"(\w+)": (\d+)/g)].map(x => [x[1], Number(x[2])]))
+    return Object.keys(want).length === Object.keys(S.STRATA_KV_CELL_BYTES).length && Object.entries(want).every(([k, v]) => S.STRATA_KV_CELL_BYTES[k] === v)
+  })())
+  const drafterChoices = (setup.match(/add_argument\("--drafter", choices=\[([^\]]*)\]/) || [])[1] || ''
+  const schemaDrafter = schema.categories.flatMap(c => c.commands).find(p => p.arg === '--drafter')
+  const setupDrafter = [...drafterChoices.matchAll(/"(\w+)"/g)].map(m => m[1])
+  const draftingSrc = fs.readFileSync(path.join(strataDir, 'strata_control', 'drafting.py'), 'utf8')
+  const modes = [...(draftingSrc.match(/^MODES = \(([^)]*)\)/m) || [])[1].matchAll(/"(\w+)"/g)].map(m => m[1])
+  // XLM saves the choice itself (strata_control/drafting.py MODES) and sends setup the --drafter values it takes.
+  check('drafter choices are drafting.py MODES, and setup.py --drafter takes the ones XLM sends on', !!schemaDrafter && setupDrafter.length > 0 && modes.length > 0 &&
+    schemaDrafter.options.join() === modes.join() && setupDrafter.every(c => schemaDrafter.options.includes(c)) && DM.DRAFTING_MODES.join() === modes.join(), `${drafterChoices} | ${modes}`)
+  const realTags = JSON.parse(execFileSync('python3', ['-c', `
+import sys, json
+sys.path.insert(0, ${JSON.stringify(strataDir)})
+import setup
+t = {}
+for d in (setup.FAMILIES, setup.OWN_PATH_FAMILIES, setup.MULTI_FILE_FAMILIES):
+    t.update({k: v["tag"] for k, v in d.items()})
+print(json.dumps(t))
+`]).toString())
+  const readTags = C.parseFamilyTags(setup)
+  check('family tags read from setup.py are the ones it names run configs by', Object.keys(realTags).length > 0 && JSON.stringify(Object.entries(realTags).sort()) === JSON.stringify(Object.entries(readTags).sort()), JSON.stringify(readTags))
+  const drafting = draftingSrc
+  const supported = ((drafting.match(/^SUPPORTED_FAMILIES = \(([^)]*)\)/m) || [])[1] || '').split(',').map(x => x.trim().replace(/"/g, '')).filter(Boolean)
+  check('DFlash2 families match strata_control/drafting.py', supported.length > 0 && supported.join() === S.STRATA_DFLASH2_FAMILIES.join(), supported.join())
   const drafts = (setup.match(/^DRAFT_VOCABS = \{([^}]*)\}/m) || [])[1] || ''
   const schemaDrafts = schema.categories.flatMap(c => c.commands).find(p => p.arg === '--draft-vocab').options
   check('draft-vocab choices', schemaDrafts.every(o => drafts.includes('"' + o + '"')) && (drafts.match(/"draft_vocab/g) || []).length === schemaDrafts.length)

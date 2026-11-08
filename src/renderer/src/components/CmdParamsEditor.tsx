@@ -17,6 +17,8 @@ import { formatWithSpaces, CONTEXT_POWER_OF_TWO_STEPS, snapToNearestPowerOfTwo, 
 import { resolveLlamaTarget, resolveEngineBackend } from '../utils/engineBackends'
 import { buildQuickEngineBaseline, computeRecommendedThreads, defaultKvQuantFor, defaultKvQuantVFor, SAMPLING_KEYS, SAMPLING_PRESET_MARKER } from '../../../shared/presetBaselines'
 import { COMMON_PARAM_FLAGS as COMMON_VISIBLE } from '../../../shared/commonParams'
+import { buildParamSections, CUSTOM_PARAMS } from '../../../shared/paramSections'
+import { syncYarnAuto } from '../../../shared/yarnAuto'
 import { applyNgramModifierToggle } from '../../../shared/specToggles'
 import { FORK_ONLY_ARGS } from '../../../shared/backendForks'
 import { markTemplateSavePending, markTemplateSaveDone } from '../utils/templateSync'
@@ -37,14 +39,7 @@ const iconMap: Record<string, React.ReactNode> = {
   Server: <Server size={14} />, FileText: <FileText size={14} />, GitBranch: <GitBranch size={14} />,
   Star: <Star size={14} />, Repeat: <Repeat size={14} />
 }
-const FEATURED_ARGS = ['--ctx-size', '--gpu-layers', '--threads', '--batch-size', '--flash-attn']
 const HYBRID_PARAMS = ['--threads', '--gpu-layers', '--temperature', '--top-p', '--top-k', '--min-p', '--ctx-size', '--n-cpu-moe']
-// Params that get a custom widget (excluded from the regular command grid).
-const CUSTOM_PARAMS = ['--model', '--port', '--host', '--api-key', '--mmproj', '--spec-type', '--spec-draft-model', '--chat-template', '--reasoning-budget', '--reasoning-budget-message', '--n-cpu-moe', '--reasoning-preserve',
-  '--spec-ngram-map-k4v-size-n', '--spec-ngram-map-k4v-size-m', '--spec-ngram-map-k4v-min-hits',
-  '--spec-ngram-mod-n-match', '--spec-ngram-mod-n-min', '--spec-ngram-mod-n-max',
-  // Rendered inside the Speculative Decoding widget, next to the other draft settings.
-  '--spec-draft-type-k', '--spec-draft-type-v']
 // Server parameters kept in `args`; the port is the Template's own field.
 const SERVER_ARGS = ['--host', '--api-key']
 // Sampling values are per-model/user-preferred, set once
@@ -523,42 +518,20 @@ export default function CmdParamsEditor({ templateId, args, onChange, modelPathF
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [disabled, derivedPresetMode, isMoe, meta?.contextLength, vramBudget?.freeVRAMMB, vramBudget?.freeRAMMB, modelSizeMB, kvQuantK, kvQuantV, mmprojEnabled, mmprojSizeMB])
 
-  // "Automatic YaRN scaling control" — while active (per-template switch, OR
-  // the global override switch kicking in because this preset isn't
-  // ignoring an AutoFit override that exceeds the model's native context),
-  // force RoPE scaling to yarn and auto-compute the scale factor +
-  // original-context needed to reach the relevant target context, per the
-  // reference formula:
-  //   --rope-scaling yarn
-  //   --rope-scale       = target_ctx / native_ctx   (>= 1)
-  //   --yarn-orig-ctx     = native_ctx (the model's own trained context)
-  // target_ctx is: the per-template --ctx-size normally, OR — when driven by
-  // the global upscale switch rather than the per-template one — whichever is
-  // larger of that and the global AutoFit override (the whole point of
-  // "upscale to AutoFit" is reaching the override even if --ctx-size itself
-  // is lower). Only recomputes when something actually changed, so this can't loop.
+  // While "Automatic YaRN scaling control" is in effect (the template's switch, or the global
+  // upscale to AutoFit for a preset that does not ignore the override), RoPE scaling is yarn with
+  //   --rope-scale    = target_ctx / native_ctx
+  //   --yarn-orig-ctx = native_ctx
+  // once the target passes the native context, and none of the three otherwise. The target is the
+  // template's --ctx-size, or with the global upscale the larger of that and the AutoFit override.
+  // When the control stops, whatever it wrote is cleared (see syncYarnAuto).
   useEffect(() => {
-    if (disabled || !effectiveYarnAutoScale) return
+    if (disabled) return
     const nativeCtx = contextLength > 0 ? contextLength : 0
-    if (!nativeCtx) return
-    const curArgs = argsRef.current
     let targetCtx = currentCtx > 0 ? currentCtx : nativeCtx
     if (globalYarnUpscale) targetCtx = Math.max(targetCtx, modelDefaults.autoFitContextLength)
-    const scale = targetCtx > nativeCtx ? Math.max(1, targetCtx / nativeCtx) : 1
-    // Round the scale to 2 decimal places — llama.cpp accepts fractional
-    // scales and this keeps the displayed/stored value tidy.
-    const roundedScale = Math.round(scale * 100) / 100
-    const needsUpdate = curArgs['--rope-scaling'] !== 'yarn' ||
-      Number(curArgs['--rope-scale']) !== roundedScale ||
-      Number(curArgs['--yarn-orig-ctx']) !== nativeCtx
-    if (needsUpdate) {
-      commit({
-        ...curArgs,
-        '--rope-scaling': 'yarn',
-        '--rope-scale': roundedScale,
-        '--yarn-orig-ctx': nativeCtx
-      }, { silent: true })
-    }
+    const next = syncYarnAuto(argsRef.current, { active: effectiveYarnAutoScale, target: targetCtx, native: nativeCtx, origCtxFlag: true })
+    if (next) commit(next, { silent: true })
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [effectiveYarnAutoScale, globalYarnUpscale, currentCtx, contextLength, disabled, modelDefaults.autoFitContextLength])
 
@@ -1533,42 +1506,10 @@ export default function CmdParamsEditor({ templateId, args, onChange, modelPathF
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [args, ignoreCtxOverride, ignoreBaseUrlOverride, autoCtxFill, cards, templateId, modelPathFallback, serverPortFallback, previewEffectiveCtx, ctxOverriddenInPreview, previewEffectiveParallel, parallelOverriddenInPreview, previewEffectivePort, portOverriddenInPreview, hostOverrideActive, apiKeyOverrideActive, baseUrlOverride, isMoe, modelDefaults])
 
-  const filteredCategories = useMemo(() => {
-    if (!commandsSchema) return []
-    let allCommands: CommandParam[] = []
-    commandsSchema.categories.forEach(cat => allCommands.push(...cat.commands))
-    const q = searchQuery.toLowerCase()
-    if (q) {
-      return commandsSchema.categories.map(cat => ({
-        ...cat,
-        commands: cat.commands.filter(cmd =>
-          cmd.label.toLowerCase().includes(q) || cmd.arg.toLowerCase().includes(q) ||
-          (cmd.short && cmd.short.toLowerCase().includes(q))
-        )
-      })).filter(cat => cat.commands.length > 0)
-    }
-    const featuredCommands = allCommands.filter(c => FEATURED_ARGS.includes(c.arg))
-    const cats = commandsSchema.categories.map(cat => ({
-      ...cat,
-      commands: cat.commands.filter(c => {
-        if (CUSTOM_PARAMS.includes(c.arg)) return false
-        if (FEATURED_ARGS.includes(c.arg)) return false
-        // "Common" view filters out low-level params.
-        if (paramViewMode === 'common' && !COMMON_VISIBLE.has(c.arg)) return false
-        return true
-      })
-    })).filter(cat => cat.commands.length > 0)
-    if (featuredCommands.length > 0) {
-      const filtered = paramViewMode === 'common'
-        ? featuredCommands.filter(c => COMMON_VISIBLE.has(c.arg))
-        : featuredCommands
-      if (filtered.length > 0) {
-        filtered.sort((a, b) => FEATURED_ARGS.indexOf(a.arg) - FEATURED_ARGS.indexOf(b.arg))
-        cats.unshift({ name: 'Context and Performance', icon: 'Star', commands: filtered })
-      }
-    }
-    return cats
-  }, [commandsSchema, searchQuery, paramViewMode])
+  const paramSections = useMemo(
+    () => commandsSchema ? buildParamSections(commandsSchema.categories, { query: searchQuery, full: paramViewMode === 'full', common: COMMON_VISIBLE }) : [],
+    [commandsSchema, searchQuery, paramViewMode]
+  )
 
   if (!commandsSchema) return <div className="text-muted text-sm">No commands schema loaded. Ensure an engine is installed.</div>
 
@@ -2683,49 +2624,80 @@ export default function CmdParamsEditor({ templateId, args, onChange, modelPathF
     </>
   )
 
+  // Custom blocks sit in the section their flags belong to; while searching, a block shows if the query matches its keywords.
+  const query = searchQuery.trim().toLowerCase()
+  interface ParamBlock { id: string; keywords: string; node: React.ReactNode }
+  const samplingPresetsRow = (
+    <SamplingPresets
+      selectedId={selectedSamplingPreset?.id}
+      onApply={(values, id) => {
+        const newArgs = { ...args }
+        newArgs[SAMPLING_PRESET_MARKER] = id
+        if (values.temperature !== undefined) newArgs['--temperature'] = values.temperature
+        if (values.topK !== undefined) newArgs['--top-k'] = values.topK
+        if (values.topP !== undefined) newArgs['--top-p'] = values.topP
+        if (values.minP !== undefined) newArgs['--min-p'] = values.minP
+        if (values.repeatPenalty !== undefined) newArgs['--repeat-penalty'] = values.repeatPenalty
+        if (values.presencePenalty !== undefined) newArgs['--presence-penalty'] = values.presencePenalty
+        commit(newArgs)
+      }}
+      disabled={disabled}
+    />
+  )
+  const blocksOf: Record<string, ParamBlock[]> = {
+    'Model': [
+      { id: 'mmproj', keywords: 'multimodal projector --mmproj vision image', node: renderMmprojWidget() },
+      { id: 'spec', keywords: 'speculative decoding draft --spec mtp eagle dflash dspark ngram n-gram draft model', node: renderSpecWidget() }
+    ],
+    'Context Window': [{ id: 'context', keywords: 'context --ctx-size --fit autofit length override', node: renderContextBlock() }],
+    'GPU': [{ id: 'moe', keywords: 'moe mixture of experts --n-cpu-moe --cpu-moe expert layers', node: renderMoeWidget() }],
+    'Sampling': [{ id: 'sampling-presets', keywords: 'sampling presets preset temperature', node: samplingPresetsRow }],
+    'Server': [
+      { id: 'server', keywords: 'server --port --host --api-key port host api key network', node: renderServerBlock() },
+      { id: 'base-url', keywords: 'base url override --port --host --api-key local network', node: renderBaseUrlOverrideBlock() },
+      { id: 'checkpoint', keywords: 'automatic checkpoint saving --slot-save-path slot save', node: renderAutoCheckpointBlock() },
+      { id: 'jinja', keywords: 'jinja chat template --chat-template', node: renderJinjaWidget() },
+      { id: 'reasoning', keywords: 'reasoning budget preserve --reasoning-budget --reasoning-preserve think', node: renderReasoningWidget() }
+    ]
+  }
+  const customArgs: ParamBlock = {
+    id: 'custom-args', keywords: 'custom arguments args flags command line',
+    node: <CustomArgsEditor value={customArgsText} schema={commandsSchema} disabled={disabled} onChange={setCustomArgsText} onImport={importCustomArgs} />
+  }
+  const visibleSections = [
+    ...paramSections.map(sec => {
+      const blocks = (blocksOf[sec.key] ?? []).filter(b => b.node != null && b.node !== false && (!query || b.keywords.includes(query)))
+      return { ...sec, blocks, ownTitle: false }
+    }),
+    { key: 'Custom Arguments', title: 'Custom Arguments', icon: '', rows: [] as CommandParam[], blocks: !query || customArgs.keywords.includes(query) ? [customArgs] : [], ownTitle: true }
+  ].filter(sec => sec.rows.length > 0 || sec.blocks.length > 0)
+  const dim: React.CSSProperties = disabled ? { opacity: 0.55, pointerEvents: 'none', userSelect: 'none' } : {}
+
   return (
     <div className="params-editor-container">
       {headerPortalTarget ? createPortal(headerContent, headerPortalTarget) : headerContent}
       {renderMemoryEngineBlock()}
-      {renderContextBlock()}
-      {renderServerBlock()}
-      {renderBaseUrlOverrideBlock()}
-      {renderAutoCheckpointBlock()}
-      <SamplingPresets
-        selectedId={selectedSamplingPreset?.id}
-        onApply={(values, id) => {
-          const newArgs = { ...args }
-          newArgs[SAMPLING_PRESET_MARKER] = id
-          if (values.temperature !== undefined) newArgs['--temperature'] = values.temperature
-          if (values.topK !== undefined) newArgs['--top-k'] = values.topK
-          if (values.topP !== undefined) newArgs['--top-p'] = values.topP
-          if (values.minP !== undefined) newArgs['--min-p'] = values.minP
-          if (values.repeatPenalty !== undefined) newArgs['--repeat-penalty'] = values.repeatPenalty
-          if (values.presencePenalty !== undefined) newArgs['--presence-penalty'] = values.presencePenalty
-          commit(newArgs)
-        }}
-        disabled={disabled}
-      />
-      {renderMmprojWidget()}
-      {renderJinjaWidget()}
-      {renderSpecWidget()}
-      {renderMoeWidget()}
-      {renderReasoningWidget()}
-      <CustomArgsEditor value={customArgsText} schema={commandsSchema} disabled={disabled} onChange={setCustomArgsText} onImport={importCustomArgs} />
       <div className="params-search-box">
         <Search size={16} style={{ color: 'var(--text-muted)' }} />
         <input type="text" className="form-input" placeholder="Search parameters..." value={searchQuery} onChange={e => setSearchQuery(e.target.value)} />
       </div>
-      <div className="params-scroll-area" style={disabled ? { opacity: 0.55, pointerEvents: 'none', userSelect: 'none' } : {}}>
-        {filteredCategories.length === 0 ? (
+      <div className="params-scroll-area">
+        {visibleSections.length === 0 ? (
           <div className="text-center py-6 text-sm text-muted">No parameters matched your search.</div>
         ) : (
-          filteredCategories.map((cat) => (
-            <div key={cat.name} className="cmd-section">
-              <div className="cmd-section-header" style={cat.name === 'Context and Performance' ? { color: 'var(--text)' } : {}}>
-                {iconMap[cat.icon]} {cat.name}
-              </div>
-              <div className="cmd-grid">{cat.commands.map(renderCommand)}</div>
+          visibleSections.map(sec => (
+            <div key={sec.key} className="cmd-section">
+              {!sec.ownTitle && (
+                <div className="cmd-section-header" style={dim}>
+                  {iconMap[sec.icon]} {sec.title}
+                </div>
+              )}
+              {sec.blocks.map(b => <React.Fragment key={b.id}>{b.node}</React.Fragment>)}
+              {sec.rows.length > 0 && (
+                <div style={dim}>
+                  <div className="cmd-grid">{sec.rows.map(renderCommand)}</div>
+                </div>
+              )}
             </div>
           ))
         )}

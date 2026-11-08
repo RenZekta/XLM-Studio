@@ -1,5 +1,6 @@
 import type { CommandsSchema } from './types'
 import { MMPROJ_OFFLOAD_MODE_KEY } from './mmprojOffload'
+import { STRATA_ACTION_FLAGS } from './strata'
 
 // Flags whose value is free text, so a digits-only value (an API key like
 // 12345) must stay a string instead of being read as a number.
@@ -81,7 +82,7 @@ export interface ParsedStrataCommand {
 }
 
 // Flags XLM Studio adds on every launch, so they are not kept in a Template.
-const STRATA_MANAGED_FLAGS = new Set(['--yes', '--no-browser', '--data-dir'])
+const STRATA_MANAGED_FLAGS = new Set(['--yes', '--no-browser', '--data-dir', ...STRATA_ACTION_FLAGS])
 
 // Splits a pasted Strata launcher command (START-HERE.bat, ./setup.sh or
 // python setup.py, then its flags). Whatever comes before the first flag is

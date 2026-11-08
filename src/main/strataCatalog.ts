@@ -126,3 +126,20 @@ export function parseStrataCatalog(setupPy: string | null, table: StrataTable | 
   }
   return { families }
 }
+
+// Each family's "tag", the prefix of its models' run config names. Families without one are left out.
+export function parseFamilyTags(setupPy: string | null): Record<string, string> {
+  const tags: Record<string, string> = {}
+  if (!setupPy) return tags
+  try {
+    for (const dict of ['FAMILIES', 'OWN_PATH_FAMILIES', 'MULTI_FILE_FAMILIES']) {
+      for (const f of topLevelDict(setupPy, dict)) {
+        const m = /"tag"\s*:\s*"([^"]*)"/.exec(f.value)
+        if (m) tags[f.key] = m[1]
+      }
+    }
+  } catch {
+    // Tags read so far are kept.
+  }
+  return tags
+}

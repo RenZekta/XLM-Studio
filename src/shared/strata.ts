@@ -177,16 +177,37 @@ export function strataTableHash(table: StrataTable): string {
 // Variants (mirrors setup.py MODELS): experts size and RAM guidance in GB.
 // ---------------------------------------------------------------------------
 
-export interface StrataVariant { arenaGb: number; ramGb: number; nvidiaOnly: boolean }
+export interface StrataVariant {
+  arenaGb: number
+  ramGb: number
+  // Unsloth-style file: no low-RAM mode; part of the experts is read from the file within a RAM budget.
+  budget: boolean
+  nvidiaOnly: boolean
+}
 
 export const STRATA_VARIANTS: Record<string, StrataVariant> = {
-  'Q2_0': { arenaGb: 34.0, ramGb: 48, nvidiaOnly: false },
-  'IQ2_XS': { arenaGb: 35.5, ramGb: 48, nvidiaOnly: false },
-  'IQ3_XXS': { arenaGb: 42.9, ramGb: 60, nvidiaOnly: false },
-  'IQ3_S': { arenaGb: 50.3, ramGb: 62, nvidiaOnly: false },
-  'IQ1_M': { arenaGb: 23.4, ramGb: 32, nvidiaOnly: false },
-  'UD-IQ4_XS': { arenaGb: 59.5, ramGb: 48, nvidiaOnly: false },
-  'UD-Q4_K_XL': { arenaGb: 77.0, ramGb: 48, nvidiaOnly: true }
+  'Q2_0': { arenaGb: 34.0, ramGb: 48, budget: false, nvidiaOnly: false },
+  'IQ2_XS': { arenaGb: 35.5, ramGb: 48, budget: false, nvidiaOnly: false },
+  'IQ3_XXS': { arenaGb: 42.9, ramGb: 60, budget: false, nvidiaOnly: false },
+  'IQ3_S': { arenaGb: 50.3, ramGb: 62, budget: false, nvidiaOnly: false },
+  'IQ1_M': { arenaGb: 23.4, ramGb: 32, budget: false, nvidiaOnly: false },
+  'UD-IQ4_XS': { arenaGb: 59.5, ramGb: 48, budget: true, nvidiaOnly: false },
+  'UD-Q4_K_XL': { arenaGb: 77.0, ramGb: 48, budget: true, nvidiaOnly: false },
+  'UD-Q5_K_XL': { arenaGb: 98.4, ramGb: 108, budget: true, nvidiaOnly: false },
+  'UD-Q6_K_XL': { arenaGb: 109.2, ramGb: 118, budget: true, nvidiaOnly: false },
+  'Q8_0': { arenaGb: 128.3, ramGb: 136, budget: true, nvidiaOnly: false },
+  'UD-IQ1_M': { arenaGb: 34.8, ramGb: 48, budget: true, nvidiaOnly: false },
+  'UD-Q2_0': { arenaGb: 37.4, ramGb: 48, budget: true, nvidiaOnly: false },
+  'UD-IQ2_XS': { arenaGb: 42.3, ramGb: 48, budget: true, nvidiaOnly: false },
+  'UD-Q2_K_XL': { arenaGb: 46.0, ramGb: 48, budget: true, nvidiaOnly: false },
+  'UD-IQ3_XXS': { arenaGb: 50.3, ramGb: 48, budget: true, nvidiaOnly: false },
+  'UD-Q3_K_XL': { arenaGb: 56.2, ramGb: 48, budget: true, nvidiaOnly: false },
+  'UD-IQ4_XS-v31': { arenaGb: 60.4, ramGb: 48, budget: true, nvidiaOnly: false },
+  'Gyro-S': { arenaGb: 25.8, ramGb: 27.6, budget: false, nvidiaOnly: false },
+  'Gyro-M': { arenaGb: 32.1, ramGb: 35.0, budget: false, nvidiaOnly: false },
+  'NVFP4': { arenaGb: 68.0, ramGb: 80, budget: false, nvidiaOnly: true },
+  'NVFP4-NVIDIA': { arenaGb: 68.0, ramGb: 80, budget: false, nvidiaOnly: true },
+  'NVFP4-QAD': { arenaGb: 68.0, ramGb: 80, budget: false, nvidiaOnly: true }
 }
 
 // ---------------------------------------------------------------------------
@@ -202,6 +223,13 @@ export const STRATA_NATIVE_CONTEXT = 262144
 export const STRATA_COMMON_FLAGS = new Set([
   '--vision', '--context', '--kv', '--kv-streaming', '--rope-scaling', '--rope-scale', '--parallel', '--low-ram'
 ])
+
+// Categories shown whole in the Common view.
+export const STRATA_COMMON_CATEGORIES = new Set(['Speculative Decoding'])
+
+export function strataIsCommon(flag: string, category: string): boolean {
+  return STRATA_COMMON_FLAGS.has(flag) || STRATA_COMMON_CATEGORIES.has(category)
+}
 
 export interface StrataDefaultsInput {
   variant?: string | null
@@ -221,7 +249,7 @@ export interface StrataDefaultsInput {
 // room), capped by the longest context the RAM rule allows (setup.py
 // rec_ctx and ram_ctx).
 export function strataRecommendedContext(i: StrataDefaultsInput): number {
-  const unsloth = !!i.variant && i.variant.startsWith('UD-')
+  const unsloth = !!i.variant && (STRATA_VARIANTS[i.variant]?.budget ?? i.variant.startsWith('UD-'))
   const vram = i.vramTotalGb
   let rec = unsloth
     ? (vram < 14 ? 8192 : 32768)
@@ -241,6 +269,20 @@ export function strataRecommendedContext(i: StrataDefaultsInput): number {
   return rec
 }
 
+// setup.py UNSLOTH_RAM_LEFT_GB and UNSLOTH_RESIDENT_BESIDE_GB.
+const UNSLOTH_RAM_LEFT_GB = 24
+const UNSLOTH_RESIDENT_BESIDE_GB = 16
+
+// Mirrors setup.py resident_budget_gib and unsloth_budget; null when setup writes no budget.
+// A unified-memory GPU keeps the budget but cannot be detected here.
+export function strataResidentBudgetGib(variant: string, ramGb: number, kvRamGb = 0): number | null {
+  const v = STRATA_VARIANTS[variant]
+  if (!v?.budget || !(ramGb > 0)) return null
+  const arenaGib = v.arenaGb / 1.073741824
+  if (ramGb >= arenaGib + UNSLOTH_RESIDENT_BESIDE_GB) return null
+  return Math.max(8, Math.min(Math.round(ramGb) - UNSLOTH_RAM_LEFT_GB - Math.ceil(kvRamGb), Math.floor(arenaGib)))
+}
+
 // The value each flag takes when it is not passed, so the editor can show it.
 // Flags with no fixed default (GPU choice, split, API key) are left out.
 export function strataDefaults(i: StrataDefaultsInput): Record<string, string | number> {
@@ -258,14 +300,40 @@ export function strataDefaults(i: StrataDefaultsInput): Record<string, string | 
     '--vram-reserve-mib': STRATA_DEFAULT_RESERVE_MIB,
     '--parallel': 1,
     '--low-ram': 'auto',
+    '--mtp': 'on',
+    '--cuda': 'auto',
+    '--source': 'auto',
+    '--image-gpu-policy': 'auto',
+    '--image-native': 'off',
+    '--drafter': 'auto',
     '--draft-vocab': 'cjk',
     '--experimental-speed-projection': 'off',
     '--host': '127.0.0.1'
   }
   if (i.family) out['--family'] = i.family
   if (i.variant) out['--model'] = i.variant
-  if (i.variant && i.variant.startsWith('UD-') && i.ramTotalGb > 0) out['--resident-budget-gib'] = Math.max(1, Math.floor(i.ramTotalGb - 24))
+  const budget = i.variant ? strataResidentBudgetGib(i.variant, i.ramTotalGb) : null
+  if (budget !== null) out['--resident-budget-gib'] = budget
   return out
+}
+
+// ---------------------------------------------------------------------------
+// Drafter
+// ---------------------------------------------------------------------------
+
+// strata_control/drafting.py SUPPORTED_FAMILIES.
+export const STRATA_DFLASH2_FAMILIES = ['qwen', 'gyro', 'unsloth']
+
+export function strataDrafterWarning(
+  drafter: string | number | boolean | null | undefined,
+  family: string | null | undefined
+): string {
+  if (textOf(drafter) !== 'dflash2') return ''
+  const fam = textOf(family).toLowerCase()
+  if (fam && !STRATA_DFLASH2_FAMILIES.includes(fam)) {
+    return `DFlash2 supports only the ${STRATA_DFLASH2_FAMILIES.join(', ')} families. Other families fall back to the MTP, which is not downloaded when DFlash2 is selected.`
+  }
+  return ''
 }
 
 // ---------------------------------------------------------------------------
@@ -288,7 +356,14 @@ export interface StrataLaunchInput {
 }
 
 // Flags the builder writes itself.
-const OWN_FLAGS = new Set(['--family', '--model', '--host', '--api-key', '--port', '--gguf-dir', '--data-dir', '--yes', '--no-browser'])
+export const STRATA_OWN_FLAGS = new Set(['--family', '--model', '--host', '--api-key', '--port', '--gguf-dir', '--data-dir', '--yes', '--no-browser'])
+
+// setup.py flags a Template never sends: actions that stop short of serving, --browser (undoes the
+// --no-browser every launch sends) and the data folder rewriters (XLM owns that setting).
+export const STRATA_ACTION_FLAGS = new Set([
+  '--setup', '--no-start', '--check', '--update', '--rollback-engine', '--inspect', '--prepare-pack',
+  '--browser', '--move-data', '--set-default-data-dir'
+])
 
 // Settings setup keeps from an earlier run of the same model when a flag is
 // left out, so a template that leaves one on Auto must send its default to
@@ -297,7 +372,8 @@ const OWN_FLAGS = new Set(['--family', '--model', '--host', '--api-key', '--port
 // where the model can read them).
 const STICKY_DEFAULTS: Array<[string, string]> = [
   ['--parallel', '1'],
-  ['--draft-vocab', 'cjk']
+  ['--draft-vocab', 'cjk'],
+  ['--mtp', 'on']
 ]
 
 function textOf(v: StrataArgValue): string {
@@ -335,7 +411,7 @@ export function buildStrataArgv(input: StrataLaunchInput): { argv: string[] } | 
 
   const sent = new Set<string>()
   for (const [key, value] of Object.entries(input.args)) {
-    if (!key.startsWith('--') || OWN_FLAGS.has(key)) continue
+    if (!key.startsWith('--') || STRATA_OWN_FLAGS.has(key) || STRATA_ACTION_FLAGS.has(key)) continue
     if (value === false || value === null || value === undefined) continue
     if (value === true) { argv.push(key); sent.add(key); continue }
     const text = String(value).trim()
@@ -367,11 +443,46 @@ export function buildStrataQuickBaseline(opts: { contextLength?: number | null }
 // Memory estimate (mirrors setup.py low_ram_gpu_gb / ctx_ram_need)
 // ---------------------------------------------------------------------------
 
-export const STRATA_KV_CELL_BYTES: Record<string, number> = { int8: 1056, q4_0: 576, k8v4: 816 }
+// Bytes per token and attention layer (setup.py UD_FIT_KV_BYTES).
+export const STRATA_KV_CELL_BYTES: Record<string, number> = { int8: 1056, q4_0: 576, k8v4: 816, fp16: 2112 }
 // 12 attention layers plus the draft layer keep KV.
 export const STRATA_KV_CELLS_PER_TOKEN = 13
 // Dense weights, buffers and a 32K context's KV cache.
 export const STRATA_BASE_VRAM_GB = 5
+// Template combinations that setup refuses or ignores, one sentence each.
+export function strataLaunchWarnings(
+  args: Record<string, StrataArgValue>,
+  family: string | null | undefined
+): string[] {
+  const out: string[] = []
+  const set = (flag: string) => textOf(args[flag]) !== ''
+  const drafter = strataDrafterWarning(args['--drafter'], family)
+  if (drafter) out.push(drafter)
+  if (textOf(args['--drafter']) === 'mtp' && textOf(args['--mtp']) === 'off') {
+    out.push('MTP Draft Layer Off is ignored when the Drafter is MTP.')
+  }
+  // setup.py rejects --gpu-roles together with --gpu or --gpus.
+  if (set('--gpu-roles') && (set('--gpus') || set('--gpu'))) {
+    out.push('GPU Roles cannot be combined with GPUs or Single GPU; the launch fails.')
+  }
+  const split = textOf(args['--layer-split']).toLowerCase()
+  const manualSplit = split !== '' && split !== 'auto'
+  const replicas = Number(textOf(args['--replicas']))
+  if (replicas >= 2 && manualSplit) {
+    out.push('A manual Layer Split would apply to every replica; leave it on auto.')
+  }
+  if (args['--replica-profile'] === true && (replicas >= 2 || manualSplit)) {
+    out.push('Replicas or a manual Layer Split override Replica Profile.')
+  }
+  if (textOf(args['--images']) !== 'qwen-image') {
+    const sub = ['--image-quant', '--image-backend', '--image-gpu-policy', '--image-native'].filter(set)
+    if (sub.length) out.push('Image options have no effect unless Image Generation is set to Qwen-Image.')
+  }
+  return out
+}
+
+// VRAM of the draft layer, taken from the expert cache (setup.py MTP_VRAM_GB).
+export const STRATA_MTP_VRAM_GB = 1
 export const STRATA_BASE_CONTEXT = 32768
 export const STRATA_VISION_VRAM_GB = 1.4
 
@@ -430,7 +541,7 @@ export function estimateStrataMemory(i: StrataMemoryInput): StrataMemoryEstimate
   const kvInRam = streaming === 'on' || (streaming === 'auto' && !lowRam && i.context >= KV_STREAMING_FROM)
   const longerKvGb = kvInRam ? 0 : Math.max(0, i.context - STRATA_BASE_CONTEXT) * kvBytesPerToken / 1e9
   const reserveGb = (i.reserveMib ?? STRATA_DEFAULT_RESERVE_MIB) / 1024
-  const fixedGb = STRATA_BASE_VRAM_GB + longerKvGb + (i.vision ? STRATA_VISION_VRAM_GB : 0) + reserveGb
+  const fixedGb = STRATA_BASE_VRAM_GB + STRATA_MTP_VRAM_GB + longerKvGb + (i.vision ? STRATA_VISION_VRAM_GB : 0) + reserveGb
   const expertCacheGb = Math.max(0, Math.min(variant.arenaGb, i.vramGb - fixedGb))
   const iq3 = i.variant === 'IQ3_XXS' || i.variant === 'IQ3_S'
   const kvRamGb = kvInRam ? i.context * kvBytesPerToken / 1e9 : 0

@@ -40,7 +40,8 @@ import { NATIVE_PLATFORM, BACKEND_TYPE_MARKER, platformOfBuildDir, installVersio
 import { strataTableHash, strataVerdict, bestStrataInfo, STRATA_NO_TABLE, type StrataTable, type StrataFingerprint } from '../shared/strata'
 import { fingerprintGguf } from './ggufTensors'
 import { resolveAppIcon } from './appIcon'
-import { parseStrataCatalog, type StrataCatalog } from './strataCatalog'
+import { parseFamilyTags, parseStrataCatalog, type StrataCatalog } from './strataCatalog'
+import { prepareDrafting, runStep, splitDrafter } from './strataDrafting'
 import { LineAssembler } from './lineAssembler'
 import {
   STRATA_DATA_DIRNAME, DEFAULT_STRATA_DATA, strataLauncherName, looksLikeStrataClone, gitAvailable,
@@ -3279,8 +3280,26 @@ export function registerIpcHandlers(): void {
         // <engines folder>/<repo>/<clone> -> <engines folder>
         const data = resolveStrataData(strataSettings.data, dirname(dirname(opts.backendPath)))
         if (!finalArgs.includes('--data-dir')) finalArgs.push('--data-dir', data.dataDir)
+        // --drafter is Strata's saved drafting choice; setup only accepts it as dflash2.
+        const drafter = splitDrafter(finalArgs)
+        finalArgs = drafter.argv
         strataSpawn = buildStrataSpawn(opts.backendPath, finalArgs, data.env)
         if ('error' in strataSpawn) return { success: false, error: strataSpawn.error }
+        const valueAfter = (flag: string) => { const i = finalArgs.indexOf(flag); return i !== -1 ? finalArgs[i + 1] ?? '' : '' }
+        let setupText: string | null = null
+        try { setupText = readFileSync(join(opts.backendPath, 'setup.py'), 'utf8') } catch { /* tags stay empty */ }
+        const sendLine = (line: string) => BrowserWindow.getAllWindows().forEach(win => {
+          if (!win.isDestroyed()) win.webContents.send('server-log', { id: opts.id, name: opts.name, stream: 'stdout', line, ts: Date.now() })
+        })
+        await prepareDrafting({
+          cloneDir: opts.backendPath, dataDir: data.dataDir, family: valueAfter('--family'), model: valueAfter('--model'),
+          mode: drafter.mode, tags: parseFamilyTags(setupText), env: data.env,
+          io: { log: (line: string) => { sendLine(line); if (line.startsWith('Drafter:')) emitAppLog(opts.id, opts.name, line) } },
+          installOnly: () => {
+            const dry = buildStrataSpawn(opts.backendPath, [...finalArgs, '--no-start'], data.env)
+            return 'error' in dry ? Promise.resolve(null) : runStep(dry.command, dry.args, dry.options, { log: sendLine })
+          }
+        })
       }
       // detached:true on POSIX so we get a new process group we can SIGKILL
       // wholesale (covers llama-server's child threads). On Windows we rely on
