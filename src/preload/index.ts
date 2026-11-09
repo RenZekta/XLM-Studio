@@ -9,7 +9,7 @@ import type { EngineId } from '../shared/engines'
 const api = {
   // ----- Models -----
   listModels: () => ipcRenderer.invoke('list-models') as Promise<ModelGroup[]>,
-  deleteModel: (filePath: string) => ipcRenderer.invoke('delete-model', filePath),
+  deleteModel: (filePath: string, onlyThisFile?: boolean) => ipcRenderer.invoke('delete-model', filePath, onlyThisFile),
   renameModel: (oldPath: string, newName: string) => ipcRenderer.invoke('rename-model', oldPath, newName),
   startModelDownload: (opts: object) => ipcRenderer.invoke('start-model-download', opts),
   pauseModelDownload: (id: string) => ipcRenderer.invoke('pause-model-download', id),
@@ -198,9 +198,9 @@ const api = {
   updateTrackedEngines: () => ipcRenderer.invoke('update-tracked-engines') as Promise<{ updated: string[]; errors: string[] }>,
   installGitEngine: (trackedId: string) => ipcRenderer.invoke('install-git-engine', trackedId) as Promise<{ success: boolean; error?: string; path?: string }>,
   updateGitEngine: (trackedId: string) => ipcRenderer.invoke('update-git-engine', trackedId) as Promise<{ success: boolean; error?: string; updated?: boolean; skipped?: string }>,
-  getEngineSettings: () => ipcRenderer.invoke('get-engine-settings') as Promise<{ autoUpdateTrackedEngines: boolean; engineInstallMode: EngineInstallMode; autoUpdateBuildTools: boolean; rocmChannel: 'stable' | 'nightly'; rocmSource: 'tarball' | 'pip'; strata: StrataSettings; strataDataDir: string; strataRememberedDataDir: string | null; gitAvailable: boolean }>,
+  getEngineSettings: () => ipcRenderer.invoke('get-engine-settings') as Promise<{ autoUpdateTrackedEngines: boolean; engineInstallModes: Record<string, EngineInstallMode>; autoUpdateBuildTools: boolean; rocmChannel: 'stable' | 'nightly'; rocmSource: 'tarball' | 'pip'; strata: StrataSettings; strataDataDir: string; strataRememberedDataDir: string | null; gitAvailable: boolean }>,
   setAutoUpdateTrackedEngines: (enabled: boolean) => ipcRenderer.invoke('set-auto-update-tracked-engines', enabled) as Promise<{ success: boolean }>,
-  setEngineInstallMode: (mode: EngineInstallMode) => ipcRenderer.invoke('set-engine-install-mode', mode) as Promise<{ success: boolean }>,
+  setEngineInstallMode: (trackedId: string, mode: EngineInstallMode) => ipcRenderer.invoke('set-engine-install-mode', trackedId, mode) as Promise<{ success: boolean }>,
   buildFromSource: (opts: { trackedId: string; type: string; extraArgs?: string; installTools?: boolean; gpuTarget?: string; pull?: boolean }) => ipcRenderer.invoke('build-from-source', opts) as Promise<{ success: boolean; path?: string; error?: string }>,
   cancelSourceBuild: (trackedId: string, type: string) => ipcRenderer.invoke('cancel-source-build', trackedId, type) as Promise<{ success: boolean }>,
   getBuildToolsPlan: (type: string, gpuTarget?: string) => ipcRenderer.invoke('get-build-tools-plan', type, gpuTarget) as Promise<{ manager: string | null; tools: { id: string; label: string; present: boolean; installable: boolean; reason?: string; outdated: boolean; detail?: string; needsGpu?: boolean }[] } | null>,

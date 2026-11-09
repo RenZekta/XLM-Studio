@@ -3,10 +3,11 @@ import { useStore } from '../store/useStore'
 import {
   HardDrive, Download, Trash, X, Link, FolderOpen,
   Pencil, Check, AlertCircle, Loader2, RefreshCw, Search, FilePlus,
-  ChevronRight, Eye, Layers, Zap
+  ChevronRight, Eye, Layers, Zap, Group, Ungroup
 } from 'lucide-react'
 import { formatBytes } from '../utils/format'
-import type { ModelGroup } from '../../../shared/types'
+import type { ModelGroup, ModelShards } from '../../../shared/types'
+import { parseShardName } from '../../../shared/ggufShards'
 import { useOverlayClose } from '../hooks/useOverlayClose'
 import DownloadRow from './DownloadRow'
 
@@ -110,21 +111,46 @@ function StrataChip({ path }: { path: string }) {
   return <span className="mmproj-chip" style={{ color }} title={info.detail}>{label}</span>
 }
 
+// Green when every shard of a split model is on disk, red while some are
+// missing or still downloading (a download is only a shard once it finishes).
+function ShardsChip({ shards }: { shards: ModelShards }) {
+  const complete = shards.present === shards.total
+  const have = new Set(shards.files.map(f => parseShardName(f.name)?.index))
+  const missing = Array.from({ length: shards.total }, (_, i) => i + 1).filter(n => !have.has(n))
+  return (
+    <span
+      className={`shards-chip${complete ? '' : ' incomplete'}`}
+      title={complete
+        ? `Split into ${shards.total} files, all present`
+        : `Missing shard ${missing.join(', ')}. The model cannot load until every shard is present.`}
+    >
+      {complete ? `${shards.total} shards` : `${shards.present}/${shards.total} shards`}
+    </span>
+  )
+}
+
 function ModelFileRow({
-  name, path, size, group, onDeleted
+  name, path, size, shards, group, onDeleted, onUngroup, shardFile
 }: {
   name: string
   path: string
   size: number
+  shards?: ModelShards
   group: ModelGroup
   onDeleted: () => void
+  // On the entry of a split model: show its shard files one by one.
+  onUngroup?: () => void
+  // Set on a row that is one shard file of a split model shown ungrouped;
+  // onGroup is on the first of them and folds the set back into one entry.
+  shardFile?: { index: number; total: number; onGroup?: () => void }
 }) {
   const { setShowCreateModal, setView, setPrefillModelPath } = useStore()
   const [editing, setEditing] = useState(false)
   const [newName, setNewName] = useState(name.replace(/\.[^.]+$/, ''))
   async function handleDelete() {
-    if (!confirm(`Delete "${name}"? This cannot be undone.`)) return
-    const res = await window.api.deleteModel(path)
+    const files = shards && !shardFile ? ` and its ${shards.files.length} shard file${shards.files.length !== 1 ? 's' : ''}` : ''
+    if (!confirm(`Delete "${name}"${files}? This cannot be undone.`)) return
+    const res = await window.api.deleteModel(path, !!shardFile)
     if (res.success) onDeleted()
     else alert('Delete failed: ' + res.error)
   }
@@ -158,31 +184,55 @@ function ModelFileRow({
         ) : (
           <span className="models-file-name">{name}</span>
         )}
-        {mmproj ? (
+        {shardFile ? (
+          <div className="model-size-breakdown">
+            <span className="total-chip">Shard: {formatBytes(size)}</span>
+            <span className="shard-index-chip">{shardFile.index}/{shardFile.total}</span>
+            {shards && <ShardsChip shards={shards} />}
+          </div>
+        ) : mmproj ? (
           <div className="model-size-breakdown">
             <span className="total-chip">Total: {formatBytes(totalWithMmproj)}</span>
             <span>Model: {formatBytes(size)}</span>
+            {shards && <ShardsChip shards={shards} />}
             <StrataChip path={path} />
             <span className="mmproj-chip">+ mmproj {formatBytes(mmproj.size)}</span>
           </div>
         ) : (
           <div className="model-size-breakdown">
             <span className="total-chip">Model: {formatBytes(size)}</span>
+            {shards && <ShardsChip shards={shards} />}
             <StrataChip path={path} />
           </div>
         )}
       </div>
       <div className="models-file-actions">
+        {onUngroup && (
+          <button className="btn btn-ghost btn-icon" onClick={onUngroup} title="Show each shard file separately">
+            <Ungroup size={14} />
+          </button>
+        )}
+        {shardFile?.onGroup && (
+          <button className="btn btn-ghost btn-icon" onClick={shardFile.onGroup} title="Group the shards into one entry">
+            <Group size={14} />
+          </button>
+        )}
         <button
           className="btn btn-ghost btn-icon"
           onClick={handleTemplate}
-          title="Create a new template for this model"
+          disabled={!!shardFile && shardFile.index !== 1}
+          title={shardFile && shardFile.index !== 1 ? 'A template uses the first shard of a split model' : 'Create a new template for this model'}
         >
           <FilePlus size={14} />
         </button>
-        <button className="btn btn-ghost btn-icon" onClick={() => setEditing(true)} title={group.external ? 'Rename disabled for external models' : 'Rename'} disabled={group.external}><Pencil size={14} /></button>
+        <button
+          className="btn btn-ghost btn-icon"
+          onClick={() => setEditing(true)}
+          title={shardFile ? 'Rename the whole model from its grouped entry' : group.external ? 'Rename disabled for external models' : 'Rename'}
+          disabled={group.external || !!shardFile}
+        ><Pencil size={14} /></button>
         <button className="btn btn-ghost btn-icon" onClick={() => window.api.openFolder(group.folderPath)} title="Open folder"><FolderOpen size={14} /></button>
-        <button className="btn btn-ghost btn-icon text-danger" onClick={handleDelete} title={group.external ? 'Delete disabled for external models' : 'Delete'} disabled={group.external}><Trash size={14} /></button>
+        <button className="btn btn-ghost btn-icon text-danger" onClick={handleDelete} title={group.external ? 'Delete disabled for external models' : shardFile ? 'Delete this shard file only' : 'Delete'} disabled={group.external}><Trash size={14} /></button>
       </div>
     </div>
   )
@@ -190,7 +240,7 @@ function ModelFileRow({
 
 // A model group (folder) — expandable to show its model files.
 function ModelGroupCard({ group, onDeleted }: { group: ModelGroup; onDeleted: () => void }) {
-  const { expandedModelGroups, toggleModelGroup } = useStore()
+  const { expandedModelGroups, toggleModelGroup, ungroupedShardSets, toggleShardSetGrouping } = useStore()
   const expanded = !!expandedModelGroups[group.folderPath]
   const mmproj = group.mmproj
   const mmprojs = group.mmprojs?.length ? group.mmprojs : mmproj ? [mmproj] : []
@@ -217,16 +267,39 @@ function ModelGroupCard({ group, onDeleted }: { group: ModelGroup; onDeleted: ()
       </div>
       {expanded && (
         <div className="model-group-body">
-          {group.models.map(m => (
-            <ModelFileRow
-              key={m.path}
-              name={m.name}
-              path={m.path}
-              size={m.size}
-              group={group}
-              onDeleted={onDeleted}
-            />
-          ))}
+          {group.models.flatMap(m => {
+            const setKey = `${group.folderPath}::${m.name}::${m.shards?.total ?? 1}`
+            if (m.shards && ungroupedShardSets[setKey]) {
+              return m.shards.files.map((file, i) => (
+                <ModelFileRow
+                  key={file.path}
+                  name={file.name}
+                  path={file.path}
+                  size={file.size}
+                  shards={i === 0 ? m.shards : undefined}
+                  shardFile={{
+                    index: parseShardName(file.name)?.index ?? i + 1,
+                    total: m.shards!.total,
+                    onGroup: i === 0 ? () => toggleShardSetGrouping(setKey) : undefined
+                  }}
+                  group={group}
+                  onDeleted={onDeleted}
+                />
+              ))
+            }
+            return [(
+              <ModelFileRow
+                key={m.path}
+                name={m.name}
+                path={m.path}
+                size={m.size}
+                shards={m.shards}
+                onUngroup={m.shards ? () => toggleShardSetGrouping(setKey) : undefined}
+                group={group}
+                onDeleted={onDeleted}
+              />
+            )]
+          })}
           {mmprojs.map((p, i) => (
             <div key={p.path} className="models-file-row" style={{ opacity: i === 0 ? 0.7 : 0.55 }} title="Multimodal projector — shared by all models in this folder. Not listed as a separate model.">
               <div className="models-file-icon"><Eye size={16} /></div>

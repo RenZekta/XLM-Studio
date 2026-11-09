@@ -8,6 +8,7 @@ import {
   MessageSquare, Check, ChevronDown, Repeat
 } from 'lucide-react'
 import type { CommandParam, SpecMethod, CheckpointMode, Template } from '../../../shared/types'
+import { modelEntryHasPath } from '../../../shared/ggufShards'
 import HybridSlider from './HybridSlider'
 import CommandPreview, { type PreviewToken } from './CommandPreview'
 import SegmentedToggle from './SegmentedToggle'
@@ -297,7 +298,7 @@ export default function CmdParamsEditor({ templateId, args, onChange, modelPathF
   const effectiveModelPath = card?.template.modelPath || modelPathFallback || ''
   const modelGroup = useMemo(() => {
     if (!effectiveModelPath) return null
-    return models.find(g => g.models.some(m => m.path === effectiveModelPath)) || null
+    return models.find(g => g.models.some(m => modelEntryHasPath(m, effectiveModelPath))) || null
   }, [models, effectiveModelPath])
   // Every projector found next to the model, best first. The one in use is the
   // one the Template already points at when it is among them (the user picked

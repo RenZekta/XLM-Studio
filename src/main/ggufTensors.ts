@@ -1,5 +1,7 @@
 import { open, stat } from 'fs/promises'
 import { existsSync } from 'fs'
+import { basename, dirname, join } from 'path'
+import { parseShardName, shardName } from '../shared/ggufShards'
 import {
   ggmlTypeName, summarizeStrataTensors,
   type StrataFingerprint, type StrataTensor
@@ -119,19 +121,25 @@ export async function readGgufTensors(path: string): Promise<GgufTensorTable> {
   }
 }
 
-// Every shard of the set a first-shard path belongs to, or null when a shard
-// is missing. A path without a "-00001-of-0000N" suffix is a set of one.
-export function ggufShardPaths(path: string): string[] | null {
-  const m = path.match(/^(.*)-(\d{5})-of-(\d{5})(\.gguf)$/i)
-  if (!m) return [path]
-  const total = parseInt(m[3], 10)
+// The shards of the set a path belongs to that exist on disk, in order. A
+// path that is not a shard is a set of one.
+export function ggufPresentShards(path: string): string[] {
+  const shard = parseShardName(basename(path))
+  if (!shard) return [path]
   const out: string[] = []
-  for (let i = 1; i <= total; i++) {
-    const p = `${m[1]}-${String(i).padStart(5, '0')}-of-${m[3]}${m[4]}`
-    if (!existsSync(p)) return null
-    out.push(p)
+  for (let i = 1; i <= shard.total; i++) {
+    const p = join(dirname(path), shardName(shard, i))
+    if (existsSync(p)) out.push(p)
   }
   return out
+}
+
+// Every shard of the set a path belongs to, or null when a shard is missing.
+export function ggufShardPaths(path: string): string[] | null {
+  const shard = parseShardName(basename(path))
+  if (!shard) return [path]
+  const present = ggufPresentShards(path)
+  return present.length === shard.total ? present : null
 }
 
 // Fingerprint of a whole shard set, or null when the set is incomplete.

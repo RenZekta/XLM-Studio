@@ -76,6 +76,8 @@ interface AppStore {
   theme: ThemePref
   systemTheme: 'dark' | 'light'
   expandedModelGroups: Record<string, boolean>
+  // Split models shown as one file per shard instead of one entry, by set key.
+  ungroupedShardSets: Record<string, boolean>
   cpuInfo: { physicalCores: number; logicalCores: number; modelName: string } | null
   detectedSpeculation: Record<string, SpecDetectionResult>
   speculationApplied: Record<string, boolean>
@@ -145,6 +147,7 @@ interface AppStore {
   setTheme: (t: ThemePref) => void
   setSystemTheme: (t: 'dark' | 'light') => void
   toggleModelGroup: (folderPath: string) => void
+  toggleShardSetGrouping: (setKey: string) => void
   setCpuInfo: (info: { physicalCores: number; logicalCores: number; modelName: string } | null) => void
   setDetectedSpeculation: (modelPath: string, result: SpecDetectionResult) => void
   markSpeculationApplied: (templateId: string, applied: boolean) => void
@@ -197,6 +200,7 @@ export const useStore = create<AppStore>((set) => ({
   theme: (localStorage.getItem('hexllama_theme') as ThemePref) || 'system',
   systemTheme: 'dark',
   expandedModelGroups: {},
+  ungroupedShardSets: {},
   cpuInfo: null,
   detectedSpeculation: {},
   speculationApplied: {},
@@ -312,6 +316,9 @@ export const useStore = create<AppStore>((set) => ({
     set({ theme: t })
   },
   setSystemTheme: (t) => set({ systemTheme: t }),
+  toggleShardSetGrouping: (setKey) => set((s) => ({
+    ungroupedShardSets: { ...s.ungroupedShardSets, [setKey]: !s.ungroupedShardSets[setKey] }
+  })),
   toggleModelGroup: (folderPath) => set((s) => ({
     expandedModelGroups: { ...s.expandedModelGroups, [folderPath]: !s.expandedModelGroups[folderPath] }
   })),

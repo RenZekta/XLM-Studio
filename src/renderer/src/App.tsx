@@ -1,4 +1,4 @@
-import React, { useEffect, useRef } from 'react'
+import React, { Activity, useEffect, useLayoutEffect, useRef, useState } from 'react'
 import { useStore } from './store/useStore'
 import { reconcileTemplatesFromDisk, templateReadToken } from './utils/templateSync'
 import Titlebar from './components/Titlebar'
@@ -302,36 +302,38 @@ export default function App() {
     }
   }
 
-  // '.content' is one shared scroll container reused by every view. Leaving
-  // Templates for a shorter view (e.g. Logs) lets the browser clamp its
-  // scrollTop down to fit the shorter content, so simply keeping CardsView
-  // mounted underneath isn't enough to bring the page back where it was.
-  // Track and restore its scroll position across the view switch, in memory
-  // for the life of the window (an actual mid-session position isn't
-  // meaningful to persist to disk).
+  // '.content' is one shared scroll container reused by every view, so
+  // switching views would carry one view's scroll position over to the next
+  // (or clamp it to the shorter content). Remember each view's position, in
+  // memory for the life of the window, and put it back when the view is shown
+  // again.
   const contentRef = useRef<HTMLElement>(null)
-  const cardsScrollTop = useRef(0)
-  useEffect(() => {
-    if (view === 'cards' && contentRef.current) {
-      contentRef.current.scrollTop = cardsScrollTop.current
-    }
+  const scrollTops = useRef<Record<string, number>>({})
+  useLayoutEffect(() => {
+    if (contentRef.current) contentRef.current.scrollTop = scrollTops.current[view] ?? 0
   }, [view])
   function handleContentScroll() {
-    if (view === 'cards' && contentRef.current) {
-      cardsScrollTop.current = contentRef.current.scrollTop
-    }
+    if (contentRef.current) scrollTops.current[view] = contentRef.current.scrollTop
   }
 
-  function renderOtherView() {
-    if (view === 'hub') return <HuggingFaceView />
-    if (view === 'settings') return <SettingsView />
-    if (view === 'models') return <ModelsView />
-    if (view === 'logs') return <LogsView />
-    if (view === 'monitoring') return <MonitoringView />
-    if (view === 'overrides') return <OverridesView />
-    if (view === 'about') return <AboutView />
-    return null
-  }
+  // Views are kept alive once opened, like Templates, so what the user was
+  // doing in one (a search, a selection, an open section, typed text) is
+  // still there when they come back. A view is first built when it is first
+  // opened, not at startup. A hidden one keeps its state and DOM but its
+  // effects are paused and its updates are deferred; they run again when it
+  // is shown, so a view that loads its data on opening refreshes then.
+  const [openedViews, setOpenedViews] = useState<string[]>([view])
+  if (!openedViews.includes(view)) setOpenedViews([...openedViews, view])
+
+  const otherViews: { id: string; element: React.ReactNode }[] = [
+    { id: 'hub', element: <HuggingFaceView /> },
+    { id: 'settings', element: <SettingsView /> },
+    { id: 'models', element: <ModelsView /> },
+    { id: 'logs', element: <LogsView /> },
+    { id: 'monitoring', element: <MonitoringView /> },
+    { id: 'overrides', element: <OverridesView /> },
+    { id: 'about', element: <AboutView /> }
+  ]
 
   if (loading) {
     return (
@@ -371,14 +373,18 @@ export default function App() {
       <div className="main-layout">
         <Sidebar />
         <main className="content" ref={contentRef} onScroll={handleContentScroll}>
-          {/* CardsView (Templates) stays mounted behind other views instead of
-              being torn down on navigation, so its own scroll position and each
-              expanded template's scroll position survive a trip to Logs/Settings/etc
-              and back, instead of remounting at scrollTop 0 every time. */}
+          {/* Every view stays mounted behind the others instead of being torn
+              down on navigation, so its own scroll position and state (each
+              expanded template's scroll position, a Hub search, a Logs filter,
+              ...) survive a trip to another view and back. */}
           <div style={{ display: view === 'cards' ? 'contents' : 'none' }}>
             <CardsView />
           </div>
-          {view !== 'cards' && renderOtherView()}
+          {otherViews.filter(v => openedViews.includes(v.id)).map(v => (
+            <Activity key={v.id} mode={view === v.id ? 'visible' : 'hidden'}>
+              {v.element}
+            </Activity>
+          ))}
         </main>
       </div>
       {showCreateModal && <CreateModal />}

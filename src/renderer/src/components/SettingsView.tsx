@@ -51,7 +51,7 @@ export default function SettingsView() {
   const [gitBusy, setGitBusy] = useState<Record<string, string>>({})
   const [gitError, setGitError] = useState<Record<string, string>>({})
   const [engineSettings, setEngineSettings] = useState<{
-    autoUpdateTrackedEngines: boolean; engineInstallMode: EngineInstallMode; autoUpdateBuildTools: boolean; rocmChannel: 'stable' | 'nightly'; rocmSource: 'tarball' | 'pip'; strata: StrataSettings; strataDataDir: string
+    autoUpdateTrackedEngines: boolean; engineInstallModes: Record<string, EngineInstallMode>; autoUpdateBuildTools: boolean; rocmChannel: 'stable' | 'nightly'; rocmSource: 'tarball' | 'pip'; strata: StrataSettings; strataDataDir: string
     strataRememberedDataDir: string | null; gitAvailable: boolean
   } | null>(null)
   const refreshEngineSettings = useCallback(async () => {
@@ -292,12 +292,17 @@ export default function SettingsView() {
     await changeTheme(t)
   }
 
-  const installMode = engineSettings?.engineInstallMode ?? 'binary'
+  function installModeOf(t: TrackedBackend): EngineInstallMode {
+    return engineSettings?.engineInstallModes?.[t.id] === 'source' ? 'source' : 'binary'
+  }
 
-  async function handleSetInstallMode(mode: EngineInstallMode) {
-    await window.api.setEngineInstallMode(mode)
+  const anySourceMode = trackedBackends.some(t => t.kind !== 'git' && installModeOf(t) === 'source')
+
+  async function handleSetInstallMode(t: TrackedBackend, mode: EngineInstallMode) {
+    await window.api.setEngineInstallMode(t.id, mode)
     await refreshEngineSettings()
-    handleCheckAllBackends()
+    const updated = await window.api.checkTrackedBackend(t.id)
+    if ('trackedId' in updated) setTrackerResult(updated)
   }
 
   async function handleSourceChanged(t: TrackedBackend) {
@@ -318,8 +323,20 @@ export default function SettingsView() {
 
   function renderEntryButtons(t: TrackedBackend) {
     const release = trackerResults[t.id]
+    const otherMode: EngineInstallMode = installModeOf(t) === 'source' ? 'binary' : 'source'
+    const otherModeLabel = otherMode === 'source' ? 'Build from Source' : 'Download Binary'
+    const otherHasBuild = !!release?.installedKinds?.[otherMode]
     return (
       <>
+        {t.kind !== 'git' && (
+          <button
+            className={`btn btn-ghost btn-icon${otherHasBuild ? ' install-mode-has-build' : ''}`}
+            onClick={() => handleSetInstallMode(t, otherMode)}
+            title={`Switch to ${otherModeLabel}${otherHasBuild ? ` (${otherMode === 'source' ? 'a compiled build' : 'a downloaded build'} is installed)` : ''}`}
+          >
+            {otherMode === 'source' ? <Hammer size={14} /> : <Download size={14} />}
+          </button>
+        )}
         {release?.url && (
           <button
             className="btn btn-ghost btn-icon"
@@ -362,6 +379,7 @@ export default function SettingsView() {
     const busyAssets = release?.assets.filter(a => downloadProgress[`${t.id}::${a.name}`]) || []
     const otherBusyAssets = busyAssets.filter(a => a.name !== selectedAsset?.name)
     const gitBusyNow = !!gitBusy[t.id] || !!engineUpdating[t.id]
+    const installMode = installModeOf(t)
     // A result from before the install method was switched is not shown as
     // if it described the current one.
     const wrongMode = !!release && !release.error && !release.needsSource && t.kind !== 'git' && (installMode === 'source') !== !!release.source
@@ -379,7 +397,7 @@ export default function SettingsView() {
               ? `Binaries are published per release, not per branch, so "${t.branch}" can only be built from source.`
               : 'This repository has no releases, so there is no binary to download. Build it from source instead?'}
           </span>
-          <button className="btn btn-secondary btn-sm" onClick={() => handleSetInstallMode('source')}>
+          <button className="btn btn-secondary btn-sm" onClick={() => handleSetInstallMode(t, 'source')}>
             <Hammer size={13} /> Switch to Build from Source
           </button>
         </div>
@@ -1155,21 +1173,16 @@ export default function SettingsView() {
       <div className="settings-section">
         <div className="settings-section-title"><Download /> Engine Tracker</div>
 
-        <div className="settings-row" style={{ flexDirection: 'column', alignItems: 'flex-start', gap: 10 }}>
+        <div className="settings-row">
           <div>
             <div className="settings-row-label">Install method</div>
             <div className="settings-row-sub">
-              Download Binary installs the prebuilt release assets. Build from Source clones the repository and compiles it on this machine, which needs git, CMake and a C++ compiler (plus the CUDA, Vulkan or ROCm SDK for that backend); missing ones are installed for you through winget, Homebrew or your Linux package manager. It applies to llama.cpp-style engines; Strata is always installed with git.
+              Each engine has its own method, switched with the download or hammer button beside its GitHub link; the button turns blue when the other method already has a build installed. Download Binary installs the prebuilt release assets. Build from Source clones the repository and compiles it on this machine, which needs git, CMake and a C++ compiler (plus the CUDA, Vulkan or ROCm SDK for that backend); missing ones are installed for you through winget, Homebrew or your Linux package manager. It applies to llama.cpp-style engines; Strata is always installed with git.
             </div>
           </div>
-          <SegmentedToggle<EngineInstallMode>
-            options={[{ value: 'binary', label: 'Download Binary' }, { value: 'source', label: 'Build from Source' }]}
-            value={installMode}
-            onChange={handleSetInstallMode}
-          />
         </div>
 
-        {installMode === 'source' && (
+        {anySourceMode && (
           <div className="settings-row">
             <div>
               <div className="settings-row-label">Keep build tools up to date</div>
@@ -1189,7 +1202,7 @@ export default function SettingsView() {
           </div>
         )}
 
-        {installMode === 'source' && (
+        {anySourceMode && (
           <div className="settings-row" style={{ flexDirection: 'column', alignItems: 'flex-start', gap: 10 }}>
             <div>
               <div className="settings-row-label">ROCm SDK for AMD GPUs</div>
@@ -1221,7 +1234,7 @@ export default function SettingsView() {
           <div>
             <div className="settings-row-label">Update tracked engines automatically</div>
             <div className="settings-row-sub">
-              After the check at startup, installs the new release of every engine you already have (llama.cpp builds are re-downloaded, or rebuilt in Build from Source mode, and Strata is updated with git). Off by default. An engine with a running model is skipped.
+              After the check at startup, installs the new release of every engine you already have (llama.cpp builds are re-downloaded, or rebuilt for engines set to Build from Source, and Strata is updated with git). Off by default. An engine with a running model is skipped.
             </div>
           </div>
           <div className="toggle-wrap">

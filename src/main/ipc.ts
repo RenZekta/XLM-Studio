@@ -38,7 +38,8 @@ import { mergeDefaultTracked } from '../shared/trackedMerge'
 import { setBackendKeyAliases } from '../shared/backendPin'
 import { NATIVE_PLATFORM, BACKEND_TYPE_MARKER, platformOfBuildDir, installVersionName } from './buildPlatform'
 import { strataTableHash, strataVerdict, bestStrataInfo, STRATA_NO_TABLE, type StrataTable, type StrataFingerprint } from '../shared/strata'
-import { fingerprintGguf } from './ggufTensors'
+import { fingerprintGguf, ggufPresentShards } from './ggufTensors'
+import { groupShardedModels, parseShardName, shardName } from '../shared/ggufShards'
 import { resolveAppIcon } from './appIcon'
 import { parseFamilyTags, parseStrataCatalog, type StrataCatalog } from './strataCatalog'
 import { prepareDrafting, runStep, splitDrafter } from './strataDrafting'
@@ -53,7 +54,7 @@ import { prepareBuildTools, installBuildTools, buildToolsStatus, invalidateBuild
 import { findInstalledRocm, type RocmChannel } from './rocmSdk'
 import { ROCM_GPUS, gfxForGpuName, rocmGpu, type RocmSdkSource } from '../shared/rocm'
 import {
-  buildFromSource, detectToolchain, repoBranches, remoteBranchCommit, scanSourceBuilds, pruneSupersededBuilds, isSourceBuildDir, engineRuntimeEnv,
+  buildFromSource, detectToolchain, repoBranches, remoteBranchCommit, scanSourceBuilds, installedBuildKinds, pruneSupersededBuilds, isSourceBuildDir, engineRuntimeEnv,
   workDirs, type BuildPhase
 } from './sourceBuild'
 
@@ -261,7 +262,8 @@ interface AppSettings {
   // using globalBackend): which repo's install new templates follow.
   globalEngineBackends?: Partial<Record<EngineId, { backendKey: string }>>
   autoUpdateTrackedEngines?: boolean
-  engineInstallMode?: EngineInstallMode
+  // Install method per tracked engine id; an engine without an entry is downloaded as a binary.
+  engineInstallModes?: Record<string, EngineInstallMode>
   // Update the build tools (git, CMake, compiler, GPU SDK) before a build when
   // a newer version is available.
   autoUpdateBuildTools?: boolean
@@ -362,7 +364,7 @@ const DEFAULT_SETTINGS: AppSettings = {
   globalBackend: null,
   globalEngineBackends: {},
   autoUpdateTrackedEngines: false,
-  engineInstallMode: 'binary',
+  engineInstallModes: {},
   autoUpdateBuildTools: true,
   seededGitInstances: [],
   rocmChannel: 'stable',
@@ -424,6 +426,24 @@ function migrateMcpSettings(raw: any): McpSettings {
     restrictEditToMcpMade: raw?.restrictEditToMcpMade ?? true,
     maxBenchmarkHistory: (Number.isInteger(raw?.maxBenchmarkHistory) && raw.maxBenchmarkHistory >= 1 && raw.maxBenchmarkHistory <= 20) ? raw.maxBenchmarkHistory : 5
   }
+}
+
+// The install method used to be one global setting; an engine without a stored
+// choice of its own follows the old value so an existing install keeps working.
+function migrateEngineInstallModes(data: any, tracked: TrackedBackend[]): Record<string, EngineInstallMode> {
+  const modes: Record<string, EngineInstallMode> = {}
+  if (data.engineInstallModes && typeof data.engineInstallModes === 'object') {
+    for (const [id, mode] of Object.entries(data.engineInstallModes)) {
+      if (mode === 'source' || mode === 'binary') modes[id] = mode
+    }
+  } else if (data.engineInstallMode === 'source') {
+    for (const t of tracked) if (t.kind !== 'git') modes[t.id] = 'source'
+  }
+  return modes
+}
+
+function installModeOf(s: AppSettings, t: TrackedBackend): EngineInstallMode {
+  return s.engineInstallModes?.[t.id] === 'source' ? 'source' : 'binary'
 }
 
 async function loadSettings(): Promise<AppSettings> {
@@ -497,7 +517,7 @@ async function loadSettings(): Promise<AppSettings> {
         : null,
       globalEngineBackends: migrateGlobalEngineBackends(data.globalEngineBackends),
       autoUpdateTrackedEngines: !!data.autoUpdateTrackedEngines,
-      engineInstallMode: data.engineInstallMode === 'source' ? 'source' : 'binary',
+      engineInstallModes: migrateEngineInstallModes(data, dedupedTracked),
       autoUpdateBuildTools: data.autoUpdateBuildTools !== false,
       seededGitInstances: Array.isArray(data.seededGitInstances) ? data.seededGitInstances.filter((x: unknown): x is string => typeof x === 'string') : [],
       rocmChannel: data.rocmChannel === 'nightly' ? 'nightly' : 'stable',
@@ -806,13 +826,15 @@ async function scanModelFolder(folderPath: string, external: boolean): Promise<M
   const mmprojs = sortMmprojs(mmprojFiles)
   const mmproj: MmprojFile | null = mmprojs[0] ?? null
   if (models.length === 0 && !mmproj && specDecodeSidecars.length === 0) return null
-  const modelSize = models.reduce((a, m) => a + m.size, 0)
+  // The shards of a split model are one model, not several.
+  const grouped = groupShardedModels(models)
+  const modelSize = grouped.reduce((a, m) => a + m.size, 0)
   const mmprojSize = mmproj ? mmproj.size : 0
   return {
     folder: basename(folderPath),
     folderPath,
     external,
-    models,
+    models: grouped,
     mmproj,
     mmprojs,
     specDecodeSidecars,
@@ -826,6 +848,7 @@ async function scanModelFolder(folderPath: string, external: boolean): Promise<M
 //   StorageFolder / ModelFolder / model.gguf (+ mmproj.gguf)
 async function scanModelRoot(rootDir: string, rootExternal: boolean): Promise<ModelGroup[]> {
   const groups: ModelGroup[] = []
+  const looseModels: ModelEntry[] = []
   let topEntries: import('fs').Dirent[]
   try {
     topEntries = await fsPromises.readdir(rootDir, { withFileTypes: true })
@@ -844,19 +867,37 @@ async function scanModelRoot(rootDir: string, rootExternal: boolean): Promise<Mo
         const st = await fsPromises.stat(join(rootDir, e.name))
         const tierDef = classifySidecarFilename(e.name)
         const isSidecar = tierDef && isSpecDecodeSidecarFile(e.name, st.size)
-        groups.push({
-          folder: basename(rootDir),
-          folderPath: rootDir,
-          external: rootExternal,
-          models: isSidecar ? [] : [{ name: e.name, path: join(rootDir, e.name), size: st.size }],
-          mmproj: null,
-          mmprojs: [],
-          specDecodeSidecars: isSidecar && tierDef ? [{ name: e.name, path: join(rootDir, e.name), size: st.size, tier: tierDef.tier, method: tierDef.method, label: tierDef.label }] : [],
-          totalSize: st.size,
-          modelSize: isSidecar ? 0 : st.size
-        })
+        if (isSidecar && tierDef) {
+          groups.push({
+            folder: basename(rootDir),
+            folderPath: rootDir,
+            external: rootExternal,
+            models: [],
+            mmproj: null,
+            mmprojs: [],
+            specDecodeSidecars: [{ name: e.name, path: join(rootDir, e.name), size: st.size, tier: tierDef.tier, method: tierDef.method, label: tierDef.label }],
+            totalSize: st.size,
+            modelSize: 0
+          })
+        } else {
+          looseModels.push({ name: e.name, path: join(rootDir, e.name), size: st.size })
+        }
       } catch {}
     }
+  }
+  // Loose shards of one model share a single entry.
+  for (const model of groupShardedModels(looseModels)) {
+    groups.push({
+      folder: basename(rootDir),
+      folderPath: rootDir,
+      external: rootExternal,
+      models: [model],
+      mmproj: null,
+      mmprojs: [],
+      specDecodeSidecars: [],
+      totalSize: model.size,
+      modelSize: model.size
+    })
   }
   return groups
 }
@@ -1438,6 +1479,12 @@ function migrateCtxSizeDftArgs(args: Record<string, unknown>): { args: Record<st
 // single always-running Map entry with its own backoff timer is the
 // simpler, equally reliable equivalent here, so it just retries a fixed
 // small number of times with growing delays before surfacing an error.
+//
+// Like CFD, only attempts that get nowhere spend the budget. The partial
+// file is measured after every attempt; one that left it larger than the
+// previous attempt did is a resumable download still moving forward, so the
+// count starts over and a connection that keeps dropping but keeps gaining
+// ground is never given up on.
 // --------------------------------------------------------------------------
 interface ModelDownloadTask {
   id: string                  // repoId+filename (or bare filename for a pasted direct URL) -- never just the filename alone, so two repos shipping a same-named file can't collide (see enqueueModelDownload)
@@ -1450,7 +1497,8 @@ interface ModelDownloadTask {
   speed: number
   phase: 'queued' | 'downloading' | 'paused' | 'done' | 'error' | 'cancelled'
   error?: string
-  attempt: number             // automatic retries used against the current run; reset on a manual Resume
+  attempt: number             // automatic retries used without gaining ground; reset on a manual Resume and whenever an attempt grows the partial file
+  progressMark: number        // size of the partial file when the previous attempt ended (or the run began); an attempt only counts as progress by growing it
   cancelFn?: () => void
   retryTimer?: NodeJS.Timeout
 }
@@ -1479,6 +1527,9 @@ function canBroadcast(id: string): boolean {
 // since the journal write and the last bytes hitting disk are not atomic
 // with each other and the file is the one source of truth that can't lie.
 const MODEL_DOWNLOADS_JOURNAL = join(APP_ROOT, 'model-downloads.json')
+function partialFileSize(path: string): number {
+  try { return statSync(path).size } catch { return 0 }
+}
 function saveDownloadJournal(): void {
   try {
     const entries = Array.from(modelDownloadTasks.values())
@@ -1502,7 +1553,7 @@ function reconcileModelDownloadJournal(): void {
     try { size = statSync(e.destPath + '.tmp').size } catch { continue }
     modelDownloadTasks.set(e.id, {
       id: e.id, url: e.url, filename: e.filename, repoId: e.repoId, destPath: e.destPath,
-      receivedBytes: size, totalBytes: 0, speed: 0, phase: 'paused', attempt: 0
+      receivedBytes: size, totalBytes: 0, speed: 0, phase: 'paused', attempt: 0, progressMark: size
     })
   }
   saveDownloadJournal()
@@ -1576,6 +1627,11 @@ function beginModelDownloadAttempt(task: ModelDownloadTask, startByte: number): 
       // cancelModelDownloadImpl already set the task's real terminal phase
       // and released its slot before calling it.
       if (task.phase !== 'downloading') return
+      // startDownload flushes what it received before reporting, so the file
+      // on disk is the true resume point and the true measure of progress.
+      const onDisk = partialFileSize(tmpPath)
+      if (onDisk > task.progressMark) task.attempt = 0
+      task.progressMark = onDisk
       task.attempt += 1
       if (task.attempt <= MODEL_DL_MAX_RETRIES) {
         const delay = MODEL_DL_RETRY_DELAYS_MS[task.attempt - 1] ?? MODEL_DL_RETRY_DELAYS_MS[MODEL_DL_RETRY_DELAYS_MS.length - 1]
@@ -1585,8 +1641,8 @@ function beginModelDownloadAttempt(task: ModelDownloadTask, startByte: number): 
         // A server that ignored the Range header needs a from-scratch
         // restart, not another resume attempt at the same offset -- that
         // would just hit the exact same rejection again.
-        const resumeFrom = err instanceof RangeNotSupportedError ? 0 : task.receivedBytes
-        if (resumeFrom === 0) task.receivedBytes = 0
+        const resumeFrom = err instanceof RangeNotSupportedError ? 0 : onDisk
+        task.receivedBytes = resumeFrom
         task.retryTimer = setTimeout(() => {
           task.retryTimer = undefined
           if (task.phase === 'downloading') beginModelDownloadAttempt(task, resumeFrom)
@@ -1614,11 +1670,20 @@ async function enqueueModelDownload(opts: {
   const mainFolder = await resolveMainModelFolder()
   const targetDir = join(mainFolder, sub)
   if (!existsSync(targetDir)) mkdirSync(targetDir, { recursive: true })
-  const finalPath = join(targetDir, opts.filename)
+  // A file from a repo subfolder lands directly in the model folder: the
+  // Models tab reads one folder level, and the shards of a split model have
+  // to sit together for llama.cpp to find them.
+  const fileName = basename(opts.filename)
+  const finalPath = join(targetDir, fileName)
+  for (const other of modelDownloadTasks.values()) {
+    if (other.id !== id && other.destPath === finalPath && other.phase !== 'done' && other.phase !== 'error' && other.phase !== 'cancelled') {
+      return { success: false, error: `Another download is already writing ${fileName}` }
+    }
+  }
   const task: ModelDownloadTask = {
-    id, url: opts.url, filename: opts.filename, repoId: opts.repoId,
+    id, url: opts.url, filename: fileName, repoId: opts.repoId,
     destPath: finalPath, receivedBytes: 0, totalBytes: 0, speed: 0,
-    phase: 'queued', attempt: 0
+    phase: 'queued', attempt: 0, progressMark: 0
   }
   modelDownloadTasks.set(id, task)
   modelDownloadQueue.push(id)
@@ -1651,7 +1716,8 @@ function pauseModelDownloadImpl(id: string): { success: boolean; error?: string 
 function resumeModelDownloadImpl(id: string): { success: boolean; error?: string } {
   const task = modelDownloadTasks.get(id)
   if (!task || task.phase !== 'paused') return { success: false, error: 'Not paused' }
-  try { task.receivedBytes = statSync(task.destPath + '.tmp').size } catch { task.receivedBytes = 0 }
+  task.receivedBytes = partialFileSize(task.destPath + '.tmp')
+  task.progressMark = task.receivedBytes
   task.attempt = 0
   task.error = undefined
   task.phase = 'queued'
@@ -1696,7 +1762,13 @@ function listModelDownloadsImpl() {
 // answers rate limiting (403/429, common behind shared egress IPs such as VPN
 // or WARP exits) with a JSON object rather than the expected array, which
 // would otherwise surface as a misleading "invalid response".
-function fetchJson(url: string, redirectsLeft = 5): Promise<unknown> {
+interface JsonResponse { body: unknown; headers: http.IncomingHttpHeaders }
+
+async function fetchJson(url: string): Promise<unknown> {
+  return (await fetchJsonResponse(url)).body
+}
+
+function fetchJsonResponse(url: string, redirectsLeft = 5): Promise<JsonResponse> {
   return new Promise((resolve, reject) => {
     const headers: Record<string, string> = { 'User-Agent': `xlm-studio/${app.getVersion()}`, Accept: 'application/json' }
     // Only ever sent to the GitHub API host itself, never to a redirect target.
@@ -1708,7 +1780,7 @@ function fetchJson(url: string, redirectsLeft = 5): Promise<unknown> {
       if ([301, 302, 307, 308].includes(status) && res.headers.location) {
         res.resume()
         if (redirectsLeft <= 0) return reject(new Error('Too many redirects'))
-        fetchJson(new URL(res.headers.location, url).toString(), redirectsLeft - 1).then(resolve).catch(reject)
+        fetchJsonResponse(new URL(res.headers.location, url).toString(), redirectsLeft - 1).then(resolve).catch(reject)
         return
       }
       let data = ''
@@ -1730,7 +1802,7 @@ function fetchJson(url: string, redirectsLeft = 5): Promise<unknown> {
             : `HTTP ${status}${msg ? `: ${msg}` : ''}`))
         }
         if (body === undefined) return reject(new Error('Response was not valid JSON'))
-        resolve(body)
+        resolve({ body, headers: res.headers })
       })
     })
     req.on('error', reject)
@@ -2049,6 +2121,17 @@ function startDownload(
   let speedBytes = 0
   let lastSpeedCheck = Date.now()
   let currentSpeed = 0
+  let failed = false
+  // Everything received so far has to reach the disk before the caller
+  // measures the partial file to resume from, so a failure is reported only
+  // once the stream has been closed.
+  const fail = (err: Error) => {
+    if (destroyed || failed) return
+    failed = true
+    currentReq?.destroy()
+    file.end(() => { if (!destroyed) onError(err) })
+  }
+  file.on('error', fail)
   const attempt = (currentUrl: string) => {
     const get = currentUrl.startsWith('https') ? https.get : http.get
     const headers: Record<string, string> = { 'User-Agent': 'xlm-studio/2.0' }
@@ -2066,18 +2149,18 @@ function startDownload(
       // here is strictly worse than an explicit, retryable error.
       if (startByte > 0 && res.statusCode === 200) {
         res.destroy()
-        if (!destroyed) onError(new RangeNotSupportedError())
+        fail(new RangeNotSupportedError())
         return
       }
       if (res.statusCode !== 200 && res.statusCode !== 206) {
-        if (!destroyed) onError(new Error(`HTTP ${res.statusCode}`))
+        fail(new Error(`HTTP ${res.statusCode}`))
         return
       }
       const contentLength = parseInt(res.headers['content-length'] || '0', 10)
       const totalBytes = contentLength + startByte
       let receivedBytes = startByte
       res.on('data', (chunk: Buffer) => {
-        if (destroyed) return
+        if (destroyed || failed) return
         // Without backpressure a fast connection buffers the whole archive in
         // memory faster than the disk drains it, and the resulting GC churn
         // stalls the main process.
@@ -2107,14 +2190,14 @@ function startDownload(
           // silently accepted as done just because a future Node version
           // (or an unusual proxy in between) is looser about it.
           if (totalBytes > 0 && receivedBytes !== totalBytes) {
-            onError(new Error(`Incomplete download: got ${receivedBytes} of ${totalBytes} bytes`))
+            fail(new Error(`Incomplete download: got ${receivedBytes} of ${totalBytes} bytes`))
             return
           }
           onDone()
         })
       })
-      res.on('error', (err) => { if (!destroyed) { file.destroy(); onError(err) } })
-    }).on('error', (err) => { if (!destroyed) { file.destroy(); onError(err) } })
+      res.on('error', fail)
+    }).on('error', fail)
   }
   attempt(url)
   return () => {
@@ -2531,22 +2614,25 @@ export function registerIpcHandlers(): void {
   })
 
   // ----- Model file operations (operate on individual files) -----
-  ipcMain.handle('delete-model', async (_e, filePath: string) => {
+  ipcMain.handle('delete-model', async (_e, filePath: string, onlyThisFile?: boolean) => {
     try {
       // Allow deletion inside MODELS_DIR or any external model folder.
       const s = await loadSettings()
       const allowed = [MODELS_DIR, ...s.externalModelFolders]
       if (!allowed.some(b => isSafePath(b, filePath))) return { success: false, error: 'Access denied' }
-      unlinkSync(filePath)
+      // A model split into shards is deleted whole, since a set missing a
+      // shard is of no use, unless one shard file was asked for by itself.
+      const files = onlyThisFile ? [filePath] : ggufPresentShards(filePath)
+      for (const file of files) unlinkSync(file)
       // Remove the cached metadata for the deleted model file.
-      if (metadataCache[filePath]) {
-        delete metadataCache[filePath]
+      if (files.some(file => metadataCache[file])) {
+        for (const file of files) delete metadataCache[file]
         saveMetadataCache()
       }
       // Same reasoning as the list-models prune: a checkpoint for a model
       // that's just been deleted has nothing left to restore into.
       pruneCheckpointsForMissingModels(new Set(
-        (await listModelsImpl()).flatMap(g => g.models.map(m => m.path)).filter(p => p !== filePath)
+        (await listModelsImpl()).flatMap(g => g.models.map(m => m.path)).filter(p => !files.includes(p))
       ))
       const dir = dirname(filePath)
       // Remove the now-empty model folder (but never the storage roots themselves).
@@ -2565,6 +2651,21 @@ export function registerIpcHandlers(): void {
       const allowed = [MODELS_DIR, ...s.externalModelFolders]
       if (!allowed.some(b => isSafePath(b, oldPath))) return { success: false, error: 'Access denied' }
       const dir = dirname(oldPath)
+      // Every shard of a split model is renamed with the set, each keeping its
+      // own number, so the set still loads from its first shard.
+      const set = parseShardName(basename(oldPath))
+      if (set && set.total > 1) {
+        const moves = ggufPresentShards(oldPath).map(from => {
+          const shard = parseShardName(basename(from))!
+          return { from, to: join(dir, shardName({ prefix: newName, total: set.total, ext: set.ext }, shard.index)) }
+        })
+        for (const { from, to } of moves) {
+          if (!allowed.some(b => isSafePath(b, to))) return { success: false, error: 'Access denied' }
+          if (from !== to && existsSync(to)) return { success: false, error: `${basename(to)} already exists` }
+        }
+        for (const { from, to } of moves) renameSync(from, to)
+        return { success: true, newPath: moves[0].to }
+      }
       const newPath = join(dir, newName + extname(oldPath))
       if (!allowed.some(b => isSafePath(b, newPath))) return { success: false, error: 'Access denied' }
       renameSync(oldPath, newPath)
@@ -2838,6 +2939,7 @@ export function registerIpcHandlers(): void {
     if (!t) return { success: false, error: 'Not found' }
     if (t.isDefault) return { success: false, error: 'Built-in backends cannot be removed' }
     s.trackedBackends = s.trackedBackends.filter(x => x.id !== trackedId)
+    if (s.engineInstallModes) delete s.engineInstallModes[trackedId]
     await saveSettings(s)
     return { success: true }
   })
@@ -4131,6 +4233,8 @@ export function registerIpcHandlers(): void {
     const builds = scanSourceBuilds(roots, tracked.folderName, remote.commit)
     return {
       ...base,
+      // Pruning may have removed a release this build supersedes.
+      installedKinds: installedBuildKinds(roots, tracked.folderName),
       tagName: remote.commit.slice(0, 7),
       name: `${remote.branch ?? 'default branch'} @ ${remote.commit.slice(0, 7)}`,
       url: `https://github.com/${tracked.repo}${tracked.branch ? `/tree/${tracked.branch}` : ''}`,
@@ -4159,7 +4263,9 @@ export function registerIpcHandlers(): void {
         git
       }
     }
-    if (((await loadSettings()).engineInstallMode ?? 'binary') === 'source') return fetchSourceStatus(tracked, base)
+    base.installedKinds = installedBuildKinds((await backendRoots()).map(r => r.dir), tracked.folderName)
+    const settings = await loadSettings()
+    if (installModeOf(settings, tracked) === 'source') return fetchSourceStatus(tracked, base)
     // Release binaries are not per branch, so a branch entry can only be built.
     if (tracked.branch) return { ...base, needsSource: 'branch' }
     try {
@@ -4466,10 +4572,19 @@ export function registerIpcHandlers(): void {
       return data.map(m => ({ id: m.id, author: m.author || m.id.split('/')[0] || '', name: m.id.split('/').pop() || m.id, downloads: m.downloads || 0, likes: m.likes || 0, tags: m.tags || [], lastModified: m.createdAt || m.lastModified || '' }))
     } catch (err) { return { error: String(err) } }
   })
+  // Quants usually sit in one folder each, so the whole tree is listed. A long
+  // listing comes in pages; each response names the next one in a Link header.
   ipcMain.handle('hf-get-files', async (_e, repoId: string) => {
     try {
-      const data = await fetchJson(`https://huggingface.co/api/models/${repoId}/tree/main`) as any[]
-      return data.filter((f: any) => f.type === 'file' && f.path.endsWith('.gguf')).map((f: any) => ({
+      const entries: any[] = []
+      let next: string | null = `https://huggingface.co/api/models/${repoId}/tree/main?recursive=true`
+      for (let page = 0; next && page < 50; page++) {
+        const res: JsonResponse = await fetchJsonResponse(next)
+        entries.push(...(res.body as any[]))
+        const m = String(res.headers.link || '').match(/<([^>]+)>\s*;\s*rel="next"/)
+        next = m && new URL(m[1]).hostname === 'huggingface.co' ? m[1] : null
+      }
+      return entries.filter((f: any) => f.type === 'file' && f.path.toLowerCase().endsWith('.gguf')).map((f: any) => ({
         name: f.path,
         size: f.size || 0,
         downloadUrl: `https://huggingface.co/${repoId}/resolve/main/${f.path}`
@@ -4684,8 +4799,10 @@ export function registerIpcHandlers(): void {
         }
         return { ...result, error: 'File not found' }
       }
-      const st = await fsPromises.stat(modelPath)
-      result.fileSizeMB = Math.round(st.size / (1024 * 1024))
+      // The weights of a split model are spread over all its shards.
+      let modelBytes = 0
+      for (const shard of ggufPresentShards(modelPath)) modelBytes += (await fsPromises.stat(shard)).size
+      result.fileSizeMB = Math.round(modelBytes / (1024 * 1024))
 
       // ====== PRIORITY 1: Use native llama-gguf tool if available ======
       // This uses the C gguf_init_from_file() implementation, guaranteeing
@@ -5697,7 +5814,7 @@ export function registerIpcHandlers(): void {
     const resolved = resolveStrataData(strata.data, await resolveMainBackendFolder())
     return {
       autoUpdateTrackedEngines: !!s.autoUpdateTrackedEngines,
-      engineInstallMode: (s.engineInstallMode === 'source' ? 'source' : 'binary') as EngineInstallMode,
+      engineInstallModes: s.engineInstallModes ?? {},
       autoUpdateBuildTools: s.autoUpdateBuildTools !== false,
       rocmChannel: (s.rocmChannel === 'nightly' ? 'nightly' : 'stable') as RocmChannel,
       rocmSource: (s.rocmSource === 'pip' ? 'pip' : 'tarball') as RocmSdkSource,
@@ -5715,9 +5832,11 @@ export function registerIpcHandlers(): void {
     await saveSettings(s)
     return { success: true }
   })
-  ipcMain.handle('set-engine-install-mode', async (_e, mode: string) => {
+  ipcMain.handle('set-engine-install-mode', async (_e, trackedId: string, mode: string) => {
     const s = await loadSettings()
-    s.engineInstallMode = mode === 'source' ? 'source' : 'binary'
+    const t = s.trackedBackends.find(x => x.id === trackedId)
+    if (!t || t.kind === 'git') return { success: false }
+    s.engineInstallModes = { ...s.engineInstallModes, [trackedId]: mode === 'source' ? 'source' : 'binary' }
     await saveSettings(s)
     return { success: true }
   })

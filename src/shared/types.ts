@@ -16,6 +16,15 @@ export interface ModelEntry {
   name: string
   path: string
   size: number
+  // Set when this entry stands for a model split into shards: `path` is its
+  // first shard present, `size` covers the shards present.
+  shards?: ModelShards
+}
+
+export interface ModelShards {
+  present: number      // how many of the promised shards exist on disk
+  total: number        // how many the file names promise
+  files: ModelEntry[]  // the shards present, in order
 }
 
 // Multimodal projector file detected alongside models in the same folder.
@@ -328,8 +337,9 @@ export interface TrackedBackend {
   branch?: string
 }
 
-// How llama.cpp-style engines are installed: release assets are downloaded as
-// binaries, or the repository is cloned and compiled on this machine.
+// How a llama.cpp-style engine is installed: release assets are downloaded as
+// binaries, or the repository is cloned and compiled on this machine. Chosen
+// per tracked engine.
 export type EngineInstallMode = 'binary' | 'source'
 
 // A build compiled from the repository, as found on disk.
@@ -370,6 +380,9 @@ export interface TrackedBackendRelease extends ReleaseInfo {
   git?: GitEngineStatus
   // Set when the engine is checked in Build from Source mode.
   source?: SourceStatus
+  // What is installed for this machine, whichever install method the engine is
+  // currently set to.
+  installedKinds?: InstalledBuildKinds
   // Set when there is nothing to download for this engine: the repository has
   // no releases, or the entry follows a branch (binaries are not per branch).
   needsSource?: 'no-releases' | 'branch'
@@ -377,6 +390,11 @@ export interface TrackedBackendRelease extends ReleaseInfo {
   // shared engines folder on a dual-boot PC). They are not counted as
   // installed for this machine's assets, but can still be listed and removed.
   otherPlatform?: InstalledOtherPlatform[]
+}
+
+export interface InstalledBuildKinds {
+  binary: boolean
+  source: boolean
 }
 
 export interface InstalledOtherPlatform {

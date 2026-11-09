@@ -160,6 +160,8 @@ textarea::-webkit-resizer {
 .btn-secondary:hover:not(:disabled) { background: var(--bg); border-color: var(--border-strong); }
 .btn-ghost { background: transparent; color: var(--text-secondary); border-color: transparent; padding: 6px 10px; }
 .btn-ghost:hover:not(:disabled) { background: var(--bg); color: var(--text); }
+.btn-ghost.install-mode-has-build,
+.btn-ghost.install-mode-has-build:hover:not(:disabled) { color: var(--info-blue); border-color: var(--info-blue); }
 .btn-danger { background: var(--danger); color: #fff; border-color: var(--danger); }
 .btn-danger:hover:not(:disabled) { opacity: .85; }
 .btn-success { background: var(--success); color: #fff; border-color: var(--success); }
@@ -792,6 +794,11 @@ body.card-dragging, body.card-dragging * { cursor: grabbing !important; user-sel
 }
 .hub-file-name { font-size: 11px; font-family: var(--font-mono); color: var(--text); flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .hub-file-size { font-size: 11px; color: var(--text-muted); flex-shrink: 0; }
+.hub-part-chip {
+  padding: 1px 6px; border-radius: 99px; font-size: 10px; font-weight: 600;
+  background: var(--border); color: var(--text-muted); flex-shrink: 0;
+}
+.hub-file-folder { font-size: 10px; font-family: var(--font-mono); color: var(--text-muted); }
 .hub-dl-btn { align-self: flex-end; }
 .hub-file-done { display: flex; justify-content: flex-end; }
 .hub-file-progress { display: flex; align-items: center; gap: 8px; }
@@ -1171,6 +1178,26 @@ body.card-dragging, body.card-dragging * { cursor: grabbing !important; user-sel
   padding: 1px 6px;
   color: var(--text);
   font-weight: 600;
+}
+.model-size-breakdown .shards-chip {
+  background: rgba(22,163,74,.1);
+  border: 1px solid rgba(22,163,74,.25);
+  border-radius: 4px;
+  padding: 1px 6px;
+  color: var(--success);
+  font-weight: 600;
+}
+.model-size-breakdown .shard-index-chip {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 1px 6px;
+  color: var(--text-secondary);
+}
+.model-size-breakdown .shards-chip.incomplete {
+  background: rgba(220,38,38,.1);
+  border-color: rgba(220,38,38,.25);
+  color: var(--danger);
 }
 .model-size-breakdown .mmproj-chip {
   background: rgba(22,163,74,.1);

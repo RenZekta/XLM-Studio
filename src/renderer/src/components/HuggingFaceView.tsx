@@ -1,5 +1,6 @@
-import React, { useState, useEffect, useCallback } from 'react'
+import React, { useState, useEffect, useCallback, useMemo } from 'react'
 import { useStore } from '../store/useStore'
+import { groupHubFiles, type HubEntry, type HubFile } from '../../../shared/hubFiles'
 import SelectMenu from './SelectMenu'
 import {
   Search, Download, Heart, ChevronDown, ChevronLeft,
@@ -14,11 +15,6 @@ interface HfModel {
   likes: number
   tags: string[]
   lastModified: string
-}
-interface HfFile {
-  name: string
-  size: number
-  downloadUrl: string
 }
 function formatBytes(bytes: number): string {
   if (!bytes) return '?'
@@ -38,15 +34,16 @@ function formatNumber(n: number): string {
 }
 function quantLabel(filename: string): { label: string; color: string } {
   const upper = filename.toUpperCase()
+  if (upper.includes('Q1')) return { label: 'Q1', color: '#dc2626' }
   if (upper.includes('Q2')) return { label: 'Q2', color: '#ef4444' }
   if (upper.includes('Q3')) return { label: 'Q3', color: '#f97316' }
   if (upper.includes('Q4')) return { label: 'Q4', color: '#eab308' }
   if (upper.includes('Q5')) return { label: 'Q5', color: '#22c55e' }
   if (upper.includes('Q6')) return { label: 'Q6', color: '#3b82f6' }
   if (upper.includes('Q8')) return { label: 'Q8', color: '#8b5cf6' }
+  if (upper.includes('BF16')) return { label: 'BF16', color: '#6366f1' }
   if (upper.includes('F16')) return { label: 'F16', color: '#6366f1' }
   if (upper.includes('F32')) return { label: 'F32', color: '#6366f1' }
-  if (upper.includes('BF16')) return { label: 'BF16', color: '#6366f1' }
   return { label: 'GGUF', color: '#6b7280' }
 }
 export default function HuggingFaceView() {
@@ -61,7 +58,7 @@ export default function HuggingFaceView() {
 
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState('')
-  const [files, setFiles] = useState<HfFile[]>([])
+  const [files, setFiles] = useState<HubFile[]>([])
   const [filesLoading, setFilesLoading] = useState(false)
 
   const [inputValue, setInputValue] = useState(hubQuery)
@@ -97,7 +94,7 @@ export default function HuggingFaceView() {
     try {
       const res = await window.api.hfGetFiles(model.id)
       if ('error' in res) throw new Error((res as any).error)
-      setFiles(res as HfFile[])
+      setFiles(res as HubFile[])
     } catch (e: any) {
       setError(e.message || 'Failed to fetch files')
     } finally {
@@ -110,25 +107,69 @@ export default function HuggingFaceView() {
     fetchFiles(model)
   }
 
-  async function handleDownload(file: HfFile) {
+  // A model split into shards is queued part by part, first shard first, so
+  // choosing it once is enough. Parts that are already queued, running or
+  // finished are left alone.
+  async function handleDownload(entry: HubEntry) {
     if (!selectedModel) return
-    const res = await window.api.startModelDownload({
-      url: file.downloadUrl,
-      filename: file.name,
-      repoId: selectedModel.id,
-      modelFolder: selectedModel.id.split('/').pop()
-    })
-    if (!res.success) alert(`Download failed: ${res.error}`)
+    let failure = ''
+    for (const shard of entry.shards) {
+      const dl = getProgress(shard.name)
+      if (dl && dl.phase !== 'cancelled' && dl.phase !== 'error') continue
+      const res = await window.api.startModelDownload({
+        url: shard.downloadUrl,
+        filename: shard.name,
+        repoId: selectedModel.id,
+        modelFolder: entry.modelFolder
+      })
+      if (!res.success && res.error !== 'Already downloading' && !failure) failure = res.error || 'unknown error'
+    }
+    if (failure) alert(`Download failed: ${failure}`)
   }
 
   // Tasks are keyed by repoId+filename (see enqueueModelDownload in
   // ipc.ts) so two repos shipping a same-named file can't collide.
   const downloadIdFor = (filename: string) => `${selectedModel?.id || ''}::${filename}`
   const getProgress = (filename: string) => modelDownloads[downloadIdFor(filename)]
-  const isDownloading = (filename: string) => {
-    const dl = getProgress(filename)
-    return !!dl && dl.phase !== 'done' && dl.phase !== 'cancelled'
+  // One row stands for every part of a model, so its progress is the sum
+  // over its shards.
+  function entryState(entry: HubEntry) {
+    const parts = entry.shards.map(shard => ({ shard, dl: getProgress(shard.name) }))
+    const live = parts.filter(p => p.dl && p.dl.phase !== 'done' && p.dl.phase !== 'cancelled')
+    const doneParts = parts.filter(p => p.dl?.phase === 'done').length
+    const received = parts.reduce((sum, p) =>
+      sum + (p.dl?.phase === 'done' ? p.shard.size : p.dl && p.dl.phase !== 'cancelled' ? p.dl.receivedBytes : 0), 0)
+    const phases = live.map(p => p.dl!.phase)
+    const phase = phases.includes('error') ? 'error'
+      : phases.includes('downloading') ? 'downloading'
+      : phases.includes('queued') ? 'queued'
+      : phases.includes('paused') ? 'paused'
+      : null
+    const queuePositions = live.map(p => p.dl!.queuePosition).filter((n): n is number => !!n)
+    return {
+      live, doneParts, phase,
+      done: doneParts === parts.length,
+      percent: entry.size > 0 ? Math.min(100, Math.floor(received / entry.size * 100)) : 0,
+      speed: live.reduce((sum, p) => sum + (p.dl!.speed || 0), 0),
+      error: live.find(p => p.dl!.phase === 'error')?.dl?.error,
+      queuePosition: queuePositions.length ? Math.min(...queuePositions) : 0
+    }
   }
+  async function pauseEntry(entry: HubEntry) {
+    for (const shard of entry.shards) {
+      const phase = getProgress(shard.name)?.phase
+      if (phase === 'downloading' || phase === 'queued') await window.api.pauseModelDownload(downloadIdFor(shard.name))
+    }
+  }
+  async function resumeEntry(entry: HubEntry) {
+    for (const shard of entry.shards) {
+      if (getProgress(shard.name)?.phase === 'paused') await window.api.resumeModelDownload(downloadIdFor(shard.name))
+    }
+  }
+  const entries = useMemo(
+    () => (selectedModel ? groupHubFiles(files, selectedModel.id.split('/').pop() || selectedModel.id) : []),
+    [files, selectedModel?.id]
+  )
   const popularQueries = ['llama', 'mistral', 'phi', 'qwen', 'gemma', 'deepseek', 'falcon']
   return (
     <div className="hub-container">
@@ -290,69 +331,88 @@ export default function HuggingFaceView() {
               {!filesLoading && files.length === 0 && (
                 <div style={{ color: 'var(--text-muted)', fontSize: 13, padding: '8px 0' }}>No GGUF files found in this repository.</div>
               )}
-              {!filesLoading && files.map(file => {
-                const dl = getProgress(file.name)
-                const downloading = isDownloading(file.name)
-                const done = dl?.phase === 'done'
-                const { label, color } = quantLabel(file.name)
+              {!filesLoading && entries.map((entry, index) => {
+                const st = entryState(entry)
+                const { label, color } = quantLabel(`${entry.folder}/${entry.title}`)
+                const multi = entry.shardCount > 1
+                const firstSupport = entry.support && !entries[index - 1]?.support
                 return (
-                  <div key={file.name} className="hub-file-row">
-                    <div className="hub-file-info">
-                      <span className="hub-quant-badge" style={{ background: color + '22', color }}>
-                        {label}
-                      </span>
-                      <div className="hub-file-name" title={file.name}>{file.name}</div>
-                      <div className="hub-file-size">{formatBytes(file.size)}</div>
-                    </div>
-                    {downloading && !done ? (
-                      <div className="hub-file-progress">
-                        <div className="hub-progress-bar">
-                          <div className="hub-progress-fill" style={{ width: `${dl?.percent || 0}%`, opacity: dl?.phase === 'paused' ? 0.45 : 1, transition: 'width 0.3s ease' }} />
-                        </div>
-                        <span className="hub-progress-label">
-                          {dl?.phase === 'queued'
-                            ? `Queued${dl?.queuePosition ? ` (#${dl.queuePosition})` : ''}`
-                            : dl?.phase === 'error'
-                            ? (dl?.error || 'Failed')
-                            : dl?.phase === 'paused'
-                            ? `Paused • ${dl?.percent || 0}%`
-                            : `${dl?.percent || 0}%${dl?.speed ? ` • ${formatSpeed(dl.speed)}` : ''}`
-                          }
-                        </span>
-                        {dl?.phase === 'paused' ? (
-                          <button
-                            className="btn btn-ghost btn-icon"
-                            style={{ marginLeft: 4 }}
-                            onClick={() => window.api.resumeModelDownload(downloadIdFor(file.name))}
-                            title="Resume"
-                          >
-                            <Play size={12} />
-                          </button>
-                        ) : dl?.phase === 'downloading' ? (
-                          <button
-                            className="btn btn-ghost btn-icon"
-                            style={{ marginLeft: 4 }}
-                            onClick={() => window.api.pauseModelDownload(downloadIdFor(file.name))}
-                            title="Pause"
-                          >
-                            <Pause size={12} />
-                          </button>
-                        ) : null}
-                      </div>
-                    ) : done ? (
-                      <div className="hub-file-done">
-                        <CheckCircle size={16} style={{ color: 'var(--success)' }} />
-                      </div>
-                    ) : (
-                      <button
-                        className="btn btn-primary btn-sm hub-dl-btn"
-                        onClick={() => handleDownload(file)}
-                      >
-                        <Download size={13} />
-                        Download
-                      </button>
+                  <React.Fragment key={entry.key}>
+                    {firstSupport && (
+                      <div className="hub-detail-section-label" style={{ marginTop: 16 }}>Projectors and extras</div>
                     )}
-                  </div>
+                    <div className="hub-file-row">
+                      <div className="hub-file-info">
+                        <span className="hub-quant-badge" style={{ background: color + '22', color }}>
+                          {label}
+                        </span>
+                        <div className="hub-file-name" title={entry.shards.map(s => s.name).join('\n')}>{entry.title}</div>
+                        {multi && (
+                          <span className="hub-part-chip" title={entry.shards.map(s => `${s.name.slice(s.name.lastIndexOf('/') + 1)}  ${formatBytes(s.size)}`).join('\n')}>
+                            {entry.shardCount} parts
+                          </span>
+                        )}
+                        <div className="hub-file-size">{formatBytes(entry.size)}</div>
+                      </div>
+                      {entry.folder && <div className="hub-file-folder">{entry.folder}/</div>}
+                      {!entry.complete && (
+                        <div className="hub-file-folder" style={{ color: 'var(--warning)', display: 'flex', alignItems: 'center', gap: 4 }}>
+                          <AlertCircle size={11} /> Only {entry.shards.length} of {entry.shardCount} parts are in this repository
+                        </div>
+                      )}
+                      {st.phase && !st.done ? (
+                        <div className="hub-file-progress">
+                          <div className="hub-progress-bar">
+                            <div className="hub-progress-fill" style={{ width: `${st.percent}%`, opacity: st.phase === 'paused' ? 0.45 : 1, transition: 'width 0.3s ease' }} />
+                          </div>
+                          <span className="hub-progress-label">
+                            {st.phase === 'queued'
+                              ? `Queued${st.queuePosition ? ` (#${st.queuePosition})` : ''}`
+                              : st.phase === 'error'
+                              ? (st.error || 'Failed')
+                              : st.phase === 'paused'
+                              ? `Paused \u2022 ${st.percent}%`
+                              : `${st.percent}%${multi ? ` \u2022 ${st.doneParts}/${entry.shardCount} parts` : ''}${st.speed ? ` \u2022 ${formatSpeed(st.speed)}` : ''}`
+                            }
+                          </span>
+                          {st.phase === 'paused' ? (
+                            <button
+                              className="btn btn-ghost btn-icon"
+                              style={{ marginLeft: 4 }}
+                              onClick={() => resumeEntry(entry)}
+                              title="Resume"
+                            >
+                              <Play size={12} />
+                            </button>
+                          ) : st.phase === 'downloading' ? (
+                            <button
+                              className="btn btn-ghost btn-icon"
+                              style={{ marginLeft: 4 }}
+                              onClick={() => pauseEntry(entry)}
+                              title="Pause"
+                            >
+                              <Pause size={12} />
+                            </button>
+                          ) : null}
+                        </div>
+                      ) : st.done ? (
+                        <div className="hub-file-done">
+                          <CheckCircle size={16} style={{ color: 'var(--success)' }} />
+                        </div>
+                      ) : (
+                        <button
+                          className="btn btn-primary btn-sm hub-dl-btn"
+                          disabled={!entry.complete}
+                          onClick={() => handleDownload(entry)}
+                        >
+                          <Download size={13} />
+                          {st.doneParts > 0
+                            ? `Download remaining (${entry.shardCount - st.doneParts} of ${entry.shardCount} parts)`
+                            : multi ? `Download (${entry.shardCount} parts)` : 'Download'}
+                        </button>
+                      )}
+                    </div>
+                  </React.Fragment>
                 )
               })}
             </div>

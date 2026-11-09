@@ -28,7 +28,7 @@ interface HfFileResult { name: string; size: number; downloadUrl: string }
 interface LlamaCppApi {
   // Models
   listModels: () => Promise<ModelGroup[]>
-  deleteModel: (filePath: string) => Promise<{ success: boolean; error?: string }>
+  deleteModel: (filePath: string, onlyThisFile?: boolean) => Promise<{ success: boolean; error?: string }>
   renameModel: (oldPath: string, newName: string) => Promise<{ success: boolean; newPath?: string; error?: string }>
   startModelDownload: (opts: { url: string; filename: string; repoId?: string; modelFolder?: string }) => Promise<{ success: boolean; id?: string; error?: string }>
   pauseModelDownload: (id: string) => Promise<{ success: boolean; error?: string }>
@@ -169,9 +169,9 @@ interface LlamaCppApi {
   updateTrackedEngines: () => Promise<{ updated: string[]; errors: string[] }>
   installGitEngine: (trackedId: string) => Promise<{ success: boolean; error?: string; path?: string }>
   updateGitEngine: (trackedId: string) => Promise<{ success: boolean; error?: string; updated?: boolean; skipped?: string }>
-  getEngineSettings: () => Promise<{ autoUpdateTrackedEngines: boolean; engineInstallMode: EngineInstallMode; autoUpdateBuildTools: boolean; rocmChannel: 'stable' | 'nightly'; rocmSource: 'tarball' | 'pip'; strata: StrataSettings; strataDataDir: string; strataRememberedDataDir: string | null; gitAvailable: boolean }>
+  getEngineSettings: () => Promise<{ autoUpdateTrackedEngines: boolean; engineInstallModes: Record<string, EngineInstallMode>; autoUpdateBuildTools: boolean; rocmChannel: 'stable' | 'nightly'; rocmSource: 'tarball' | 'pip'; strata: StrataSettings; strataDataDir: string; strataRememberedDataDir: string | null; gitAvailable: boolean }>
   setAutoUpdateTrackedEngines: (enabled: boolean) => Promise<{ success: boolean }>
-  setEngineInstallMode: (mode: EngineInstallMode) => Promise<{ success: boolean }>
+  setEngineInstallMode: (trackedId: string, mode: EngineInstallMode) => Promise<{ success: boolean }>
   buildFromSource: (opts: { trackedId: string; type: string; extraArgs?: string; installTools?: boolean; gpuTarget?: string; pull?: boolean }) => Promise<{ success: boolean; path?: string; error?: string }>
   cancelSourceBuild: (trackedId: string, type: string) => Promise<{ success: boolean }>
   getBuildToolsPlan: (type: string, gpuTarget?: string) => Promise<{ manager: string | null; tools: { id: string; label: string; present: boolean; installable: boolean; reason?: string; outdated: boolean; detail?: string; needsGpu?: boolean }[] } | null>

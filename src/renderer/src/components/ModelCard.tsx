@@ -3,6 +3,7 @@ import { useStore } from '../store/useStore'
 import { Play, Square, Settings, ChevronDown, Globe, AlertCircle, Gauge, Loader2, Star } from 'lucide-react'
 import type { CardState, CheckpointMode } from '../../../shared/types'
 import { applyMmprojOffloadFlag } from '../../../shared/mmprojOffload'
+import { modelEntryHasPath } from '../../../shared/ggufShards'
 import CmdParamsEditor from './CmdParamsEditor'
 import EngineParamsEditor from './EngineParamsEditor'
 import { ENGINES, engineOf } from '../../../shared/engines'
@@ -97,7 +98,8 @@ export default function ModelCard({ card, selected, cut }: Props) {
   const isRunning = card.status === 'running'
   const isStopping = card.status === 'stopping'
   const isExpanded = card.expanded
-  const modelExists = !card.template.modelPath || models.some(g => g.models.some(m => m.path === card.template.modelPath))
+  const templateModelPath = card.template.modelPath
+  const modelExists = !templateModelPath || models.some(g => g.models.some(m => modelEntryHasPath(m, templateModelPath)))
   async function handleRunToggle() {
     if (isRunning) {
       // Enter 'stopping' state: disables the Start button + shows a spinner while

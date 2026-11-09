@@ -23,7 +23,7 @@ Save configurations as reusable templates and run several models at once on diff
 
 **Integrated Model Hub**
 
-Search Hugging Face, browse repositories and file details, and download GGUF files without leaving the app.
+Search Hugging Face, browse repositories and file details, and download GGUF files without leaving the app. Quants kept in repo subfolders are listed too, and a model split into numbered shards is one row with its part count and combined size; one click queues every part. In the Models tab the shards of a split model are likewise one entry, with a green "n shards" tag when all are present and a red "x/n shards" tag while some are missing or still downloading; deleting or renaming it applies to every shard. A button on the entry shows the shard files one by one (and groups them again), for example to delete a single stray shard.
 
 <img width="1258" height="780" alt="image" src="https://github.com/user-attachments/assets/4501f8fe-5b3a-4842-9d4b-2f2acfaab906" />
 
@@ -133,7 +133,7 @@ Maintain several engine builds and switch between them. XLM Studio checks upstre
 
 **Build from Source and branches**
 
-The **Install method** switch in Settings > Engine Tracker chooses between **Download Binary** (default) and **Build from Source**, which clones the repo and compiles `llama-server` locally.
+Each engine in Settings > Engine Tracker has its own install method, switched with the download or hammer button beside its GitHub link: **Download Binary** (default) or **Build from Source**, which clones the repo and compiles `llama-server` locally. The button turns blue when the other method already has a build installed.
 
 - **Tools:** a build needs git, CMake, a C++ compiler and the CUDA, Vulkan or ROCm SDK for the chosen backend. If any is missing, the button becomes **Install tools and build** (winget on Windows, Homebrew on macOS, apt/dnf/pacman/zypper on Linux with a polkit prompt). CUDA on most Linux distributions and the Xcode command line tools must be installed manually; the panel says how.
 - **ROCm:** choose your GPU and the app fetches AMD's SDK into `.sdk/rocm` (Tarball by default, or pip), with no admin rights and nothing added to the system PATH.

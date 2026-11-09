@@ -3,6 +3,7 @@ import { useStore } from '../store/useStore'
 import { FolderOpen, ChevronDown, Terminal } from 'lucide-react'
 import type { Template, CommandsSchema, BackendVersion, EngineValues } from '../../../shared/types'
 import { ENGINES, ENGINE_IDS, engineOf, engineAcceptsModel, modelSpecificEngines, type EngineId } from '../../../shared/engines'
+import { modelEntryHasPath } from '../../../shared/ggufShards'
 import { buildStrataQuickBaseline } from '../../../shared/strata'
 import { backendTypeGroupLabel } from '../../../shared/backendType'
 import { backendsOfEngine, globalBackendOf, resolveEngineBackend, autoEngineFor, missingEngineFor } from '../utils/engineBackends'
@@ -500,10 +501,10 @@ export default function CreateModal() {
                     { value: '', label: '-- Select a model --' },
                     ...models.flatMap(g => g.models.map(m => ({
                       value: m.path,
-                      label: m.name,
+                      label: m.shards && m.shards.present < m.shards.total ? `${m.name} (${m.shards.present}/${m.shards.total} shards)` : m.name,
                       group: `${g.folder}${g.external ? ' (external)' : ''}${g.mmproj ? ' [has mmproj]' : ''}`
                     }))),
-                    ...(modelPath && !models.some(g => g.models.some(m => m.path === modelPath))
+                    ...(modelPath && !models.some(g => g.models.some(m => modelEntryHasPath(m, modelPath)))
                       ? [{ value: modelPath, label: modelPath.split(/[/\\]/).pop() || modelPath }] : [])
                   ]}
                 />

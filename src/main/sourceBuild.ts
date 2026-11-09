@@ -16,7 +16,7 @@ import { dirname, relative } from 'path'
 import { NATIVE_PLATFORM, BACKEND_TYPE_MARKER, platformOfBuildDir, installVersionName } from './buildPlatform'
 import { parseLsRemote, parseBuildProgress, sourceBuildType, sourceVersionName, isReleaseTag, releaseBaseOf } from '../shared/sourceBuild'
 import { compareBackendVersions } from '../shared/backendVersion'
-import type { SourceBuild } from '../shared/types'
+import type { SourceBuild, InstalledBuildKinds } from '../shared/types'
 
 // Compiles an engine repository on this machine. Everything here is plain Node
 // so it can run without Electron: the caller supplies logging, progress and
@@ -144,6 +144,30 @@ export function scanSourceBuilds(rootDirs: string[], folderName: string, remoteC
     }
   }
   return [...newest.values()].map(e => e.build)
+}
+
+// Which kinds of build of one repo folder are installed for this OS: compiled
+// ones and downloaded releases.
+export function installedBuildKinds(rootDirs: string[], folderName: string): InstalledBuildKinds {
+  const kinds: InstalledBuildKinds = { binary: false, source: false }
+  for (const root of rootDirs) {
+    const forkDir = join(root, folderName)
+    let types: import('fs').Dirent[]
+    try { types = readdirSync(forkDir, { withFileTypes: true }) } catch { continue }
+    for (const t of types) {
+      const typeDir = join(forkDir, t.name)
+      if (!t.isDirectory() || t.name.startsWith('.') || !existsSync(join(typeDir, BACKEND_TYPE_MARKER))) continue
+      let versions: import('fs').Dirent[]
+      try { versions = readdirSync(typeDir, { withFileTypes: true }) } catch { continue }
+      for (const v of versions) {
+        const versionDir = join(typeDir, v.name)
+        if (!v.isDirectory() || v.name.startsWith('.') || platformOfBuildDir(versionDir) !== NATIVE_PLATFORM) continue
+        if (isSourceBuildDir(versionDir)) kinds.source = true
+        else kinds.binary = true
+      }
+    }
+  }
+  return kinds
 }
 
 // What a compiled build supersedes, per backend type folder: older compiled
