@@ -28,6 +28,7 @@ import ServerParamsBlock from './ServerParamsBlock'
 import SelectMenu from './SelectMenu'
 import { formatBytes } from '../utils/format'
 import CustomArgsEditor from './CustomArgsEditor'
+import LayoutSections, { type LayoutSection } from './LayoutSections'
 import { CUSTOM_ARGS_KEY, parseCustomArgs, importSupportedArgs } from '../../../shared/customArgs'
 import { MMPROJ_OFFLOAD_MODE_KEY, getMmprojOffloadMode, resolveMmprojOffloadToRam } from '../../../shared/mmprojOffload'
 import { SPEC_DRAFT_K_ARG, SPEC_DRAFT_V_ARG, isSpecDraftActive, resolveKvBackfill, applySpecDraftKvDefaults } from '../../../shared/specDraftKv'
@@ -79,6 +80,8 @@ interface Props {
   // port to the Template itself.
   onServerPortChange?: (port: number) => void
   disabled?: boolean
+  // Edit Layout is on: the list is arranged by dragging, so it ignores the search and the Common/Full filter.
+  layoutEditing?: boolean
   // The Template's own pinned backend selection (its Backend Version
   // dropdown), when known before it's saved to a Template on disk --
   // CreateModal tracks this as local state while creating/editing, so it
@@ -176,7 +179,7 @@ function NgramModifierBlock({ title, flagPrefix, enabled, onToggle, disabled, fi
   )
 }
 
-export default function CmdParamsEditor({ templateId, args, onChange, modelPathFallback, serverPortFallback, onServerPortChange, disabled: disabledProp, backendKey: backendKeyProp, backendVersionName: backendVersionProp, backendType: backendTypeProp, headerPortalTarget }: Props) {
+export default function CmdParamsEditor({ templateId, args, onChange, modelPathFallback, serverPortFallback, onServerPortChange, disabled: disabledProp, backendKey: backendKeyProp, backendVersionName: backendVersionProp, backendType: backendTypeProp, headerPortalTarget, layoutEditing = false }: Props) {
   const {
     commandsSchema: activeCommandsSchema, updateCard, cards, models, cpuInfo,
     detectedSpeculation, setDetectedSpeculation, markSpeculationApplied,
@@ -1507,9 +1510,11 @@ export default function CmdParamsEditor({ templateId, args, onChange, modelPathF
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [args, ignoreCtxOverride, ignoreBaseUrlOverride, autoCtxFill, cards, templateId, modelPathFallback, serverPortFallback, previewEffectiveCtx, ctxOverriddenInPreview, previewEffectiveParallel, parallelOverriddenInPreview, previewEffectivePort, portOverriddenInPreview, hostOverrideActive, apiKeyOverrideActive, baseUrlOverride, isMoe, modelDefaults])
 
+  // While a layout is edited every group, block and row stays in the list so it can be placed.
+  const listQuery = layoutEditing ? '' : searchQuery
   const paramSections = useMemo(
-    () => commandsSchema ? buildParamSections(commandsSchema.categories, { query: searchQuery, full: paramViewMode === 'full', common: COMMON_VISIBLE }) : [],
-    [commandsSchema, searchQuery, paramViewMode]
+    () => commandsSchema ? buildParamSections(commandsSchema.categories, { query: listQuery, full: layoutEditing || paramViewMode === 'full', common: COMMON_VISIBLE }) : [],
+    [commandsSchema, listQuery, paramViewMode, layoutEditing]
   )
 
   if (!commandsSchema) return <div className="text-muted text-sm">No commands schema loaded. Ensure an engine is installed.</div>
@@ -2626,8 +2631,8 @@ export default function CmdParamsEditor({ templateId, args, onChange, modelPathF
   )
 
   // Custom blocks sit in the section their flags belong to; while searching, a block shows if the query matches its keywords.
-  const query = searchQuery.trim().toLowerCase()
-  interface ParamBlock { id: string; keywords: string; node: React.ReactNode }
+  const query = listQuery.trim().toLowerCase()
+  interface ParamBlock { id: string; title: string; keywords: string; node: React.ReactNode }
   const samplingPresetsRow = (
     <SamplingPresets
       selectedId={selectedSamplingPreset?.id}
@@ -2647,62 +2652,54 @@ export default function CmdParamsEditor({ templateId, args, onChange, modelPathF
   )
   const blocksOf: Record<string, ParamBlock[]> = {
     'Model': [
-      { id: 'mmproj', keywords: 'multimodal projector --mmproj vision image', node: renderMmprojWidget() },
-      { id: 'spec', keywords: 'speculative decoding draft --spec mtp eagle dflash dspark ngram n-gram draft model', node: renderSpecWidget() }
+      { id: 'mmproj', title: 'Multimodal Projector', keywords: 'multimodal projector --mmproj vision image', node: renderMmprojWidget() },
+      { id: 'spec', title: 'Speculative Decoding', keywords: 'speculative decoding draft --spec mtp eagle dflash dspark ngram n-gram draft model', node: renderSpecWidget() }
     ],
-    'Context Window': [{ id: 'context', keywords: 'context --ctx-size --fit autofit length override', node: renderContextBlock() }],
-    'GPU': [{ id: 'moe', keywords: 'moe mixture of experts --n-cpu-moe --cpu-moe expert layers', node: renderMoeWidget() }],
-    'Sampling': [{ id: 'sampling-presets', keywords: 'sampling presets preset temperature', node: samplingPresetsRow }],
+    'Context Window': [{ id: 'context', title: 'Context Size', keywords: 'context --ctx-size --fit autofit length override', node: renderContextBlock() }],
+    'GPU': [{ id: 'moe', title: 'MoE Offload', keywords: 'moe mixture of experts --n-cpu-moe --cpu-moe expert layers', node: renderMoeWidget() }],
+    'Sampling': [{ id: 'sampling-presets', title: 'Sampling Presets', keywords: 'sampling presets preset temperature', node: samplingPresetsRow }],
     'Server': [
-      { id: 'server', keywords: 'server --port --host --api-key port host api key network', node: renderServerBlock() },
-      { id: 'base-url', keywords: 'base url override --port --host --api-key local network', node: renderBaseUrlOverrideBlock() },
-      { id: 'checkpoint', keywords: 'automatic checkpoint saving --slot-save-path slot save', node: renderAutoCheckpointBlock() },
-      { id: 'jinja', keywords: 'jinja chat template --chat-template', node: renderJinjaWidget() },
-      { id: 'reasoning', keywords: 'reasoning budget preserve --reasoning-budget --reasoning-preserve think', node: renderReasoningWidget() }
+      { id: 'server', title: 'Server', keywords: 'server --port --host --api-key port host api key network', node: renderServerBlock() },
+      { id: 'base-url', title: 'Base URL Override', keywords: 'base url override --port --host --api-key local network', node: renderBaseUrlOverrideBlock() },
+      { id: 'checkpoint', title: 'Automatic Checkpoint Saving', keywords: 'automatic checkpoint saving --slot-save-path slot save', node: renderAutoCheckpointBlock() },
+      { id: 'jinja', title: 'Jinja Chat Template', keywords: 'jinja chat template --chat-template', node: renderJinjaWidget() },
+      { id: 'reasoning', title: 'Reasoning', keywords: 'reasoning budget preserve --reasoning-budget --reasoning-preserve think', node: renderReasoningWidget() }
     ]
   }
   const customArgs: ParamBlock = {
-    id: 'custom-args', keywords: 'custom arguments args flags command line',
+    id: 'custom-args', title: 'Custom Arguments', keywords: 'custom arguments args flags command line',
     node: <CustomArgsEditor value={customArgsText} schema={commandsSchema} disabled={disabled} onChange={setCustomArgsText} onImport={importCustomArgs} />
   }
-  const visibleSections = [
-    ...paramSections.map(sec => {
-      const blocks = (blocksOf[sec.key] ?? []).filter(b => b.node != null && b.node !== false && (!query || b.keywords.includes(query)))
-      return { ...sec, blocks, ownTitle: false }
-    }),
-    { key: 'Custom Arguments', title: 'Custom Arguments', icon: '', rows: [] as CommandParam[], blocks: !query || customArgs.keywords.includes(query) ? [customArgs] : [], ownTitle: true }
-  ].filter(sec => sec.rows.length > 0 || sec.blocks.length > 0)
-  const dim: React.CSSProperties = disabled ? { opacity: 0.55, pointerEvents: 'none', userSelect: 'none' } : {}
+  const shownBlocks = (blocks: ParamBlock[]) =>
+    blocks.filter(b => b.node != null && b.node !== false && (!query || b.keywords.includes(query)))
+  const layoutSections: LayoutSection<CommandParam>[] = [
+    ...paramSections.map(sec => ({
+      key: sec.key,
+      title: sec.title,
+      icon: iconMap[sec.icon],
+      rows: sec.rows,
+      blocks: shownBlocks(blocksOf[sec.key] ?? [])
+    })),
+    { key: 'Custom Arguments', title: 'Custom Arguments', rows: [], blocks: shownBlocks([customArgs]), hideTitle: true }
+  ]
 
   return (
     <div className="params-editor-container">
       {headerPortalTarget ? createPortal(headerContent, headerPortalTarget) : headerContent}
       {renderMemoryEngineBlock()}
-      <div className="params-search-box">
+      <div className="params-search-box" style={layoutEditing ? { opacity: 0.55, pointerEvents: 'none' } : undefined}>
         <Search size={16} style={{ color: 'var(--text-muted)' }} />
-        <input type="text" className="form-input" placeholder="Search parameters..." value={searchQuery} onChange={e => setSearchQuery(e.target.value)} />
+        <input type="text" className="form-input" placeholder="Search parameters..." value={searchQuery} onChange={e => setSearchQuery(e.target.value)} disabled={layoutEditing} />
       </div>
-      <div className="params-scroll-area">
-        {visibleSections.length === 0 ? (
-          <div className="text-center py-6 text-sm text-muted">No parameters matched your search.</div>
-        ) : (
-          visibleSections.map(sec => (
-            <div key={sec.key} className="cmd-section">
-              {!sec.ownTitle && (
-                <div className="cmd-section-header" style={dim}>
-                  {iconMap[sec.icon]} {sec.title}
-                </div>
-              )}
-              {sec.blocks.map(b => <React.Fragment key={b.id}>{b.node}</React.Fragment>)}
-              {sec.rows.length > 0 && (
-                <div style={dim}>
-                  <div className="cmd-grid">{sec.rows.map(renderCommand)}</div>
-                </div>
-              )}
-            </div>
-          ))
-        )}
-      </div>
+      <LayoutSections
+        engine="llama.cpp"
+        sections={layoutSections}
+        editing={layoutEditing}
+        dimmed={disabled}
+        renderRow={renderCommand}
+        className="params-scroll-area"
+        emptyText="No parameters matched your search."
+      />
       <CommandPreview program="llama-server" tokens={previewTokens} />
     </div>
   )

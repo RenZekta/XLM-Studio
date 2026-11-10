@@ -5,9 +5,10 @@ import FolderCard from './FolderCard'
 import ContextMenu, { MenuEntry } from './ContextMenu'
 import {
   Plus, Download, Search, ArrowUp, Settings, Star, Copy, Upload, Terminal, FolderPlus, FolderOpen,
-  FolderMinus, Scissors, ClipboardPaste, Trash, Pencil, CopyPlus
+  FolderMinus, Scissors, ClipboardPaste, Trash, Pencil, CopyPlus, LayoutList, X
 } from 'lucide-react'
 import type { CardState, Template } from '../../../shared/types'
+import { engineOf } from '../../../shared/engines'
 import { folderOfTemplate, folderPath, idRange, siblingFolders } from '../../../shared/templateFolders'
 import { effectiveTemplatePort } from '../utils/templatePort'
 import {
@@ -34,10 +35,23 @@ const INTERACTIVE = 'button, input, textarea, select, a, label, [contenteditable
 
 type Clip = { ids: string[]; mode: 'copy' | 'cut' }
 
+// A stretched folder's own height: measured on a copy without the stretch, since the stretched
+// height depends on the row it sits in and not on what the folder is.
+function naturalFolderHeight(card: HTMLElement): number {
+  const probe = card.cloneNode(true) as HTMLElement
+  probe.classList.remove('folder-stretch')
+  probe.style.cssText = `position:absolute;visibility:hidden;pointer-events:none;width:${card.getBoundingClientRect().width}px`
+  card.parentElement?.appendChild(probe)
+  const height = probe.getBoundingClientRect().height
+  probe.remove()
+  return height
+}
+
 export default function CardsView() {
   const {
     cards, setCards, setShowCreateModal, addCard, templateSearch, setTemplateSearch,
-    templateFolders, currentFolderId, setCurrentFolderId, view, showCreateModal, baseUrlOverride
+    templateFolders, currentFolderId, setCurrentFolderId, view, showCreateModal, baseUrlOverride,
+    toggleCardExpanded, layoutEdit, startLayoutEdit, cancelLayoutEdit
   } = useStore()
   useEffect(() => {
     const saved = localStorage.getItem(TEMPLATE_SEARCH_KEY)
@@ -122,6 +136,12 @@ export default function CardsView() {
       return next.size === prev.size ? prev : next
     })
   }, [orderedKey])
+
+  // Edit Layout belongs to one open Template: it ends when that Template leaves the view or the page.
+  useEffect(() => {
+    if (layoutEdit && !orderedIds.includes(layoutEdit.templateId)) cancelLayoutEdit()
+  }, [orderedKey, layoutEdit?.templateId])
+  useEffect(() => () => cancelLayoutEdit(), [])
 
   function openFolder(id: string | null) {
     setCurrentFolderId(id)
@@ -271,6 +291,13 @@ export default function CardsView() {
   }, [view])
 
   function buildMenu(ids: string[]): MenuEntry[] {
+    const layoutItems: MenuEntry[] = layoutEdit
+      ? [{ key: 'quit-layout', label: 'Quit Edit Layout', icon: <X size={14} />, onClick: cancelLayoutEdit }, null]
+      : []
+    return [...layoutItems, ...buildBaseMenu(ids)]
+  }
+
+  function buildBaseMenu(ids: string[]): MenuEntry[] {
     if (ids.length === 0) {
       return [
         { key: 'new-template', label: 'New Template', icon: <Plus size={14} />, onClick: () => setShowCreateModal(true) },
@@ -291,6 +318,15 @@ export default function CardsView() {
       if (t) {
         const isMain = t.mainForPort === true
         items.push({ key: 'edit', label: 'Edit Template', icon: <Settings size={14} />, onClick: () => setShowCreateModal(true, t) })
+        if (layoutEdit?.templateId !== t.id) {
+          items.push({
+            key: 'edit-layout', label: 'Edit Layout', icon: <LayoutList size={14} />,
+            onClick: () => {
+              if (!cards.find(c => c.template.id === t.id)?.expanded) toggleCardExpanded(t.id)
+              startLayoutEdit(t.id, engineOf(t))
+            }
+          })
+        }
         items.push({
           key: 'star', icon: <Star size={14} />, onClick: () => toggleMain(t),
           label: isMain ? 'Unstar Main Template' : `Star as Main Template (port ${effectiveTemplatePort(t, baseUrlOverride)})`
@@ -398,6 +434,10 @@ export default function CardsView() {
     }
     document.body.appendChild(ghost)
     document.body.classList.add('card-dragging')
+    // A stretched folder's ghost is its natural height, so the grab point keeps its relative place in it.
+    const ghostHeight = ghost.getBoundingClientRect().height || rect.height
+    const grabY = press.y - rect.top
+    const offY = cardEl.classList.contains('folder-card') ? grabY * (ghostHeight / rect.height) : grabY
     const measure = (list: string[]) => list
       .map(id => { const el = wrapRefs.current.get(id); return el ? { id, rect: el.getBoundingClientRect() } : null })
       .filter((r): r is { id: string; rect: DOMRect } => r !== null)
@@ -406,14 +446,17 @@ export default function CardsView() {
     const scroller = rootRef.current?.closest('.content') as HTMLElement | null
     dragRef.current = {
       ids: dragged, ghost,
-      offX: press.x - rect.left, offY: press.y - rect.top,
+      offX: press.x - rect.left, offY,
       templateRects: measure(ids.filter(id => !isFolderId(id))),
       folderRects: measure(ids.filter(isFolderId)),
       startScroll: scroller?.scrollTop ?? 0,
       scroller, last: { x: e.clientX, y: e.clientY },
       timer: window.setInterval(autoScroll, 16),
       templateHeight: heightOf(dragged.find(id => !isFolderId(id)), '.model-card'),
-      folderHeight: heightOf(dragged.find(isFolderId), '.folder-card'),
+      folderHeight: (() => {
+        const folderEl = wrapRefs.current.get(dragged.find(isFolderId) ?? '')?.querySelector('.folder-card') as HTMLElement | null
+        return folderEl ? naturalFolderHeight(folderEl) : 0
+      })(),
       dropAt: null, dropFolderAt: null, dropFolder: null
     }
     setDragIds(dragged)
@@ -571,6 +614,11 @@ export default function CardsView() {
     reordered(visibleFolderIds, draggedFolders, index).join() !== visibleFolderIds.join()
   const placeholderHeight = dragRef.current?.templateHeight
   const folderPlaceholderHeight = dragRef.current?.folderHeight
+  // A folder that would land on the partly filled last row stretches like the folders there; elsewhere it keeps its own height.
+  const folderPlaceholderStyle = (landsAt: number): React.CSSProperties =>
+    leftoverFolders > 0 && landsAt >= levelFolders.length - leftoverFolders
+      ? { alignSelf: 'stretch', maxHeight: FOLDER_MAX_STRETCH_PX, minHeight: folderPlaceholderHeight }
+      : { height: folderPlaceholderHeight, minHeight: 0 }
   const cutIds = clip?.mode === 'cut' ? new Set(clip.ids) : null
   const nothingAtAll = cards.length === 0 && templateFolders.length === 0
   const levelEmpty = levelCards.length === 0 && levelFolders.length === 0
@@ -679,7 +727,7 @@ export default function CardsView() {
               return (
                 <React.Fragment key={folder.id}>
                 {showFolderPlaceholderAt(folderIndex) && (
-                  <div className="card-drop-placeholder" style={{ height: folderPlaceholderHeight }} />
+                  <div className="card-drop-placeholder" style={folderPlaceholderStyle(folderIndex)} />
                 )}
                 <div
                   data-item-id={folder.id}
@@ -710,7 +758,7 @@ export default function CardsView() {
               )
             })}
             {showFolderPlaceholderAt(levelFolders.length) && (
-              <div className="card-drop-placeholder" style={{ height: folderPlaceholderHeight }} />
+              <div className="card-drop-placeholder" style={folderPlaceholderStyle(levelFolders.length)} />
             )}
             {levelCards.map((card, index) => (
               <React.Fragment key={card.template.id}>

@@ -1,6 +1,11 @@
 import { create } from 'zustand'
 import { setBackendKeyAliases } from '../../../shared/backendPin'
 import type { EngineId } from '../../../shared/engines'
+import {
+  activeLayoutPreset, addLayoutPreset, defaultLayoutId, deleteLayoutPreset, findLayoutPreset, isDefaultLayoutId,
+  newLayoutPresetId, parseLayoutLibrary, setActiveLayout, shownLayout, updateLayoutPreset,
+  type LayoutLibrary, type ParamLayout
+} from '../../../shared/paramLayout'
 import type {
   Template, TemplateFolder, BackendVersion, CommandsSchema, ReleaseInfo, RunningStatus,
   ModelGroup, TrackedBackend, TrackedBackendRelease, ThemePref, SpecDetectionResult,
@@ -8,6 +13,25 @@ import type {
 } from '../../../shared/types'
 
 let backendSwitchSeq = 0
+
+const LAYOUT_LIBRARY_KEY = 'xlm_param_layouts'
+// An earlier version kept one layout for every Template.
+const LEGACY_LAYOUT_KEY = 'hexllama_param_layout'
+
+function loadLayoutLibrary(): LayoutLibrary {
+  try {
+    return parseLayoutLibrary(localStorage.getItem(LAYOUT_LIBRARY_KEY), localStorage.getItem(LEGACY_LAYOUT_KEY))
+  } catch {
+    return parseLayoutLibrary(null, null)
+  }
+}
+
+function storeLayoutLibrary(lib: LayoutLibrary) {
+  try {
+    localStorage.setItem(LAYOUT_LIBRARY_KEY, JSON.stringify(lib))
+    localStorage.removeItem(LEGACY_LAYOUT_KEY)
+  } catch {}
+}
 // Monotonic id handed to each log entry, so the Logs list can key rows on
 // something stable while the 10000-entry cap drops lines off the front.
 let logSeq = 0
@@ -25,6 +49,16 @@ export interface ModelDownloadInfo {
   receivedBytes: number; totalBytes: number
   phase: 'queued' | 'downloading' | 'paused' | 'done' | 'error' | 'cancelled'
   percent: number; repoId?: string; speed?: number; error?: string; queuePosition?: number
+}
+
+// Edit Layout of one Template's parameter list. `draft` is null until something is moved, and
+// the layout shown is then the preset's own.
+export interface LayoutEdit {
+  templateId: string
+  engine: EngineId
+  presetId: string
+  draft: ParamLayout | null
+  compact: boolean
 }
 
 interface AppStore {
@@ -103,6 +137,22 @@ interface AppStore {
   // log that arrived while the view wasn't mounted, not just hide them.
   logs: { id: string; name: string; stream: 'stdout' | 'stderr' | 'app'; line: string; ts: number; seq?: number }[]
 
+  // Saved parameter layouts (per engine) and the Edit Layout session, if any.
+  layoutLibrary: LayoutLibrary
+  layoutEdit: LayoutEdit | null
+  startLayoutEdit: (templateId: string, engine: EngineId) => void
+  setLayoutDraft: (draft: ParamLayout) => void
+  setLayoutCompact: (compact: boolean) => void
+  selectLayoutPreset: (id: string) => void
+  // Saves the layout as shown under a new name and switches the edit to it.
+  createLayoutPreset: (name: string) => void
+  renameLayoutPreset: (id: string, name: string) => void
+  removeLayoutPreset: (id: string) => void
+  // The built-in Default cannot be overwritten, so saving it needs a name for a new preset.
+  layoutSaveNeedsName: () => boolean
+  saveLayoutEdit: (name?: string) => void
+  cancelLayoutEdit: () => void
+
   setCompactSidebarEnabled: (enabled: boolean) => void
   setView: (v: AppStore['view']) => void
   setTemplateFolders: (f: TemplateFolder[]) => void
@@ -180,7 +230,7 @@ interface AppStore {
   setLogsSource: (source: string) => void
 }
 
-export const useStore = create<AppStore>((set) => ({
+export const useStore = create<AppStore>((set, get) => ({
   cards: [], backends: [], models: [], activeBackend: null, engineGlobals: {},
   commandsSchema: null, releaseInfo: null, paths: null,
   templateFolders: [], currentFolderId: null,
@@ -217,6 +267,8 @@ export const useStore = create<AppStore>((set) => ({
   presetMode: 'quick',        // default to Quick (matches quickBaselineActive)
   logs: [],
   logsSource: 'all',
+  layoutLibrary: loadLayoutLibrary(),
+  layoutEdit: null,
 
   setCompactSidebarEnabled: (enabled) => {
     localStorage.setItem('compactSidebar', String(enabled))
@@ -365,5 +417,62 @@ export const useStore = create<AppStore>((set) => ({
     return { logs: next.length > 10000 ? next.slice(-10000) : next }
   }),
   clearLogs: () => set({ logs: [] }),
-  setLogsSource: (source) => set({ logsSource: source })
+  setLogsSource: (source) => set({ logsSource: source }),
+
+  startLayoutEdit: (templateId, engine) => set((s) => ({
+    layoutEdit: { templateId, engine, presetId: activeLayoutPreset(s.layoutLibrary, engine).id, draft: null, compact: false }
+  })),
+  setLayoutDraft: (draft) => set((s) => s.layoutEdit ? { layoutEdit: { ...s.layoutEdit, draft } } : {}),
+  setLayoutCompact: (compact) => set((s) => s.layoutEdit ? { layoutEdit: { ...s.layoutEdit, compact } } : {}),
+  selectLayoutPreset: (id) => set((s) => s.layoutEdit ? { layoutEdit: { ...s.layoutEdit, presetId: id, draft: null } } : {}),
+  createLayoutPreset: (name) => set((s) => {
+    const edit = s.layoutEdit
+    const label = name.trim()
+    if (!edit || !label) return {}
+    const preset = { id: newLayoutPresetId(), name: label, engine: edit.engine, layout: shownLayout(s.layoutLibrary, edit.engine, edit) }
+    const layoutLibrary = addLayoutPreset(s.layoutLibrary, preset)
+    storeLayoutLibrary(layoutLibrary)
+    return { layoutLibrary, layoutEdit: { ...edit, presetId: preset.id, draft: null } }
+  }),
+  renameLayoutPreset: (id, name) => set((s) => {
+    const label = name.trim()
+    if (!label || isDefaultLayoutId(id)) return {}
+    const layoutLibrary = updateLayoutPreset(s.layoutLibrary, id, { name: label })
+    storeLayoutLibrary(layoutLibrary)
+    return { layoutLibrary }
+  }),
+  removeLayoutPreset: (id) => set((s) => {
+    if (isDefaultLayoutId(id)) return {}
+    const layoutLibrary = deleteLayoutPreset(s.layoutLibrary, id)
+    storeLayoutLibrary(layoutLibrary)
+    const edit = s.layoutEdit
+    if (edit && edit.presetId === id) {
+      return { layoutLibrary, layoutEdit: { ...edit, presetId: defaultLayoutId(edit.engine), draft: null } }
+    }
+    return { layoutLibrary }
+  }),
+  layoutSaveNeedsName: () => {
+    const edit = get().layoutEdit
+    return !!edit && !!edit.draft && isDefaultLayoutId(edit.presetId)
+  },
+  saveLayoutEdit: (name) => {
+    const { layoutEdit: edit, layoutLibrary } = get()
+    if (!edit) return
+    let lib = layoutLibrary
+    let id = edit.presetId
+    if (edit.draft) {
+      if (isDefaultLayoutId(id)) {
+        const label = name?.trim()
+        if (!label) return
+        id = newLayoutPresetId()
+        lib = addLayoutPreset(lib, { id, name: label, engine: edit.engine, layout: edit.draft })
+      } else if (findLayoutPreset(lib, edit.engine, id).id === id) {
+        lib = updateLayoutPreset(lib, id, { layout: edit.draft })
+      }
+    }
+    lib = setActiveLayout(lib, edit.engine, id)
+    storeLayoutLibrary(lib)
+    set({ layoutLibrary: lib, layoutEdit: null })
+  },
+  cancelLayoutEdit: () => set((s) => s.layoutEdit ? { layoutEdit: null } : {})
 }))

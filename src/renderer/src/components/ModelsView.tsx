@@ -228,11 +228,11 @@ function ModelFileRow({
         <button
           className="btn btn-ghost btn-icon"
           onClick={() => setEditing(true)}
-          title={shardFile ? 'Rename the whole model from its grouped entry' : group.external ? 'Rename disabled for external models' : 'Rename'}
-          disabled={group.external || !!shardFile}
+          title={shardFile ? 'Rename the whole model from its grouped entry' : 'Rename'}
+          disabled={!!shardFile}
         ><Pencil size={14} /></button>
         <button className="btn btn-ghost btn-icon" onClick={() => window.api.openFolder(group.folderPath)} title="Open folder"><FolderOpen size={14} /></button>
-        <button className="btn btn-ghost btn-icon text-danger" onClick={handleDelete} title={group.external ? 'Delete disabled for external models' : shardFile ? 'Delete this shard file only' : 'Delete'} disabled={group.external}><Trash size={14} /></button>
+        <button className="btn btn-ghost btn-icon text-danger" onClick={handleDelete} title={shardFile ? 'Delete this shard file only' : 'Delete'}><Trash size={14} /></button>
       </div>
     </div>
   )

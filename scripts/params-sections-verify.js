@@ -89,7 +89,7 @@ check('the Context block is under Context Window, MoE under GPU', blocksOf.index
 const tail = src.slice(src.indexOf('<div className="params-editor-container">'))
 const at = needle => tail.indexOf(needle)
 check('Search parameters comes right after the memory control and before every section', at('{renderMemoryEngineBlock()}') !== -1 && at('{renderMemoryEngineBlock()}') < at('placeholder="Search parameters..."') &&
-  at('placeholder="Search parameters..."') < at('visibleSections.map') && count('placeholder="Search parameters..."') === 1 &&
+  at('placeholder="Search parameters..."') < at('<LayoutSections') && count('placeholder="Search parameters..."') === 1 &&
   !/\{render(Mmproj|Jinja|Spec|Moe|Reasoning)Widget\(\)\}|\{render(Context|Server|BaseUrlOverride|AutoCheckpoint)Block\(\)\}/.test(tail))
 
 fs.rmSync(tmp, { recursive: true, force: true })

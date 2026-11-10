@@ -19,6 +19,8 @@ It is a fork of [Hexllama](https://github.com/andersondanieln/hexllama), extende
 
 Save configurations as reusable templates and run several models at once on different ports. Launch in "Chat UI" mode (opens the llama.cpp web interface) or "API Only" mode (serves silently in the background).
 
+The parameter list of a llama.cpp or Strata template can be rearranged: right-click a template, choose Edit Layout, then drag groups, blocks and single parameters into the order you want and save with the blue button. Each engine has its own layout presets next to a built-in Default; the list button at the top right opens them (select, add, rename, delete), and the last button shows the list in a compact form.
+
 <img width="1319" height="766" alt="image" src="https://github.com/user-attachments/assets/12dee642-d70f-4ab3-ab7f-0e054871ac44" />
 
 **Integrated Model Hub**

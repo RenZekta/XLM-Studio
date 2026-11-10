@@ -18,6 +18,7 @@ import { formatWithSpaces, snapToNearestPowerOfTwo, ladderUpTo } from '../utils/
 import { markTemplateSavePending, markTemplateSaveDone } from '../utils/templateSync'
 import { activeServerOverrides, findPortConflict } from '../utils/templatePort'
 import ServerParamsBlock from './ServerParamsBlock'
+import LayoutSections, { type LayoutSection } from './LayoutSections'
 import SelectMenu from './SelectMenu'
 
 // Parameter editor for engines whose settings are a short, flat list (Strata).
@@ -43,6 +44,8 @@ interface Props {
   // Receives the Server block's port edits when the Template is not saved yet.
   onServerPortChange?: (port: number) => void
   disabled?: boolean
+  // Edit Layout is on: every group and parameter is listed so it can be placed, whatever the Common/Full filter says.
+  layoutEditing?: boolean
   backendKey?: string | null
   headerPortalTarget?: HTMLElement | null
 }
@@ -73,7 +76,7 @@ function same(a: unknown, b: unknown): boolean {
 
 export default function EngineParamsEditor({
   engine, templateId, args, onChange, modelPathFallback, serverPortFallback, onServerPortChange,
-  disabled: disabledProp, backendKey: backendKeyProp, headerPortalTarget
+  disabled: disabledProp, backendKey: backendKeyProp, headerPortalTarget, layoutEditing = false
 }: Props) {
   const {
     updateCard, cards, ggufMetadata, backends, activeBackend, engineGlobals,
@@ -398,8 +401,35 @@ export default function EngineParamsEditor({
   }
 
   const visibleCategories = (schema?.categories || [])
-    .map(cat => ({ ...cat, commands: cat.commands.filter(c => !SERVER_ARGS.includes(c.arg) && (paramViewMode === 'full' || strataIsCommon(c.arg, cat.name))) }))
+    .map(cat => ({ ...cat, commands: cat.commands.filter(c => !SERVER_ARGS.includes(c.arg) && (layoutEditing || paramViewMode === 'full' || strataIsCommon(c.arg, cat.name))) }))
     .filter(cat => cat.commands.length > 0)
+
+  const serverBlock = (
+    <ServerParamsBlock
+      port={port}
+      host={String(args['--host'] ?? '')}
+      apiKey={String(args['--api-key'] ?? '')}
+      overrides={serverOverrides}
+      conflict={onServerPortChange ? null : findPortConflict(cards, port, templateId)}
+      disabled={disabled}
+      onPortChange={p => {
+        if (onServerPortChange) onServerPortChange(p)
+        else commit(args, { serverPort: p })
+      }}
+      onHostChange={v => update('--host', v)}
+      onApiKeyChange={v => update('--api-key', v)}
+    />
+  )
+  const layoutSections: LayoutSection<CommandParam>[] = [
+    { key: 'strata-server', title: 'Server', rows: [], blocks: [{ id: 'server', title: 'Server', node: serverBlock }], hideTitle: true },
+    ...visibleCategories.map(cat => ({
+      key: cat.name,
+      title: cat.name,
+      icon: CATEGORY_ICONS[cat.icon],
+      rows: cat.commands,
+      blocks: []
+    }))
+  ]
 
   const header = (
     <>
@@ -459,28 +489,8 @@ export default function EngineParamsEditor({
           This file is not one Strata is known to run. Launching it may be refused by Strata's setup.
         </div>
       )}
-      <ServerParamsBlock
-        port={port}
-        host={String(args['--host'] ?? '')}
-        apiKey={String(args['--api-key'] ?? '')}
-        overrides={serverOverrides}
-        conflict={onServerPortChange ? null : findPortConflict(cards, port, templateId)}
-        disabled={disabled}
-        onPortChange={p => {
-          if (onServerPortChange) onServerPortChange(p)
-          else commit(args, { serverPort: p })
-        }}
-        onHostChange={v => update('--host', v)}
-        onApiKeyChange={v => update('--api-key', v)}
-      />
-      {!schema ? (
-        <div className="text-muted text-sm">No commands schema loaded. Ensure an engine is installed.</div>
-      ) : visibleCategories.map(cat => (
-        <div key={cat.name} className="cmd-section">
-          <div className="cmd-section-header">{CATEGORY_ICONS[cat.icon]} {cat.name}</div>
-          <div className="cmd-grid">{cat.commands.map(renderRow)}</div>
-        </div>
-      ))}
+      <LayoutSections engine={engine} sections={layoutSections} editing={layoutEditing} renderRow={renderRow} />
+      {!schema && <div className="text-muted text-sm">No commands schema loaded. Ensure an engine is installed.</div>}
       {preview.error && <div className="cpu-info-banner" style={{ color: 'var(--warning)' }}>{preview.error}</div>}
       {preview.tokens.length > 0 && (
         <CommandPreview program={/win/i.test(navigator.platform) ? 'START-HERE.bat' : 'setup.sh'} tokens={preview.tokens} />

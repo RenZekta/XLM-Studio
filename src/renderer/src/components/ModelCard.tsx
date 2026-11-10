@@ -1,4 +1,4 @@
-import React, { useMemo } from 'react'
+import React, { useEffect, useMemo } from 'react'
 import { useStore } from '../store/useStore'
 import { Play, Square, Settings, ChevronDown, Globe, AlertCircle, Gauge, Loader2, Star } from 'lucide-react'
 import type { CardState, CheckpointMode } from '../../../shared/types'
@@ -6,6 +6,7 @@ import { applyMmprojOffloadFlag } from '../../../shared/mmprojOffload'
 import { modelEntryHasPath } from '../../../shared/ggufShards'
 import CmdParamsEditor from './CmdParamsEditor'
 import EngineParamsEditor from './EngineParamsEditor'
+import LayoutToolbar from './LayoutToolbar'
 import { ENGINES, engineOf } from '../../../shared/engines'
 import { buildStrataArgv, strataGgufDir, strataInfoFor } from '../../../shared/strata'
 import { resolveEngineBackend, resolveLlamaTarget } from '../utils/engineBackends'
@@ -18,7 +19,7 @@ interface Props {
   cut?: boolean
 }
 export default function ModelCard({ card, selected, cut }: Props) {
-  const { toggleCardExpanded, setCardStatus, backends, activeBackend, commandsSchema, models, modelDefaults, ggufMetadata, cards, baseUrlOverride } = useStore()
+  const { toggleCardExpanded, setCardStatus, backends, activeBackend, commandsSchema, models, modelDefaults, ggufMetadata, cards, baseUrlOverride, layoutEdit, cancelLayoutEdit } = useStore()
 
   // Compute the EFFECTIVE context that will be passed to
   // llama.cpp on the next run. Precedence:
@@ -98,6 +99,9 @@ export default function ModelCard({ card, selected, cut }: Props) {
   const isRunning = card.status === 'running'
   const isStopping = card.status === 'stopping'
   const isExpanded = card.expanded
+  const layoutEditing = layoutEdit?.templateId === card.template.id
+  // The layout controls dock to the open list, so editing ends when the list closes.
+  useEffect(() => { if (layoutEditing && !isExpanded) cancelLayoutEdit() }, [layoutEditing, isExpanded, cancelLayoutEdit])
   const templateModelPath = card.template.modelPath
   const modelExists = !templateModelPath || models.some(g => g.models.some(m => modelEntryHasPath(m, templateModelPath)))
   async function handleRunToggle() {
@@ -405,9 +409,16 @@ export default function ModelCard({ card, selected, cut }: Props) {
           </button>
         </div>
       </div>
+      {layoutEditing && isExpanded && (
+        <div className="layout-toolbar-dock">
+          <LayoutToolbar />
+        </div>
+      )}
       <div className={`card-expanded ${isExpanded ? 'open' : ''}`}>
-        <div className="expanded-inner">
-          {engineOf(card.template) === 'llama.cpp' ? <CmdParamsEditor templateId={card.template.id} args={card.template.args} /> : <EngineParamsEditor engine={engineOf(card.template)} templateId={card.template.id} args={card.template.args} />}
+        <div className={`expanded-inner ${layoutEditing ? 'layout-editing-pad' : ''}`}>
+          {engineOf(card.template) === 'llama.cpp'
+            ? <CmdParamsEditor templateId={card.template.id} args={card.template.args} layoutEditing={layoutEditing} />
+            : <EngineParamsEditor engine={engineOf(card.template)} templateId={card.template.id} args={card.template.args} layoutEditing={layoutEditing} />}
         </div>
       </div>
     </div>
