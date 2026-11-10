@@ -9,9 +9,9 @@
 
 <br/>
 
-XLM Studio is a fast, native desktop interface for discovering, downloading, configuring and serving local LLMs with llama.cpp-compatible engines (and Strata, a model-specific engine). It takes you from "found a GGUF on Hugging Face" to "running server with sane defaults" in a couple of clicks.
+XLM Studio is a fast, native desktop interface for discovering, downloading, configuring and serving local LLMs with llama.cpp-compatible engines (and Strata, a model-specific engine). Run any llama.cpp compatible model with fastest settings in a couple of clicks.
 
-It is a fork of [Hexllama](https://github.com/andersondanieln/hexllama), extended with a memory-aware configuration engine: it reads a model's real GGUF metadata (architecture, layers, KV-cache geometry, MoE layout, quantization, speculative-decoding tensors, chat template) to compute VRAM/RAM budgets and recommend settings, so you don't have to guess loading parameters.
+It is a fork of [Hexllama](https://github.com/andersondanieln/hexllama), extended with a lot of features, main being memory-aware configuration engine: it reads a model's real GGUF metadata (architecture, layers, KV-cache geometry, MoE layout, quantization, speculative-decoding tensors, chat template) to compute VRAM/RAM budgets and recommend settings, so you don't have to guess loading parameters.
 
 ## Features
 
@@ -19,13 +19,11 @@ It is a fork of [Hexllama](https://github.com/andersondanieln/hexllama), extende
 
 Save configurations as reusable templates and run several models at once on different ports. Launch in "Chat UI" mode (opens the llama.cpp web interface) or "API Only" mode (serves silently in the background).
 
-The parameter list of a llama.cpp or Strata template can be rearranged: right-click a template, choose Edit Layout, then drag groups, blocks and single parameters into the order you want and save with the blue button. Each engine has its own layout presets next to a built-in Default; the list button at the top right opens them (select, add, rename, delete), and the last button shows the list in a compact form.
-
 <img width="1319" height="766" alt="image" src="https://github.com/user-attachments/assets/12dee642-d70f-4ab3-ab7f-0e054871ac44" />
 
 **Integrated Model Hub**
 
-Search Hugging Face, browse repositories and file details, and download GGUF files without leaving the app. Quants kept in repo subfolders are listed too, and a model split into numbered shards is one row with its part count and combined size; one click queues every part. In the Models tab the shards of a split model are likewise one entry, with a green "n shards" tag when all are present and a red "x/n shards" tag while some are missing or still downloading; deleting or renaming it applies to every shard. A button on the entry shows the shard files one by one (and groups them again), for example to delete a single stray shard.
+Search Hugging Face, browse repositories and file details, and download GGUF files without leaving the app. Model split into numbered shards one entry.
 
 <img width="1258" height="780" alt="image" src="https://github.com/user-attachments/assets/4501f8fe-5b3a-4842-9d4b-2f2acfaab906" />
 
@@ -84,7 +82,7 @@ The best available method is selected automatically:
 | 2 | **Draft Model** | sidecar filename containing `draft`/`mtp` |
 | 1 | **Native MTP** | embedded `nextn`/MTP tensors in the model's own GGUF metadata |
 
-Sidecar files are scanned in the model's folder (like mmproj files) and hidden from the Model File picker. All candidates are listed, so you can switch tier or file at any time. `--spec-draft-n-max`, `--spec-draft-n-min` and `--spec-draft-p-min` are tuned per tier. The n-gram modifiers `ngram-map-k4v` and `ngram-mod` can be stacked on any method or used alone.
+Sidecar files are scanned in the model's folder (like mmproj files). All candidates are listed, so you can switch tier or file at any time. `--spec-draft-n-max`, `--spec-draft-n-min` and `--spec-draft-p-min` are tuned per tier. The n-gram modifiers `ngram-map-k4v` and `ngram-mod` can be stacked on any method or used alone.
 
 <img width="503" height="306" alt="image" src="https://github.com/user-attachments/assets/db72733c-acc5-4d46-85f6-2912c5f02215" />
 
@@ -178,7 +176,7 @@ Let your agents switch the model running behind them with a skill, choosing a fa
 2. Download the installer for your operating system.
 3. Run it and launch XLM Studio.
 
-### Run Locally
+### Build Locally
 
 Prerequisites: Node.js 18 or higher and npm.
 
