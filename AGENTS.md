@@ -50,6 +50,18 @@ new one explaining the same thing differently — replace it. A function
 should have one coherent explanation of what it does, not a changelog of
 every pass someone made over it.
 
+
+## Text and writing
+
+- Do not write developer's personal information anywhere.
+- Do not write the descriptions as if explaining them to developer. 
+(e.g. full-detail descriptions in README of every added feature or change during the pass)
+- Comments rules apply to all writing, strings, menus.
+- Avoid obvious and self-explanatory descriptions (BAD: "DFlash2 uses Dflash2,
+Off starts with no drafter").
+- Write concisely. Nobody wants to read gigantic blocks of text.
+
+
 ## Code style
 
 - Match the surrounding code's conventions rather than introducing a new
