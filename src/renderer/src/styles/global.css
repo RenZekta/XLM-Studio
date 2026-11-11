@@ -190,7 +190,7 @@ textarea::-webkit-resizer {
   50% { opacity: 1; }
 }
 .card-drag-region { cursor: grab; }
-.card-drag-source { opacity: .35; }
+.card-drag-hidden { display: none; }
 /* Dragging is pointer-driven (see CardsView), so the page owns the cursor
    and can show the grabbing hand everywhere for the whole drag. */
 body.card-dragging, body.card-dragging * { cursor: grabbing !important; user-select: none !important; }
@@ -401,11 +401,57 @@ body.card-dragging, body.card-dragging * { cursor: grabbing !important; user-sel
 .layout-editing { user-select: none; }
 .layout-editing .layout-item, .layout-editing .cmd-section-header { cursor: grab; }
 .layout-editing .layout-item > * { pointer-events: none; }
-.layout-editing .layout-item { outline: 1.5px dashed var(--border-strong); outline-offset: 2px; border-radius: 6px; }
-.layout-editing .layout-item:hover { outline-color: var(--info-blue); }
-.layout-editing .cmd-section-header svg:first-child { opacity: .6; }
-.layout-compact .layout-item { outline-offset: 0; }
+.layout-editing .cmd-section-header > svg:first-child { opacity: .6; }
 .layout-compact .cmd-grid { gap: 6px; }
+.layout-source-hidden { display: none !important; }
+/* Selection looks like a selected Template card: blue outline and tint, with a short pop. The
+   parameter list clips whatever sticks out of it, so the outline is drawn inside the item. */
+.layout-editing .layout-item { position: relative; border-radius: 6px; }
+.layout-editing .layout-item.selected, .layout-editing .cmd-section-header.selected {
+  outline: 2px solid var(--info-blue); outline-offset: -2px; animation: layout-select-pop 280ms cubic-bezier(.2, .8, .3, 1);
+}
+@keyframes layout-select-pop {
+  0% { transform: scale(.985); }
+  55% { transform: scale(1.007); }
+  100% { transform: scale(1); }
+}
+.layout-editing .layout-item.selected::after {
+  content: ''; position: absolute; inset: 0; border-radius: 6px; background: rgba(59, 130, 246, .09); pointer-events: none;
+}
+.layout-editing .cmd-section-header.selected { background: rgba(59, 130, 246, .09); border-radius: 4px; }
+.layout-icon-btn, .layout-group-remove {
+  display: inline-flex; align-items: center; justify-content: center; padding: 3px; border: none; border-radius: 4px;
+  background: transparent; color: inherit; cursor: pointer;
+}
+.layout-icon-btn:hover, .layout-group-remove:hover { background: var(--border); }
+.layout-group-remove { margin-left: auto; }
+/* The input sizes itself to its text through the hidden copy in ::after. */
+.layout-group-name-wrap { display: inline-grid; align-items: center; min-width: 2ch; }
+.layout-group-name-wrap::after {
+  content: attr(data-value) ' '; grid-area: 1 / 1; visibility: hidden; white-space: pre; padding: 0 2px;
+}
+.layout-group-name {
+  grid-area: 1 / 1; width: 100%; min-width: 0; padding: 0 2px; margin: 0; border: none; border-bottom: 1px solid transparent;
+  background: transparent; outline: none; font: inherit; letter-spacing: inherit; text-transform: inherit; color: inherit;
+  cursor: text; user-select: text;
+}
+.layout-group-name:hover { border-bottom-color: var(--border-strong); }
+.layout-group-name:focus { border-bottom-color: var(--info-blue); color: var(--text); }
+.layout-group-ghost {
+  padding: 8px 12px 6px; background: var(--surface); border: 1.5px solid var(--border-strong); border-radius: var(--radius-sm);
+  max-height: none !important; overflow: visible !important;
+}
+.layout-group-ghost .cmd-section-header { margin-bottom: 4px; padding-bottom: 6px; }
+.layout-group-dots { padding: 0 2px; font-size: 18px; line-height: 1; letter-spacing: 2px; color: var(--text-muted); }
+.layout-icon-menu {
+  position: fixed; z-index: 5000; width: 252px; padding: 6px; display: grid; grid-template-columns: repeat(7, 1fr); gap: 2px;
+  background: var(--surface); border: 1.5px solid var(--border-strong); border-radius: var(--radius-sm); box-shadow: var(--shadow-md);
+}
+.layout-icon-option {
+  height: 32px; display: inline-flex; align-items: center; justify-content: center; border: none; border-radius: 6px;
+  background: transparent; color: var(--text-secondary); cursor: pointer;
+}
+.layout-icon-option:hover { background: var(--bg); color: var(--text); }
 .layout-chip {
   display: flex; align-items: center; justify-content: space-between; gap: 12px;
   padding: 6px 10px; border: 1px solid var(--border); border-radius: 6px; background: var(--surface);

@@ -140,6 +140,10 @@ interface AppStore {
   // Saved parameter layouts (per engine) and the Edit Layout session, if any.
   layoutLibrary: LayoutLibrary
   layoutEdit: LayoutEdit | null
+  // A request for a new group at this screen height, taken up by the list being edited.
+  layoutGroupRequest: { y: number; id: number } | null
+  requestLayoutGroup: (y: number) => void
+  clearLayoutGroupRequest: () => void
   startLayoutEdit: (templateId: string, engine: EngineId) => void
   setLayoutDraft: (draft: ParamLayout) => void
   setLayoutCompact: (compact: boolean) => void
@@ -269,6 +273,7 @@ export const useStore = create<AppStore>((set, get) => ({
   logsSource: 'all',
   layoutLibrary: loadLayoutLibrary(),
   layoutEdit: null,
+  layoutGroupRequest: null,
 
   setCompactSidebarEnabled: (enabled) => {
     localStorage.setItem('compactSidebar', String(enabled))
@@ -419,7 +424,10 @@ export const useStore = create<AppStore>((set, get) => ({
   clearLogs: () => set({ logs: [] }),
   setLogsSource: (source) => set({ logsSource: source }),
 
+  requestLayoutGroup: (y) => set((s) => s.layoutEdit ? { layoutGroupRequest: { y, id: (s.layoutGroupRequest?.id ?? 0) + 1 } } : {}),
+  clearLayoutGroupRequest: () => set({ layoutGroupRequest: null }),
   startLayoutEdit: (templateId, engine) => set((s) => ({
+    layoutGroupRequest: null,
     layoutEdit: { templateId, engine, presetId: activeLayoutPreset(s.layoutLibrary, engine).id, draft: null, compact: false }
   })),
   setLayoutDraft: (draft) => set((s) => s.layoutEdit ? { layoutEdit: { ...s.layoutEdit, draft } } : {}),
@@ -472,7 +480,7 @@ export const useStore = create<AppStore>((set, get) => ({
     }
     lib = setActiveLayout(lib, edit.engine, id)
     storeLayoutLibrary(lib)
-    set({ layoutLibrary: lib, layoutEdit: null })
+    set({ layoutLibrary: lib, layoutEdit: null, layoutGroupRequest: null })
   },
-  cancelLayoutEdit: () => set((s) => s.layoutEdit ? { layoutEdit: null } : {})
+  cancelLayoutEdit: () => set((s) => s.layoutEdit ? { layoutEdit: null, layoutGroupRequest: null } : {})
 }))

@@ -7,6 +7,14 @@
 
 import { ENGINES, type EngineId } from './engines'
 
+// A group's own title and icon. Groups the editor does not have (made in Edit Layout) are keyed
+// `custom:...` and exist only through this entry.
+export interface GroupMeta {
+  title?: string
+  // An icon name of the renderer's icon set; 'none' draws no icon.
+  icon?: string
+}
+
 export interface ParamLayout {
   // Group keys in display order.
   sections: string[]
@@ -14,6 +22,7 @@ export interface ParamLayout {
   blocks: Record<string, string[]>
   // Parameter flags per group key, in display order.
   rows: Record<string, string[]>
+  groups?: Record<string, GroupMeta>
 }
 
 export const EMPTY_LAYOUT: ParamLayout = { sections: [], blocks: {}, rows: {} }
@@ -21,7 +30,39 @@ export const EMPTY_LAYOUT: ParamLayout = { sections: [], blocks: {}, rows: {} }
 export function isEmptyLayout(layout: ParamLayout): boolean {
   return layout.sections.length === 0 &&
     Object.values(layout.blocks).every(l => l.length === 0) &&
-    Object.values(layout.rows).every(l => l.length === 0)
+    Object.values(layout.rows).every(l => l.length === 0) &&
+    Object.keys(layout.groups ?? {}).length === 0
+}
+
+const CUSTOM_GROUP_PREFIX = 'custom:'
+export const isCustomGroupKey = (key: string): boolean => key.startsWith(CUSTOM_GROUP_PREFIX)
+export const newGroupKey = (): string => `${CUSTOM_GROUP_PREFIX}${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}`
+
+// `beforeKey` is the group the new one goes in front of; null puts it last.
+export function insertGroup(layout: ParamLayout, key: string, meta: GroupMeta, beforeKey: string | null): ParamLayout {
+  const sections = layout.sections.filter(k => k !== key)
+  const at = beforeKey === null ? -1 : sections.indexOf(beforeKey)
+  if (at === -1) sections.push(key); else sections.splice(at, 0, key)
+  return { ...layout, sections, groups: { ...layout.groups, [key]: meta } }
+}
+
+// An empty value drops that override, so the editor's own title or icon shows again.
+export function setGroupMeta(layout: ParamLayout, key: string, patch: GroupMeta): ParamLayout {
+  const meta: GroupMeta = { ...layout.groups?.[key], ...patch }
+  if (!meta.title) delete meta.title
+  if (!meta.icon) delete meta.icon
+  const groups = { ...layout.groups }
+  if (Object.keys(meta).length === 0 && !isCustomGroupKey(key)) delete groups[key]
+  else groups[key] = meta
+  return { ...layout, groups }
+}
+
+// What a removed group held goes back to the groups the editor puts it in.
+export function removeGroup(layout: ParamLayout, key: string): ParamLayout {
+  const { [key]: _meta, ...groups } = layout.groups ?? {}
+  const { [key]: _blocks, ...blocks } = layout.blocks
+  const { [key]: _rows, ...rows } = layout.rows
+  return { sections: layout.sections.filter(k => k !== key), blocks, rows, groups }
 }
 
 export function arrangeOrder(defaults: string[], saved: string[] | undefined): string[] {
@@ -53,31 +94,92 @@ export function arrangePlacement(defaults: Record<string, string[]>, saved: Reco
   return out
 }
 
-// Moves `id` into list `toKey` at slot `at`, counted in that list as it is shown, with `id` still in it.
-export function movePlacement(placement: Record<string, string[]>, id: string, toKey: string, at: number): Record<string, string[]> {
-  const insertAt = (placement[toKey] ?? []).slice(0, at).filter(x => x !== id).length
+// Moves `ids` (kept in the order given) into list `toKey` at slot `at`. The slot counts the items
+// of that list left once `ids` are lifted out, and only those `visible` accepts when it is given:
+// an item that is not shown has no slot of its own, so a moved id lands before the next shown one.
+export function movePlacement(placement: Record<string, string[]>, ids: string[], toKey: string, at: number, visible?: (id: string) => boolean): Record<string, string[]> {
+  if (ids.length === 0) return placement
+  const moved = new Set(ids)
   const out: Record<string, string[]> = {}
-  for (const [key, ids] of Object.entries(placement)) out[key] = ids.filter(x => x !== id)
+  for (const [key, list] of Object.entries(placement)) out[key] = list.filter(x => !moved.has(x))
   const target = out[toKey] ?? []
-  out[toKey] = [...target.slice(0, insertAt), id, ...target.slice(insertAt)]
+  const shown = visible ? target.filter(visible) : target
+  const index = at < shown.length ? target.indexOf(shown[Math.max(at, 0)]) : target.length
+  out[toKey] = [...target.slice(0, index), ...ids, ...target.slice(index)]
   return out
 }
 
-export function moveOrder(order: string[], id: string, at: number): string[] {
-  return movePlacement({ order }, id, 'order', at).order
+export function moveOrder(order: string[], ids: string[], at: number): string[] {
+  return movePlacement({ order }, ids, 'order', at).order ?? order
+}
+
+// A group read as one run: its header, then its blocks, then its parameters. A header moved on its
+// own changes which run the items after its new place belong to.
+export interface FlatEntry { kind: 'header' | 'block' | 'row'; id: string }
+
+export function flattenSections(keys: string[], blocks: Record<string, string[]>, rows: Record<string, string[]>): FlatEntry[] {
+  return keys.flatMap(key => [
+    { kind: 'header' as const, id: key },
+    ...(blocks[key] ?? []).map(id => ({ kind: 'block' as const, id })),
+    ...(rows[key] ?? []).map(id => ({ kind: 'row' as const, id }))
+  ])
+}
+
+export interface FlatLayout { sections: string[]; blocks: Record<string, string[]>; rows: Record<string, string[]> }
+
+// Items ahead of the first header have no group and join it.
+function unflatten(seq: FlatEntry[], keys: string[]): FlatLayout {
+  const blocks: Record<string, string[]> = Object.fromEntries(keys.map(k => [k, []]))
+  const rows: Record<string, string[]> = Object.fromEntries(keys.map(k => [k, []]))
+  const sections: string[] = []
+  const lead: FlatEntry[] = []
+  let current: string | null = null
+  const add = (key: string, e: FlatEntry) => (e.kind === 'block' ? blocks : rows)[key].push(e.id)
+  for (const e of seq) {
+    if (e.kind === 'header') { current = e.id; sections.push(e.id) }
+    else if (current === null) lead.push(e)
+    else add(current, e)
+  }
+  if (sections.length > 0) {
+    const first = sections[0]
+    const head = [...lead, ...[...blocks[first].map(id => ({ kind: 'block' as const, id })), ...rows[first].map(id => ({ kind: 'row' as const, id }))]]
+    blocks[first] = head.filter(e => e.kind === 'block').map(e => e.id)
+    rows[first] = head.filter(e => e.kind === 'row').map(e => e.id)
+  }
+  return { sections, blocks, rows }
+}
+
+// Moves the headers `moved` to slot `at`, counted among the entries left once they are lifted out
+// and only those `visible` accepts.
+export function moveHeaders(
+  keys: string[], blocks: Record<string, string[]>, rows: Record<string, string[]>,
+  moved: string[], at: number, visible: (e: FlatEntry) => boolean
+): FlatLayout {
+  const gone = new Set(moved)
+  const rest = flattenSections(keys, blocks, rows).filter(e => !(e.kind === 'header' && gone.has(e.id)))
+  const shown = rest.filter(visible)
+  const index = at < shown.length ? rest.indexOf(shown[Math.max(at, 0)]) : rest.length
+  const placed: FlatEntry[] = [...rest.slice(0, index), ...moved.map(id => ({ kind: 'header' as const, id })), ...rest.slice(index)]
+  return unflatten(placed, keys)
 }
 
 const isStringList = (v: unknown): v is string[] => Array.isArray(v) && v.every(x => typeof x === 'string')
 const isListMap = (v: unknown): v is Record<string, string[]> =>
   !!v && typeof v === 'object' && !Array.isArray(v) && Object.values(v as object).every(isStringList)
+const isGroupMap = (v: unknown): v is Record<string, GroupMeta> =>
+  !!v && typeof v === 'object' && !Array.isArray(v) &&
+  Object.values(v as Record<string, any>).every(m => !!m && typeof m === 'object' &&
+    (m.title === undefined || typeof m.title === 'string') && (m.icon === undefined || typeof m.icon === 'string'))
+const hasValidShape = (v: any): boolean =>
+  !!v && isStringList(v.sections) && isListMap(v.blocks) && isListMap(v.rows) && (v.groups === undefined || isGroupMap(v.groups))
 
 // A stored layout that is not shaped like one (hand-edited, from another version) is ignored.
 export function parseParamLayout(raw: string | null): ParamLayout | null {
   if (!raw) return null
   try {
     const v = JSON.parse(raw)
-    if (!v || !isStringList(v.sections) || !isListMap(v.blocks) || !isListMap(v.rows)) return null
-    const layout: ParamLayout = { sections: v.sections, blocks: v.blocks, rows: v.rows }
+    if (!hasValidShape(v)) return null
+    const layout: ParamLayout = { sections: v.sections, blocks: v.blocks, rows: v.rows, ...(v.groups ? { groups: v.groups } : {}) }
     return isEmptyLayout(layout) ? null : layout
   } catch {
     return null
@@ -163,7 +265,7 @@ export function setActiveLayout(lib: LayoutLibrary, engine: EngineId, id: string
 function isPreset(v: any): v is LayoutPreset {
   return !!v && typeof v.id === 'string' && !isDefaultLayoutId(v.id) && typeof v.name === 'string' && v.name.trim() !== '' &&
     typeof v.engine === 'string' && v.engine in ENGINES &&
-    !!v.layout && isStringList(v.layout.sections) && isListMap(v.layout.blocks) && isListMap(v.layout.rows)
+    hasValidShape(v.layout)
 }
 
 // Reads the stored library. A single layout stored by an earlier version (shared by every Template,

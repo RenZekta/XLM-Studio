@@ -400,8 +400,19 @@ export default function EngineParamsEditor({
     )
   }
 
+  // Edit Layout lists every parameter so its place is kept, but only shows the ones in the current view.
+  const hiddenRows = new Set<string>()
   const visibleCategories = (schema?.categories || [])
-    .map(cat => ({ ...cat, commands: cat.commands.filter(c => !SERVER_ARGS.includes(c.arg) && (layoutEditing || paramViewMode === 'full' || strataIsCommon(c.arg, cat.name))) }))
+    .map(cat => ({
+      ...cat,
+      commands: cat.commands.filter(c => {
+        if (SERVER_ARGS.includes(c.arg)) return false
+        if (paramViewMode === 'full' || strataIsCommon(c.arg, cat.name)) return true
+        if (!layoutEditing) return false
+        hiddenRows.add(c.arg)
+        return true
+      })
+    }))
     .filter(cat => cat.commands.length > 0)
 
   const serverBlock = (
@@ -489,7 +500,7 @@ export default function EngineParamsEditor({
           This file is not one Strata is known to run. Launching it may be refused by Strata's setup.
         </div>
       )}
-      <LayoutSections engine={engine} sections={layoutSections} editing={layoutEditing} renderRow={renderRow} />
+      <LayoutSections engine={engine} sections={layoutSections} editing={layoutEditing} hiddenRows={hiddenRows} renderRow={renderRow} />
       {!schema && <div className="text-muted text-sm">No commands schema loaded. Ensure an engine is installed.</div>}
       {preview.error && <div className="cpu-info-banner" style={{ color: 'var(--warning)' }}>{preview.error}</div>}
       {preview.tokens.length > 0 && (

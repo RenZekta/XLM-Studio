@@ -51,7 +51,7 @@ export default function CardsView() {
   const {
     cards, setCards, setShowCreateModal, addCard, templateSearch, setTemplateSearch,
     templateFolders, currentFolderId, setCurrentFolderId, view, showCreateModal, baseUrlOverride,
-    toggleCardExpanded, layoutEdit, startLayoutEdit, cancelLayoutEdit
+    toggleCardExpanded, layoutEdit, startLayoutEdit, cancelLayoutEdit, requestLayoutGroup
   } = useStore()
   useEffect(() => {
     const saved = localStorage.getItem(TEMPLATE_SEARCH_KEY)
@@ -118,7 +118,6 @@ export default function CardsView() {
     ro.observe(grid)
     return () => ro.disconnect()
   })
-  const leftoverFolders = levelCards.length > 0 ? levelFolders.length % columns : 0
 
   // ---- Selection ---------------------------------------------------------
   const [selected, setSelected] = useState<Set<string>>(new Set())
@@ -290,9 +289,13 @@ export default function CardsView() {
     }
   }, [view])
 
-  function buildMenu(ids: string[]): MenuEntry[] {
+  function buildMenu(ids: string[], y: number): MenuEntry[] {
     const layoutItems: MenuEntry[] = layoutEdit
-      ? [{ key: 'quit-layout', label: 'Quit Edit Layout', icon: <X size={14} />, onClick: cancelLayoutEdit }, null]
+      ? [
+          { key: 'add-layout-group', label: 'Add a Group', icon: <Plus size={14} />, onClick: () => requestLayoutGroup(y) },
+          { key: 'quit-layout', label: 'Quit Edit Layout', icon: <X size={14} />, onClick: cancelLayoutEdit },
+          null
+        ]
       : []
     return [...layoutItems, ...buildBaseMenu(ids)]
   }
@@ -365,9 +368,6 @@ export default function CardsView() {
     ghost: HTMLElement
     offX: number
     offY: number
-    templateRects: { id: string; rect: DOMRect }[]
-    folderRects: { id: string; rect: DOMRect }[]
-    startScroll: number
     scroller: HTMLElement | null
     last: { x: number; y: number }
     timer: number
@@ -438,18 +438,12 @@ export default function CardsView() {
     const ghostHeight = ghost.getBoundingClientRect().height || rect.height
     const grabY = press.y - rect.top
     const offY = cardEl.classList.contains('folder-card') ? grabY * (ghostHeight / rect.height) : grabY
-    const measure = (list: string[]) => list
-      .map(id => { const el = wrapRefs.current.get(id); return el ? { id, rect: el.getBoundingClientRect() } : null })
-      .filter((r): r is { id: string; rect: DOMRect } => r !== null)
     const heightOf = (id: string | undefined, selector: string) =>
       (id && wrapRefs.current.get(id)?.querySelector(selector)?.getBoundingClientRect().height) || 0
     const scroller = rootRef.current?.closest('.content') as HTMLElement | null
     dragRef.current = {
       ids: dragged, ghost,
       offX: press.x - rect.left, offY,
-      templateRects: measure(ids.filter(id => !isFolderId(id))),
-      folderRects: measure(ids.filter(isFolderId)),
-      startScroll: scroller?.scrollTop ?? 0,
       scroller, last: { x: e.clientX, y: e.clientY },
       timer: window.setInterval(autoScroll, 16),
       templateHeight: heightOf(dragged.find(id => !isFolderId(id)), '.model-card'),
@@ -463,6 +457,9 @@ export default function CardsView() {
     window.addEventListener('keydown', stable.key, true)
   }
 
+  // The dragged items are hidden by now; place the preview before the first paint without them.
+  useLayoutEffect(() => { if (dragIds) updateDrag() }, [dragIds])
+
   function autoScroll() {
     const d = dragRef.current
     if (!d?.scroller) return
@@ -473,17 +470,20 @@ export default function CardsView() {
     if (step !== 0) { d.scroller.scrollTop += step; updateDrag() }
   }
 
-  // Decides what a drop would do from the pointer position:
+  // Decides what a drop would do from the pointer position, against where the cards are on screen
+  // right now (the preview moves the ones after it):
+  //  - over the preview: nothing changes
   //  - over a path-bar crumb or the middle of a folder: move inside it
   //  - near a folder's left/right edge: reorder among folders (folders dragged)
-  //  - nearest a Template: reorder among Templates (Templates dragged)
+  //  - over or nearest a Template, or over the Add Template tile: reorder among Templates
   function updateDrag() {
     const d = dragRef.current
     if (!d) return
     d.ghost.style.transform = `translate(${d.last.x - d.offX}px, ${d.last.y - d.offY}px)`
-    // The rects were measured at the scroll position the drag started at.
-    const x = d.last.x
-    const y = d.last.y + ((d.scroller?.scrollTop ?? 0) - d.startScroll)
+    const { x, y } = d.last
+    const within = (r: DOMRect) => x >= r.left && x <= r.right && y >= r.top && y <= r.bottom
+    const previews = Array.from(rootRef.current?.querySelectorAll('.card-drop-placeholder') ?? [])
+    if (previews.some(el => within(el.getBoundingClientRect()))) return
     const draggedSet = new Set(d.ids)
     const hasTemplates = d.ids.some(id => !isFolderId(id))
     const hasFolders = d.ids.some(isFolderId)
@@ -492,29 +492,42 @@ export default function CardsView() {
     let templateSlot: number | null = null
     let folderSlot: number | null = null
 
-    const crumb = (document.elementFromPoint(d.last.x, d.last.y) as HTMLElement | null)?.closest('[data-drop-folder]')
+    const crumb = (document.elementFromPoint(x, y) as HTMLElement | null)?.closest('[data-drop-folder]')
     if (crumb) {
       const target = crumb.getAttribute('data-drop-folder')
       if (target && !draggedSet.has(target)) into = target
     } else {
+      // Slots count the cards that stay in the list.
+      const rectsOf = (ids: string[]) => ids
+        .filter(id => !draggedSet.has(id))
+        .map(id => ({ id, rect: wrapRefs.current.get(id)?.getBoundingClientRect() }))
+        .filter((r): r is { id: string; rect: DOMRect } => !!r.rect)
+      const folderRects = rectsOf(orderedIds.filter(isFolderId))
+      const templateRects = rectsOf(orderedIds.filter(id => !isFolderId(id)))
+      const addTile = rootRef.current?.querySelector('.add-card')?.getBoundingClientRect()
       const distance = (r: DOMRect) => {
         const dx = Math.max(r.left - x, 0, x - r.right)
         const dy = Math.max(r.top - y, 0, y - r.bottom)
         return dx * dx + dy * dy
       }
-      let nearest: { kind: 'folder' | 'template'; index: number; rect: DOMRect; id: string } | null = null
+      let hit: { kind: 'folder' | 'template'; index: number; rect: DOMRect; id: string } | null = null
       let best = Infinity
-      d.folderRects.forEach(({ id, rect }, index) => { const dist = distance(rect); if (dist < best) { best = dist; nearest = { kind: 'folder', index, rect, id } } })
-      d.templateRects.forEach(({ id, rect }, index) => { const dist = distance(rect); if (dist < best) { best = dist; nearest = { kind: 'template', index, rect, id } } })
-      const hit = nearest as { kind: 'folder' | 'template'; index: number; rect: DOMRect; id: string } | null
-      if (hit?.kind === 'folder') {
-        const inside = x >= hit.rect.left && x <= hit.rect.right && y >= hit.rect.top && y <= hit.rect.bottom
-        const edge = hit.rect.width * FOLDER_EDGE_FRACTION
-        const middle = x >= hit.rect.left + edge && x <= hit.rect.right - edge
-        if (inside && middle && !draggedSet.has(hit.id)) into = hit.id
-        else if (hasFolders) folderSlot = x - hit.rect.left < hit.rect.width / 2 ? hit.index : hit.index + 1
-      } else if (hit?.kind === 'template' && hasTemplates) {
-        templateSlot = x - hit.rect.left < hit.rect.width / 2 ? hit.index : hit.index + 1
+      folderRects.forEach(({ id, rect }, index) => { const dist = distance(rect); if (dist < best) { best = dist; hit = { kind: 'folder', index, rect, id } } })
+      templateRects.forEach(({ id, rect }, index) => { const dist = distance(rect); if (dist < best) { best = dist; hit = { kind: 'template', index, rect, id } } })
+      const found = hit as { kind: 'folder' | 'template'; index: number; rect: DOMRect; id: string } | null
+      if (hasTemplates && addTile && within(addTile)) {
+        templateSlot = templateRects.length
+      } else if (!found) {
+        if (hasFolders) folderSlot = 0
+        else templateSlot = 0
+      } else if (found.kind === 'folder') {
+        const inside = within(found.rect)
+        const edge = found.rect.width * FOLDER_EDGE_FRACTION
+        const middle = x >= found.rect.left + edge && x <= found.rect.right - edge
+        if (inside && middle && !draggedSet.has(found.id)) into = found.id
+        else if (hasFolders) folderSlot = x - found.rect.left < found.rect.width / 2 ? found.index : found.index + 1
+      } else if (hasTemplates) {
+        templateSlot = x - found.rect.left < found.rect.width / 2 ? found.index : found.index + 1
       }
     }
     if (templateSlot !== d.dropAt) { d.dropAt = templateSlot; setDropAt(templateSlot) }
@@ -561,12 +574,11 @@ export default function CardsView() {
   }
 
   // The visible Templates' new relative order with `moved` inserted as one
-  // block at slot `at` of the visible list.
+  // block at slot `at`, counted among the ones that are not moved.
   function reordered(visible: string[], moved: string[], at: number): string[] {
     const set = new Set(moved)
     const rest = visible.filter(id => !set.has(id))
-    const insertAt = visible.slice(0, at).filter(id => !set.has(id)).length
-    return [...rest.slice(0, insertAt), ...visible.filter(id => set.has(id)), ...rest.slice(insertAt)]
+    return [...rest.slice(0, at), ...visible.filter(id => set.has(id)), ...rest.slice(at)]
   }
 
   // Folders keep one global order; the visible folders' new order goes back
@@ -602,23 +614,25 @@ export default function CardsView() {
     document.body.classList.remove('card-dragging')
   }, [])
 
-  const visibleIds = levelCards.map(c => c.template.id)
-  const visibleFolderIds = levelFolders.map(f => f.id)
   const draggedTemplates = dragIds?.filter(id => !isFolderId(id)) ?? []
   const draggedFolders = dragIds?.filter(isFolderId) ?? []
-  const showPlaceholderAt = (index: number) =>
-    dropFolder === null && dropAt === index && draggedTemplates.length > 0 &&
-    reordered(visibleIds, draggedTemplates, index).join() !== visibleIds.join()
-  const showFolderPlaceholderAt = (index: number) =>
-    dropFolder === null && dropFolderAt === index && draggedFolders.length > 0 &&
-    reordered(visibleFolderIds, draggedFolders, index).join() !== visibleFolderIds.join()
+  // Dragged items are hidden, so slots count the ones left in the list.
+  const showPlaceholderAt = (index: number) => dropFolder === null && dropAt === index && draggedTemplates.length > 0
+  const showFolderPlaceholderAt = (index: number) => dropFolder === null && dropFolderAt === index && draggedFolders.length > 0
   const placeholderHeight = dragRef.current?.templateHeight
   const folderPlaceholderHeight = dragRef.current?.folderHeight
-  // A folder that would land on the partly filled last row stretches like the folders there; elsewhere it keeps its own height.
-  const folderPlaceholderStyle = (landsAt: number): React.CSSProperties =>
-    leftoverFolders > 0 && landsAt >= levelFolders.length - leftoverFolders
+  // Folders on the partly filled last row stretch to its end. The folder row counts the preview as a
+  // cell and not the folders being dragged, which are out of the list.
+  const folderPreview = draggedFolders.length > 0 && dropFolder === null && dropFolderAt !== null
+  const folderCells = levelFolders.length - draggedFolders.length + (folderPreview ? 1 : 0)
+  const stretchFrom = levelCards.length > 0 ? folderCells - (folderCells % columns) : folderCells
+  const folderPlaceholderStyle = (cell: number): React.CSSProperties =>
+    cell >= stretchFrom
       ? { alignSelf: 'stretch', maxHeight: FOLDER_MAX_STRETCH_PX, minHeight: folderPlaceholderHeight }
       : { height: folderPlaceholderHeight, minHeight: 0 }
+  const draggedSet = new Set(dragIds ?? [])
+  let folderNo = 0
+  let templateNo = 0
   const cutIds = clip?.mode === 'cut' ? new Set(clip.ids) : null
   const nothingAtAll = cards.length === 0 && templateFolders.length === 0
   const levelEmpty = levelCards.length === 0 && levelFolders.length === 0
@@ -720,18 +734,20 @@ export default function CardsView() {
           <div className="cards-grid" ref={gridRef} onClickCapture={e => {
             if (Date.now() - dragEndRef.current < POST_DRAG_CLICK_MS) { e.stopPropagation(); e.preventDefault() }
           }}>
-            {levelFolders.map((folder, folderIndex) => {
-              const stretch = folderIndex >= levelFolders.length - leftoverFolders
+            {levelFolders.map(folder => {
+              const hidden = draggedSet.has(folder.id)
+              const slot = hidden ? -1 : folderNo++
+              const stretch = !hidden && slot + (folderPreview && dropFolderAt! <= slot ? 1 : 0) >= stretchFrom
               const inside = cards.filter(c => folderOfTemplate(c.template, folderIdSet) === folder.id).length
               const sub = templateFolders.filter(f => f.parentId === folder.id).length
               return (
                 <React.Fragment key={folder.id}>
-                {showFolderPlaceholderAt(folderIndex) && (
-                  <div className="card-drop-placeholder" style={folderPlaceholderStyle(folderIndex)} />
+                {!hidden && showFolderPlaceholderAt(slot) && (
+                  <div className="card-drop-placeholder" style={folderPlaceholderStyle(slot)} />
                 )}
                 <div
                   data-item-id={folder.id}
-                  className={dragIds?.includes(folder.id) ? 'card-drag-source' : undefined}
+                  className={hidden ? 'card-drag-hidden' : undefined}
                   ref={el => { if (el) wrapRefs.current.set(folder.id, el); else wrapRefs.current.delete(folder.id) }}
                   style={stretch ? { alignSelf: 'stretch', maxHeight: FOLDER_MAX_STRETCH_PX } : undefined}
                   onMouseDown={e => handleItemMouseDown(folder.id, e)}
@@ -757,26 +773,30 @@ export default function CardsView() {
                 </React.Fragment>
               )
             })}
-            {showFolderPlaceholderAt(levelFolders.length) && (
-              <div className="card-drop-placeholder" style={folderPlaceholderStyle(levelFolders.length)} />
+            {showFolderPlaceholderAt(folderNo) && (
+              <div className="card-drop-placeholder" style={folderPlaceholderStyle(folderNo)} />
             )}
-            {levelCards.map((card, index) => (
-              <React.Fragment key={card.template.id}>
-                {showPlaceholderAt(index) && (
-                  <div className="card-drop-placeholder" style={{ height: placeholderHeight }} />
-                )}
-                <div
-                  data-item-id={card.template.id}
-                  ref={el => { if (el) wrapRefs.current.set(card.template.id, el); else wrapRefs.current.delete(card.template.id) }}
-                  className={dragIds?.includes(card.template.id) ? 'card-drag-source' : undefined}
-                  onMouseDown={e => handleItemMouseDown(card.template.id, e)}
-                  onClick={e => handleItemClick(card.template.id, e)}
-                >
-                  <ModelCard card={card} selected={selected.has(card.template.id)} cut={!!cutIds?.has(card.template.id)} />
-                </div>
-              </React.Fragment>
-            ))}
-            {showPlaceholderAt(levelCards.length) && (
+            {levelCards.map(card => {
+              const hidden = draggedSet.has(card.template.id)
+              const slot = hidden ? -1 : templateNo++
+              return (
+                <React.Fragment key={card.template.id}>
+                  {!hidden && showPlaceholderAt(slot) && (
+                    <div className="card-drop-placeholder" style={{ height: placeholderHeight }} />
+                  )}
+                  <div
+                    data-item-id={card.template.id}
+                    ref={el => { if (el) wrapRefs.current.set(card.template.id, el); else wrapRefs.current.delete(card.template.id) }}
+                    className={hidden ? 'card-drag-hidden' : undefined}
+                    onMouseDown={e => handleItemMouseDown(card.template.id, e)}
+                    onClick={e => handleItemClick(card.template.id, e)}
+                  >
+                    <ModelCard card={card} selected={selected.has(card.template.id)} cut={!!cutIds?.has(card.template.id)} />
+                  </div>
+                </React.Fragment>
+              )
+            })}
+            {showPlaceholderAt(templateNo) && (
               <div className="card-drop-placeholder" style={{ height: placeholderHeight }} />
             )}
             <button className="add-card" onClick={() => setShowCreateModal(true)}>
@@ -786,7 +806,7 @@ export default function CardsView() {
           </div>
         </>
       )}
-      {menu && <ContextMenu x={menu.x} y={menu.y} items={buildMenu(menu.ids)} onClose={() => setMenu(null)} />}
+      {menu && <ContextMenu x={menu.x} y={menu.y} items={buildMenu(menu.ids, menu.y)} onClose={() => setMenu(null)} />}
     </div>
   )
 }

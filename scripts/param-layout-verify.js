@@ -35,12 +35,66 @@ check('a row in a vanished group returns home', eq(L.arrangePlacement(defaults, 
 check('a row saved twice is placed once', eq(L.arrangePlacement(defaults, { S1: ['p'], S2: ['p', 'r'] }), { S1: ['p', 'q'], S2: ['r'] }))
 
 // ----- Moves -----
-check('move down within a list', eq(L.movePlacement({ A: ['1', '2', '3'] }, '1', 'A', 3), { A: ['2', '3', '1'] }))
-check('move up within a list', eq(L.movePlacement({ A: ['1', '2', '3'] }, '3', 'A', 0), { A: ['3', '1', '2'] }))
-check('slot beside itself changes nothing', eq(L.movePlacement({ A: ['1', '2', '3'] }, '2', 'A', 2), { A: ['1', '2', '3'] }))
-check('move across lists', eq(L.movePlacement({ A: ['1', '2'], B: ['3'] }, '1', 'B', 1), { A: ['2'], B: ['3', '1'] }))
-check('move into an empty list', eq(L.movePlacement({ A: ['1'], B: [] }, '1', 'B', 0), { A: [], B: ['1'] }))
-check('moveOrder', eq(L.moveOrder(['a', 'b', 'c'], 'c', 0), ['c', 'a', 'b']))
+// A slot counts the items of the list left once the moved ones are out.
+check('move down within a list', eq(L.movePlacement({ A: ['1', '2', '3'] }, ['1'], 'A', 2), { A: ['2', '3', '1'] }))
+check('move up within a list', eq(L.movePlacement({ A: ['1', '2', '3'] }, ['3'], 'A', 0), { A: ['3', '1', '2'] }))
+check('the slot it came from changes nothing', eq(L.movePlacement({ A: ['1', '2', '3'] }, ['2'], 'A', 1), { A: ['1', '2', '3'] }))
+check('move across lists', eq(L.movePlacement({ A: ['1', '2'], B: ['3'] }, ['1'], 'B', 1), { A: ['2'], B: ['3', '1'] }))
+check('move into an empty list', eq(L.movePlacement({ A: ['1'], B: [] }, ['1'], 'B', 0), { A: [], B: ['1'] }))
+check('several ids keep their order', eq(L.movePlacement({ A: ['1', '2', '3', '4'] }, ['4', '2'], 'A', 1), { A: ['1', '4', '2', '3'] }))
+check('moving nothing returns the placement', (() => { const p = { A: ['1'] }; return L.movePlacement(p, [], 'B', 0) === p })())
+check('a slot skips items that are not shown', eq(L.movePlacement({ A: ['1', 'h', '2'] }, ['3'], 'A', 1, id => id !== 'h'), { A: ['1', 'h', '3', '2'] }))
+check('a slot past the shown items goes last', eq(L.movePlacement({ A: ['1', 'h'] }, ['3'], 'A', 1, id => id !== 'h'), { A: ['1', 'h', '3'] }))
+check('moveOrder', eq(L.moveOrder(['a', 'b', 'c'], ['c'], 0), ['c', 'a', 'b']))
+check('moveOrder with several', eq(L.moveOrder(['a', 'b', 'c', 'd'], ['a', 'c'], 2), ['b', 'd', 'a', 'c']))
+
+// ----- Headers moved on their own -----
+const hb = { A: ['b1'], B: [], C: ['b2'] }
+const hr = { A: ['r1', 'r2'], B: ['r3'], C: [] }
+const shownAll = () => true
+check('flat order is header, blocks, rows per group', eq(L.flattenSections(['A', 'B'], hb, hr).map(e => e.id), ['A', 'b1', 'r1', 'r2', 'B', 'r3']))
+{
+  // Moving B between r1 and r2 splits A: r2 now belongs to B along with r3.
+  const res = L.moveHeaders(['A', 'B', 'C'], hb, hr, ['B'], 3, shownAll)
+  check('a header dropped inside a group splits it', eq(res.sections, ['A', 'B', 'C']) && eq(res.rows, { A: ['r1'], B: ['r2', 'r3'], C: [] }) && eq(res.blocks, { A: ['b1'], B: [], C: ['b2'] }))
+}
+{
+  const res = L.moveHeaders(['A', 'B', 'C'], hb, hr, ['B'], 0, shownAll)
+  check('a header moved to the top takes the first slot', eq(res.sections, ['B', 'A', 'C']) && eq(res.rows.B, []) && eq(res.rows.A, ['r1', 'r2', 'r3']))
+}
+{
+  const res = L.moveHeaders(['A', 'B', 'C'], hb, hr, ['A'], 2, shownAll)
+  check('the first header moved down is joined by what was ahead of it', eq(res.sections, ['A', 'B', 'C']) && eq(res.blocks.A, ['b1']) && eq(res.rows.A, ['r1', 'r2']))
+}
+{
+  const res = L.moveHeaders(['A', 'B', 'C'], hb, hr, ['A', 'C'], 99, shownAll)
+  // What was ahead of the remaining first header joins it.
+  check('several headers move together to the end', eq(res.sections, ['B', 'A', 'C']) && eq(res.rows.B, ['r1', 'r2', 'r3']) && eq(res.blocks.B, ['b1', 'b2']) && eq(res.rows.A, []) && eq(res.rows.C, []))
+}
+{
+  // r2 is not shown: slot 3 is the one before r3, so r2 stays in A.
+  const res = L.moveHeaders(['A', 'B'], { A: ['b1'], B: [] }, { A: ['r1', 'r2'], B: ['r3'] }, ['B'], 3, e => e.id !== 'r2')
+  check('a header slot skips entries that are not shown', eq(res.rows, { A: ['r1', 'r2'], B: ['r3'] }) && eq(res.sections, ['A', 'B']))
+}
+
+// ----- Groups -----
+{
+  const base = { sections: ['a', 'b'], blocks: {}, rows: { a: ['x'] } }
+  const added = L.insertGroup(base, 'custom:1', { title: 'New Group', icon: 'Layers' }, 'b')
+  check('a group is inserted before another', eq(added.sections, ['a', 'custom:1', 'b']) && added.groups['custom:1'].title === 'New Group')
+  check('a group with no target goes last', eq(L.insertGroup(base, 'custom:1', { title: 'N' }, null).sections, ['a', 'b', 'custom:1']))
+  check('custom keys are recognised', L.isCustomGroupKey(L.newGroupKey()) && !L.isCustomGroupKey('Model'))
+  const renamed = L.setGroupMeta(base, 'a', { title: 'Mine', icon: 'Cpu' })
+  check('a title and icon are stored per group', renamed.groups.a.title === 'Mine' && renamed.groups.a.icon === 'Cpu')
+  const reset = L.setGroupMeta(renamed, 'a', { title: '', icon: '' })
+  check('clearing both drops the entry of an editor group', reset.groups.a === undefined)
+  check('a custom group keeps its entry', L.setGroupMeta(added, 'custom:1', { icon: '' }).groups['custom:1'].title === 'New Group')
+  const removed = L.removeGroup(L.insertGroup({ ...base, rows: { a: ['x'], 'custom:1': ['y'] } }, 'custom:1', { title: 'N' }, null), 'custom:1')
+  check('removing a group drops its lists and entry', !removed.sections.includes('custom:1') && !('custom:1' in removed.rows) && !('custom:1' in removed.groups))
+  check('a layout with only group titles is not empty', !L.isEmptyLayout({ sections: [], blocks: {}, rows: {}, groups: { a: { title: 'x' } } }))
+  check('stored group metadata is read', L.parseParamLayout('{"sections":[],"blocks":{},"rows":{},"groups":{"a":{"title":"x"}}}')?.groups.a.title === 'x')
+  check('malformed group metadata is ignored', L.parseParamLayout('{"sections":["a"],"blocks":{},"rows":{},"groups":{"a":{"title":3}}}') === null)
+}
 
 // ----- Stored layout shape -----
 check('empty layout is empty', L.isEmptyLayout(L.EMPTY_LAYOUT))
@@ -90,7 +144,7 @@ check('the earlier single layout becomes a llama.cpp preset in use',
 // ----- Wiring -----
 const read = rel => fs.readFileSync(path.join(root, rel), 'utf8')
 const sections = read('src/renderer/src/components/LayoutSections.tsx')
-check('the shared renderer arranges groups, blocks and rows', /arrangeOrder\(/.test(sections) && /arrangePlacement\(/.test(sections) && sections.includes('data-layout-kind="section"') && sections.includes('data-layout-kind="block"') && sections.includes('data-layout-kind="row"'))
+check('the shared renderer arranges groups, blocks and rows', /arrangeOrder\(/.test(sections) && /arrangePlacement\(/.test(sections) && sections.includes('data-layout-section=') && sections.includes('data-layout-kind="header"') && sections.includes('data-layout-kind="block"') && sections.includes('data-layout-kind="row"'))
 check('llama.cpp editor renders through it', /<LayoutSections/.test(read('src/renderer/src/components/CmdParamsEditor.tsx')))
 check('Strata editor renders through it', /<LayoutSections/.test(read('src/renderer/src/components/EngineParamsEditor.tsx')))
 

@@ -2672,6 +2672,10 @@ export default function CmdParamsEditor({ templateId, args, onChange, modelPathF
   }
   const shownBlocks = (blocks: ParamBlock[]) =>
     blocks.filter(b => b.node != null && b.node !== false && (!query || b.keywords.includes(query)))
+  // Edit Layout lists every parameter so its place is kept, but only shows the ones in the current view.
+  const hiddenRows = layoutEditing && paramViewMode !== 'full'
+    ? new Set(paramSections.flatMap(sec => sec.rows).filter(r => !COMMON_VISIBLE.has(r.arg)).map(r => r.arg))
+    : undefined
   const layoutSections: LayoutSection<CommandParam>[] = [
     ...paramSections.map(sec => ({
       key: sec.key,
@@ -2695,6 +2699,7 @@ export default function CmdParamsEditor({ templateId, args, onChange, modelPathF
         engine="llama.cpp"
         sections={layoutSections}
         editing={layoutEditing}
+        hiddenRows={hiddenRows}
         dimmed={disabled}
         renderRow={renderCommand}
         className="params-scroll-area"
