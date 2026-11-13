@@ -198,7 +198,7 @@ cd (X:\your\chosen\destination\XLM-Studio) && npm install && npm run build && np
 
 - **Core:** upgraded visuals, Model Hub, Download Manager, template-based execution, version and engine management, visual command editor.
 - **Deep control:** VRAM/RAM budget calculator, five-tier speculative decoding management and control, TurboQuant and BeeLlama support (KVarN and low-bit KV types, SWA overrides, DFlash depth controller), mmproj control and management, unified KV cache, presets, YaRN scaling automatic control, command preview, monitoring, overrides.
-- **Automation:** MCP control over XLM Studio. Persistent KV cache for quick conversation resume after switching or restarting templates (hybrid-model support depends on the fork).
+- **Automation:** MCP control over XLM Studio. Harness Manager: keeps an XLM Studio provider in coding harnesses (DSH, OpenCode, Pi, Pithagoras) and updates them. Persistent KV cache for quick conversation resume after switching or restarting templates (hybrid-model support depends on the fork).
 - **Expansion:** Alternative engines: Strata support (v2.2.0), the first model-specific engine.
 
 **Planned**

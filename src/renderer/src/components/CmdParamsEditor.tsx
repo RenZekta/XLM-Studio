@@ -1466,6 +1466,8 @@ export default function CmdParamsEditor({ templateId, args, onChange, modelPathF
     runtimeArgs['--port'] = previewEffectivePort
     if (serverOverrides.host !== null) runtimeArgs['--host'] = serverOverrides.host
     if (serverOverrides.apiKey !== null) runtimeArgs['--api-key'] = serverOverrides.apiKey
+    // The server answers to the Template's name (the main process adds --alias at launch).
+    if (!runtimeArgs['--alias'] && !runtimeArgs['-a'] && card?.template.name) runtimeArgs['--alias'] = card.template.name
     // Same rule as the real launch (ModelCard.tsx / mcpControl.ts): only with
     // a projector in use, and never --mmproj-offload (GPU offload is the default).
     if ((runtimeArgs['--mmproj'] || runtimeArgs['-mm']) && mmprojOffloadToRam) runtimeArgs['--no-mmproj-offload'] = true

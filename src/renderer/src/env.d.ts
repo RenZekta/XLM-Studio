@@ -4,6 +4,7 @@ import type {
   CpuInfo, SpeculationMode, KvCacheCheckpointSettings, RedundantCheckpoint, CheckpointMode, StrataSettings, EngineInstallMode
 } from '../../shared/types'
 import type { EngineId } from '../../shared/engines'
+import type { HarnessSettings, HarnessState } from '../../shared/harnesses'
 
 interface ModelDownloadInfo {
   id: string
@@ -208,6 +209,20 @@ interface LlamaCppApi {
   addSamplingPreset: (name: string, values: any) => Promise<any>
   deleteSamplingPreset: (id: string) => Promise<{ success: boolean }>
   starSamplingPreset: (id: string) => Promise<{ success: boolean }>
+
+  // Harness Manager
+  getHarnessState: () => Promise<HarnessState>
+  setHarnessSettings: (patch: Partial<HarnessSettings>) => Promise<{ success: boolean }>
+  syncHarnessesNow: () => Promise<HarnessState>
+  checkHarnessUpdates: () => Promise<HarnessState>
+  installHarness: (id: string) => Promise<{ success: boolean; error?: string }>
+  rebuildHarness: (id: string) => Promise<{ success: boolean; error?: string }>
+  removeHarness: (id: string) => Promise<{ success: boolean; error?: string }>
+  updateHarness: (id: string) => Promise<{ success: boolean; error?: string }>
+  updateAllHarnesses: () => Promise<HarnessState>
+  openHarnessConfig: (id: string) => Promise<void>
+  onHarnessesChanged: (cb: () => void) => void
+  removeHarnessesChangedListener: () => void
 
   // Silent backend check
   onBackendsCheckedSilent: (cb: (data: any) => void) => void

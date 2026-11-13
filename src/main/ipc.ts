@@ -27,6 +27,8 @@ import { initMcpLayer, registerMcpHandlers } from './mcpServer'
 import { toolTemplateAction, launchCommandForId } from './mcpControl'
 import { randomBytes } from 'crypto'
 import { engineOf, type EngineId } from '../shared/engines'
+import { migrateHarnessSettings, type HarnessSettings } from '../shared/harnesses'
+import { initHarnessManager } from './harnesses'
 import { assetMatchesHost } from '../shared/assetPlatform'
 import { explainExitCode } from '../shared/exitCodes'
 import { mmprojQuant, sortMmprojs } from '../shared/mmprojRank'
@@ -254,6 +256,8 @@ interface AppSettings {
   trackedBackends: TrackedBackend[]
   modelDefaults?: { autoFitEnabled: boolean; autoFitContextLength: number; guardrailMode: string; customMaxSizeGB: number; useCurrentMemState?: boolean; moeOffloadStrategy?: 'offload' | 'max'; autoFitUse2xIncrements?: boolean; autoFitYarnAutoScale?: boolean; autoEnableMmproj?: boolean; mmprojOffloadToRam?: boolean; cpuThreadsOverrideEnabled?: boolean; cpuThreadsOverridePercent?: number; parallelOverrideEnabled?: boolean; parallelInferenceMode?: 'unified' | 'separate'; parallelOverrideValue?: number; parallelOverrideValueDense?: number; parallelOverrideValueMoe?: number; perfMaxSessions?: number; autoOpenChatUI?: boolean }
   baseUrlOverride?: BaseUrlOverride
+  // Harness Manager: coding-agent harnesses that get an XLM Studio provider.
+  harnesses?: HarnessSettings
   samplingPresets?: any[]
   starredPresetId?: string
   mcp?: McpSettings
@@ -381,7 +385,8 @@ const DEFAULT_SETTINGS: AppSettings = {
   },
   launchOnStartup: false,
   autostartMainTemplates: false,
-  kvCacheCheckpoints: { ...DEFAULT_KV_CACHE_CHECKPOINTS }
+  kvCacheCheckpoints: { ...DEFAULT_KV_CACHE_CHECKPOINTS },
+  harnesses: migrateHarnessSettings(null)
 }
 
 function migrateStrataSettings(raw: any): StrataSettings {
@@ -526,14 +531,19 @@ async function loadSettings(): Promise<AppSettings> {
       mcp: migrateMcpSettings(data.mcp),
       launchOnStartup: !!data.launchOnStartup,
       autostartMainTemplates: !!data.autostartMainTemplates,
-      kvCacheCheckpoints: migrateKvCacheCheckpoints(data.kvCacheCheckpoints)
+      kvCacheCheckpoints: migrateKvCacheCheckpoints(data.kvCacheCheckpoints),
+      harnesses: migrateHarnessSettings(data.harnesses)
     }
   } catch {
     return { ...DEFAULT_SETTINGS }
   }
 }
+// Set once the harness manager exists; Settings changes (the Base URL
+// Override, AutoFit) can change what it writes, so every save nudges it.
+let harnessSync: (() => void) | null = null
 async function saveSettings(s: AppSettings): Promise<void> {
   await fsPromises.writeFile(SETTINGS_PATH, JSON.stringify(s, null, 2))
+  harnessSync?.()
 }
 
 // Electron's login-item registration is OS-level (registry key / plist /
@@ -3311,6 +3321,10 @@ export function registerIpcHandlers(): void {
     // args. Doesn't change behavior other than exposing the /metrics
     // endpoint — safe to always add.
     if (!isStrata && !finalArgs.includes('--metrics')) finalArgs.push('--metrics')
+    // The server answers to the Template's name, so a coding harness (see
+    // harnesses.ts) and the MCP tools address the same id. An explicit --alias
+    // in the Template wins.
+    if (!isStrata && opts.name && !finalArgs.includes('--alias') && !finalArgs.includes('-a')) finalArgs.push('--alias', opts.name)
     // Force-enable --slot-save-path when checkpointing is active, the same
     // unconditional way as --metrics above, so the /slots save/restore
     // endpoints exist regardless of the template's own args. Skipped for
@@ -6064,6 +6078,27 @@ export function registerIpcHandlers(): void {
       await autoUpdate
     } catch {}
   })
+
+  // ----- Harness Manager -----
+  const harnessManager = initHarnessManager({
+    loadSettings,
+    saveSettings,
+    listTemplates: listTemplatesImpl,
+    nativeContext: async modelPath => {
+      // The header alone: the Strata verdict that get-gguf-metadata adds isn't needed.
+      const meta = await extractGgufMetadataImpl(modelPath)
+      const n = Number(meta?.contextLength)
+      return n > 0 ? n : null
+    },
+    templatesDir: TEMPLATES_DIR,
+    log: ({ id, name, line, app }) => {
+      BrowserWindow.getAllWindows().forEach(win => {
+        if (!win.isDestroyed()) win.webContents.send('server-log', { id, name, stream: app ? 'app' : 'stdout', line, ts: Date.now() })
+      })
+    }
+  })
+  harnessSync = () => harnessManager.scheduleSync()
+  void harnessManager.startup().catch(err => console.warn('[harnesses] startup failed:', err))
 
   // ----- MCP server / control API / skill layer -----
   registerMcpHandlers()

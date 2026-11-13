@@ -1,7 +1,7 @@
 {
   "name": "xlm-studio",
   "desktopName": "xlm-studio.desktop",
-  "version": "2.2.0",
+  "version": "2.3.0",
   "description": "XLM Studio — a GUI for llama.cpp (fork of Hexllama)",
   "main": "out/main/index.js",
   "homepage": "./",
@@ -18,9 +18,11 @@
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.32.1",
     "electron-updater": "^6.8.9",
+    "jsonc-parser": "^3.3.1",
     "pidusage": "^4.0.1",
     "recharts": "^3.10.1",
     "systeminformation": "^5.33.15",
+    "yaml": "^2.9.1",
     "yauzl": "^3.4.0",
     "zod": "^4.6.6",
     "zustand": "^5.0.15"

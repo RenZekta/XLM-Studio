@@ -5,6 +5,7 @@ import type {
   TrackedBackendRelease, ThemePref, ReleaseInfo, CpuInfo, SpecDetectionResult, StrataSettings, EngineInstallMode
 } from '../shared/types'
 import type { EngineId } from '../shared/engines'
+import type { HarnessSettings, HarnessState } from '../shared/harnesses'
 
 const api = {
   // ----- Models -----
@@ -240,6 +241,23 @@ const api = {
   addSamplingPreset: (name: string, values: any) => ipcRenderer.invoke('add-sampling-preset', name, values) as Promise<any>,
   deleteSamplingPreset: (id: string) => ipcRenderer.invoke('delete-sampling-preset', id) as Promise<{ success: boolean }>,
   starSamplingPreset: (id: string) => ipcRenderer.invoke('star-sampling-preset', id) as Promise<{ success: boolean }>,
+
+  // ----- Harness Manager -----
+  getHarnessState: () => ipcRenderer.invoke('harness-get-state') as Promise<HarnessState>,
+  setHarnessSettings: (patch: Partial<HarnessSettings>) => ipcRenderer.invoke('harness-set-settings', patch) as Promise<{ success: boolean }>,
+  syncHarnessesNow: () => ipcRenderer.invoke('harness-sync-now') as Promise<HarnessState>,
+  checkHarnessUpdates: () => ipcRenderer.invoke('harness-check-updates') as Promise<HarnessState>,
+  installHarness: (id: string) => ipcRenderer.invoke('harness-install', id) as Promise<{ success: boolean; error?: string }>,
+  rebuildHarness: (id: string) => ipcRenderer.invoke('harness-rebuild', id) as Promise<{ success: boolean; error?: string }>,
+  removeHarness: (id: string) => ipcRenderer.invoke('harness-remove', id) as Promise<{ success: boolean; error?: string }>,
+  updateHarness: (id: string) => ipcRenderer.invoke('harness-update', id) as Promise<{ success: boolean; error?: string }>,
+  updateAllHarnesses: () => ipcRenderer.invoke('harness-update-all') as Promise<HarnessState>,
+  openHarnessConfig: (id: string) => ipcRenderer.invoke('harness-open-config', id) as Promise<void>,
+  onHarnessesChanged: (cb: () => void) => {
+    ipcRenderer.removeAllListeners('harnesses-changed')
+    ipcRenderer.on('harnesses-changed', () => cb())
+  },
+  removeHarnessesChangedListener: () => { ipcRenderer.removeAllListeners('harnesses-changed') },
 
   // ----- Silent backend check listener -----
   onBackendsCheckedSilent: (cb: (data: any) => void) => {

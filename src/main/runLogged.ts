@@ -37,6 +37,8 @@ export function run(
   cmd: string, args: string[], hooks: RunHooks,
   opts: {
     cwd?: string; env?: NodeJS.ProcessEnv; onLine?: (line: string) => void; quiet?: boolean
+    // For the .cmd shims npm creates on Windows, which only a shell can start.
+    shell?: boolean
     // For a command that can go quiet for minutes (an installer): when it has
     // printed nothing for this long, a line says it is still running, with
     // whatever `describe` can tell about what it is doing.
@@ -50,6 +52,7 @@ export function run(
       cwd: opts.cwd,
       env: childEnv(opts.env),
       windowsHide: true,
+      shell: opts.shell,
       detached: process.platform !== 'win32',
       stdio: ['ignore', 'pipe', 'pipe']
     })

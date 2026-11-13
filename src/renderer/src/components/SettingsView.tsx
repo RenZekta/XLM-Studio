@@ -9,6 +9,7 @@ import CommandsEditor from './CommandsEditor'
 import ExternalFolderList from './ExternalFolderList'
 import McpSettingsSection from './McpSettingsSection'
 import LaunchSettingsSection from './LaunchSettingsSection'
+import HarnessManagerSection from './HarnessManagerSection'
 import { changeTheme } from '../hooks/useTheme'
 import { formatBytes } from '../utils/format'
 import SegmentedToggle from './SegmentedToggle'
@@ -1345,6 +1346,7 @@ export default function SettingsView() {
         </div>
       </div>
 
+      <HarnessManagerSection />
       <McpSettingsSection />
       <LaunchSettingsSection />
     </div>
