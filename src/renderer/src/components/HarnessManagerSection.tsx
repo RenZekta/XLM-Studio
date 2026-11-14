@@ -191,7 +191,10 @@ export default function HarnessManagerSection() {
               <Toggle checked={s.syncOn} onChange={on => toggleHarness(s.id, on)} />
             </div>
             {s.syncOn && s.sync && !syncErr && (
-              <div className="tracker-release">Provider written {ago(s.sync.at)}.</div>
+              <div className="tracker-release">Provider written {ago(s.sync.at)}.{s.mcp ? ' MCP server added.' : ''}{s.id === 'goose' ? ' Restart Goose to load it.' : ''}</div>
+            )}
+            {s.syncOn && s.mcp === false && (
+              <div className="tracker-release">The MCP server is not added: it is off or serves as a skill (Settings, MCP Server).</div>
             )}
           </>
         )}

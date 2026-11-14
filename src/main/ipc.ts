@@ -6084,11 +6084,11 @@ export function registerIpcHandlers(): void {
     loadSettings,
     saveSettings,
     listTemplates: listTemplatesImpl,
-    nativeContext: async modelPath => {
+    modelInfo: async modelPath => {
       // The header alone: the Strata verdict that get-gguf-metadata adds isn't needed.
       const meta = await extractGgufMetadataImpl(modelPath)
       const n = Number(meta?.contextLength)
-      return n > 0 ? n : null
+      return { context: n > 0 ? n : null, chatTemplate: typeof meta?.chatTemplate === 'string' ? meta.chatTemplate : null }
     },
     templatesDir: TEMPLATES_DIR,
     log: ({ id, name, line, app }) => {

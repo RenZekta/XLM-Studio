@@ -5,7 +5,7 @@ import { STRATA_NATIVE_CONTEXT } from './strata'
 // (which templates become which provider, and how each harness's config file
 // is edited) live here so they can be verified without Electron.
 
-export type HarnessId = 'dsh' | 'pi' | 'pithagoras' | 'opencode'
+export type HarnessId = 'dsh' | 'pi' | 'pithagoras' | 'opencode' | 'kimi' | 'qwen' | 'crush' | 'goose'
 
 export interface HarnessDef {
   id: HarnessId
@@ -15,6 +15,8 @@ export interface HarnessDef {
   npmPackage?: string
   // Earlier package names an existing install may still carry.
   legacyNpmPackages?: string[]
+  // GitHub repository whose releases carry the version, where npm doesn't.
+  githubRepo?: string
   binaries: string[]
 }
 
@@ -46,11 +48,47 @@ export const HARNESSES: Record<HarnessId, HarnessDef> = {
     npmPackage: '@earendil-works/pi-coding-agent',
     legacyNpmPackages: ['@mariozechner/pi-coding-agent'],
     binaries: ['pi']
+  },
+  kimi: {
+    id: 'kimi',
+    label: 'Kimi Code',
+    url: 'https://github.com/MoonshotAI/kimi-code',
+    npmPackage: '@moonshot-ai/kimi-code',
+    binaries: ['kimi']
+  },
+  qwen: {
+    id: 'qwen',
+    label: 'Qwen Code',
+    url: 'https://github.com/QwenLM/qwen-code',
+    npmPackage: '@qwen-code/qwen-code',
+    binaries: ['qwen']
+  },
+  crush: {
+    id: 'crush',
+    label: 'Crush',
+    url: 'https://github.com/charmbracelet/crush',
+    npmPackage: '@charmland/crush',
+    binaries: ['crush']
+  },
+  goose: {
+    id: 'goose',
+    label: 'Goose',
+    url: 'https://github.com/aaif-goose/goose',
+    githubRepo: 'aaif-goose/goose',
+    binaries: ['goose']
   }
 }
 
 // Shown order: the harnesses XLM Studio supports best come first.
-export const HARNESS_ORDER: HarnessId[] = ['dsh', 'opencode', 'pi', 'pithagoras']
+export const HARNESS_ORDER: HarnessId[] = ['dsh', 'opencode', 'pi', 'kimi', 'qwen', 'crush', 'goose', 'pithagoras']
+
+// The harnesses with a live MCP client, which get XLM Studio's MCP server added.
+// The others (pi, Pithagoras) have none and use the skill instead.
+export const MCP_HARNESSES: HarnessId[] = ['dsh', 'opencode', 'kimi', 'qwen', 'crush', 'goose']
+
+export function hasMcpClient(id: HarnessId): boolean {
+  return MCP_HARNESSES.includes(id)
+}
 
 export function isHarnessId(v: unknown): v is HarnessId {
   return typeof v === 'string' && Object.prototype.hasOwnProperty.call(HARNESSES, v)
@@ -64,7 +102,7 @@ export interface HarnessSettings {
   // Harnesses that keep an "XLM Studio" provider.
   syncOn: HarnessId[]
   autoUpdate: boolean
-  // Config folder overrides (DSH_HOME, the pi agent folder, the opencode config folder).
+  // Config folder overrides (DSH_HOME, the pi agent folder, the opencode, Kimi, Qwen, Crush and Goose config folders).
   configDirs: Partial<Record<HarnessId, string>>
   // Pithagoras runs in a container built from a git clone: the folder of that
   // clone (found from the container when empty), where the portal listens, and
@@ -96,9 +134,9 @@ export function migrateHarnessSettings(raw: any): HarnessSettings {
   let syncOn: HarnessId[] = []
   if (Array.isArray(raw?.syncOn)) syncOn = raw.syncOn.filter(isHarnessId)
   else if (raw?.syncEnabled) {
-    // The master switch this replaced: on meant every harness except the ones turned off.
+    // The master switch this replaced: on meant the first four harnesses except the ones turned off.
     const off: unknown[] = Array.isArray(raw.syncOff) ? raw.syncOff : []
-    syncOn = HARNESS_ORDER.filter(id => !off.includes(id))
+    syncOn = HARNESS_ORDER.filter(id => ['dsh', 'opencode', 'pi', 'pithagoras'].includes(id) && !off.includes(id))
   }
   return {
     syncOn: HARNESS_ORDER.filter(id => syncOn.includes(id)),
@@ -166,6 +204,16 @@ export const XLM_PROVIDER_PREFIX = 'xlm-studio'
 // ignores whatever arrives), so an endpoint without one gets this.
 export const PLACEHOLDER_API_KEY = 'xlm-studio'
 
+// XLM Studio's own MCP server, as a harness is told about it. Only harnesses
+// with a live MCP client get it (MCP_HARNESSES); the others use the skill.
+export interface HarnessMcp {
+  url: string
+  token: string
+}
+
+// The name XLM Studio's MCP entry carries in every harness config.
+export const MCP_ENTRY_NAME = 'xlm-studio'
+
 export interface HarnessModel {
   // What the server reports and the harness sends: the template's name.
   id: string
@@ -174,6 +222,8 @@ export interface HarnessModel {
   contextWindow: number
   maxTokens: number
   vision: boolean
+  // The model thinks before it answers (the harness shows and handles reasoning).
+  reasoning: boolean
 }
 
 export interface HarnessProvider {
@@ -189,6 +239,8 @@ export interface ProviderBuildInput {
   autoFit: { enabled: boolean; contextLength: number }
   // The model's trained context from its GGUF header, when known.
   nativeContext: (modelPath: string) => number | null
+  // The model's chat template from its GGUF header, when known.
+  chatTemplate: (modelPath: string) => string | null
 }
 
 export interface SkippedTemplate {
@@ -240,6 +292,31 @@ export function hasVision(t: Pick<Template, 'args' | 'engine'>): boolean {
   return !!(str(t.args?.['--mmproj']) || str(t.args?.['-mm']))
 }
 
+const THINKING_TEMPLATE = /<think>|<\/think>|enable_thinking|reasoning_effort|<\|channel\|>/i
+
+// Whether a template runs a reasoning model. The launch flags decide when they
+// say so (--reasoning, a zero --reasoning-budget, enable_thinking off in
+// --chat-template-kwargs); otherwise the chat template tells: thinking tags or
+// a thinking switch in it mean a model that reasons.
+export function templateReasoning(t: Pick<Template, 'modelPath' | 'args'>, chatTemplate: (p: string) => string | null): boolean {
+  const args = t.args || {}
+  const mode = str(args['--reasoning'] ?? args['-rea']).toLowerCase()
+  if (mode === 'off') return false
+  if (mode === 'on') return true
+  const budget = args['--reasoning-budget']
+  if (budget !== undefined && budget !== '' && Number(budget) === 0) return false
+  const kwargs = args['--chat-template-kwargs']
+  if (kwargs) {
+    try {
+      const k = typeof kwargs === 'string' ? JSON.parse(kwargs) : kwargs
+      if (k?.enable_thinking === false || k?.thinking === false) return false
+    } catch { /* not JSON: the template decides */ }
+  }
+  const own = str(args['--chat-template'])
+  const text = /[{\n]/.test(own) ? own : t.modelPath ? chatTemplate(t.modelPath) : null
+  return !!text && THINKING_TEMPLATE.test(text)
+}
+
 // Templates that follow the Base URL Override share one provider; every other
 // endpoint (own port or key) gets a provider of its own.
 export function buildHarnessProviders(templates: Template[], input: ProviderBuildInput): { providers: HarnessProvider[]; skipped: SkippedTemplate[] } {
@@ -262,7 +339,7 @@ export function buildHarnessProviders(templates: Template[], input: ProviderBuil
     let g = groups.get(key)
     if (!g) { g = { main: followsOverride, port, apiKey, models: [] }; groups.set(key, g) }
     const ctx = templateContext(t, input.autoFit, input.nativeContext)
-    g.models.push({ id, name: str(t.name) || id, contextWindow: ctx, maxTokens: ctx, vision: hasVision(t) })
+    g.models.push({ id, name: str(t.name) || id, contextWindow: ctx, maxTokens: ctx, vision: hasVision(t), reasoning: templateReasoning(t, input.chatTemplate) })
   }
 
   const providers: HarnessProvider[] = []
@@ -316,6 +393,8 @@ export interface HarnessStatus {
   canRebuild: boolean
   // Its install, update or build wrote to the Logs tab.
   hasLog: boolean
+  // XLM Studio's MCP server is in its config; null where it has no MCP client.
+  mcp: boolean | null
   // What XLM Studio is doing to it right now.
   busy: 'install' | 'update' | 'remove' | 'rebuild' | null
   note: string | null

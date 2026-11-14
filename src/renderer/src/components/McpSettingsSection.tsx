@@ -74,7 +74,7 @@ export default function McpSettingsSection() {
               </label>
             </div>
             <p style={{ fontSize: 12, color: 'var(--text-muted)', lineHeight: 1.5 }}>
-              When ON, the live MCP protocol server is not started — instead, a skill (SKILL.md + a small CLI script) is written to <code>~/.agents/skills/xlm-studio</code> for skill-based agents (DSH, Claude Code, Codex, OpenCode, etc.) to use. The underlying control API keeps running either way, so the skill's script still needs XLM Studio open with MCP Server enabled.
+              When ON, the live MCP protocol server is not started — instead, a skill (SKILL.md + a small CLI script) is written to <code>~/.agents/skills/xlm-studio</code> for skill-based agents (DSH, Claude Code, Codex, OpenCode, etc.) to use. The underlying control API keeps running either way, so the skill's script still needs XLM Studio open with MCP Server enabled. Harnesses managed in Settings, Harness Manager get the MCP server added while it runs, and have it removed again in skill mode.
             </p>
             <div style={{ display: 'flex', gap: 8 }}>
               <button

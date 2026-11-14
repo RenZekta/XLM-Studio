@@ -2,16 +2,19 @@ import { execFile } from 'child_process'
 import { watch, promises as fsp } from 'fs'
 import { homedir } from 'os'
 import { randomBytes } from 'crypto'
-import { delimiter, dirname, join } from 'path'
+import { delimiter, dirname, isAbsolute, join } from 'path'
 import net from 'net'
 import { run as runLogged } from './runLogged'
 import { buildLogId } from '../shared/sourceBuild'
 import { BrowserWindow, ipcMain, shell } from 'electron'
 import {
-  HARNESS_ORDER, HARNESSES, PLACEHOLDER_API_KEY, XLM_PROVIDER_PREFIX, buildHarnessProviders, templateContext, compareVersions, extractVersion, isHarnessId, migrateHarnessSettings,
-  type HarnessId, type HarnessProvider, type HarnessSettings, type HarnessState, type HarnessStatus, type HarnessSyncInfo, type SkippedTemplate
+  HARNESS_ORDER, HARNESSES, PLACEHOLDER_API_KEY, XLM_PROVIDER_PREFIX, buildHarnessProviders, templateContext, templateReasoning, compareVersions, extractVersion, hasMcpClient, isHarnessId, migrateHarnessSettings,
+  type HarnessId, type HarnessMcp, type HarnessProvider, type HarnessSettings, type HarnessState, type HarnessStatus, type HarnessSyncInfo, type SkippedTemplate
 } from '../shared/harnesses'
-import { HarnessConfigError, envHasValue, setEnvKey, syncDshPatch, syncOpencodeConfig, syncPiModels, type SyncResult } from '../shared/harnessConfig'
+import {
+  envHasValue, planGooseProviders, setEnvKey, syncCrushConfig, syncDshPatch, syncGooseConfig, syncKimiConfig, syncKimiMcp, syncOpencodeConfig, syncPiModels, syncQwenSettings,
+  type SyncResult
+} from '../shared/harnessConfig'
 import type { BaseUrlOverride, Template } from '../shared/types'
 import { ensureToolEnv } from './toolEnv'
 import { getGithubToken } from './githubToken'
@@ -21,6 +24,7 @@ import { getGithubToken } from './githubToken'
 
 interface SettingsLike {
   harnesses?: HarnessSettings
+  mcp?: { enabled?: boolean; skillMode?: boolean; port?: number; token?: string }
   baseUrlOverride?: BaseUrlOverride
   modelDefaults?: { autoFitEnabled?: boolean; autoFitContextLength?: number }
 }
@@ -29,8 +33,8 @@ export interface HarnessDeps {
   loadSettings: () => Promise<SettingsLike & Record<string, any>>
   saveSettings: (s: any) => Promise<void>
   listTemplates: () => Record<string, any>[]
-  // The model's trained context from its GGUF header (cached by the caller).
-  nativeContext: (modelPath: string) => Promise<number | null>
+  // What the model's GGUF header says (cached by the caller): the trained context and the chat template.
+  modelInfo: (modelPath: string) => Promise<{ context: number | null; chatTemplate: string | null }>
   templatesDir: string
   // One line for the Logs tab: id and name pick the entry in its source list.
   log: (entry: { id: string; name: string; line: string; app: boolean }) => void
@@ -38,7 +42,9 @@ export interface HarnessDeps {
 
 const DSH_WEB_PORT = 3080
 const PITHAGORAS_URL = 'http://localhost:4100'
-const OPENCODE_RELEASES = 'https://api.github.com/repos/anomalyco/opencode/releases?per_page=20'
+// Goose has no package: its installer script fetches a release build.
+const GOOSE_INSTALL_SH = 'https://github.com/aaif-goose/goose/releases/download/stable/download_cli.sh'
+const GOOSE_INSTALL_PS1 = 'https://raw.githubusercontent.com/aaif-goose/goose/main/download_cli.ps1'
 
 // ---------------------------------------------------------------------------
 // Process and path helpers
@@ -71,13 +77,13 @@ type Log = (line: string, app?: boolean) => void
 // Like exec, for the actions that take minutes (npm, git clone, a container
 // build): every output line goes to the log as it arrives, and the last ones
 // come back for an error message.
-async function execLogged(log: Log, cmd: string, args: string[], opts: { cwd?: string; shell?: boolean } = {}): Promise<ExecResult> {
+async function execLogged(log: Log, cmd: string, args: string[], opts: { cwd?: string; shell?: boolean; env?: Record<string, string> } = {}): Promise<ExecResult> {
   const lines: string[] = []
   try {
     const code = await runLogged(cmd, args, { log, killTree: async () => undefined, signal: new AbortController().signal }, {
       cwd: opts.cwd,
       shell: opts.shell ?? false,
-      env: { CI: '1' },
+      env: { CI: '1', ...opts.env },
       onLine: line => { lines.push(line); if (lines.length > 100) lines.shift() }
     })
     return { code: code ?? 1, stdout: lines.join('\n'), stderr: '' }
@@ -198,11 +204,17 @@ async function npmLatest(pkg: string): Promise<string | null> {
 // Locating each harness
 // ---------------------------------------------------------------------------
 
+// How a config file is edited: each kind has its own writer.
+type ConfigKind = 'dsh' | 'pi' | 'opencode' | 'kimi' | 'kimi-mcp' | 'qwen' | 'crush' | 'goose' | 'goose-providers'
+
+// A goose-providers entry is a folder with one file per provider.
+interface ConfigFile { path: string; kind: ConfigKind }
+
 interface Located {
   installed: boolean
   binPath: string | null
   // Files the provider is written to.
-  files: string[]
+  files: ConfigFile[]
   // The API it is written through instead (Pithagoras).
   api?: string
   note: string | null
@@ -374,7 +386,9 @@ async function syncPithagoras(s: HarnessSettings, providers: HarnessProvider[]):
         name: m.name,
         contextWindow: m.contextWindow,
         maxTokens: m.maxTokens,
-        input: m.vision ? ['text', 'image'] : ['text']
+        input: m.vision ? ['text', 'image'] : ['text'],
+        // false makes the portal drop the field again.
+        reasoning: m.reasoning
       }))
     }
     const r = await pithCall(s, 'PUT', `/providers/${encodeURIComponent(p.id)}`, body)
@@ -392,6 +406,29 @@ class PithDown extends Error {
 }
 
 let opencodeMajor: number | null = null
+let kimiMajor: number | null = null
+
+// --- Kimi Code, Qwen Code, Crush, Goose: where each keeps its config ---
+
+function kimiDir(s: HarnessSettings): string {
+  return s.configDirs.kimi || process.env.KIMI_CODE_HOME || join(homedir(), '.kimi-code')
+}
+
+function qwenDir(s: HarnessSettings): string {
+  return s.configDirs.qwen || process.env.QWEN_HOME || join(homedir(), '.qwen')
+}
+
+function crushDir(s: HarnessSettings): string {
+  return s.configDirs.crush || process.env.CRUSH_GLOBAL_CONFIG || join(process.env.XDG_CONFIG_HOME || join(homedir(), '.config'), 'crush')
+}
+
+function gooseDir(s: HarnessSettings): string {
+  if (s.configDirs.goose) return s.configDirs.goose
+  const root = process.env.GOOSE_PATH_ROOT
+  if (root && isAbsolute(root)) return join(root, 'config')
+  if (process.platform === 'win32') return join(process.env.APPDATA || join(homedir(), 'AppData', 'Roaming'), 'Block', 'goose', 'config')
+  return join(process.env.XDG_CONFIG_HOME || join(homedir(), '.config'), 'goose')
+}
 
 async function locate(id: HarnessId, s: HarnessSettings): Promise<Located> {
   if (id === 'dsh') {
@@ -402,13 +439,13 @@ async function locate(id: HarnessId, s: HarnessSettings): Promise<Located> {
     return {
       installed: !!bin || names.length > 0,
       binPath: bin,
-      files: names.map(n => join(profiles, n, 'cordis.patch.yml')),
+      files: names.map(n => ({ path: join(profiles, n, 'cordis.patch.yml'), kind: 'dsh' as const })),
       note: !names.length && bin ? 'No profile yet. Start dsh once to create one.' : null
     }
   }
   if (id === 'pi') {
     const bin = await findCommand('pi')
-    return { installed: !!bin, binPath: bin, files: bin ? [join(piAgentDir(s), 'models.json')] : [], note: null }
+    return { installed: !!bin, binPath: bin, files: bin ? [{ path: join(piAgentDir(s), 'models.json'), kind: 'pi' }] : [], note: null }
   }
   if (id === 'pithagoras') {
     const rt = await pithRuntime()
@@ -421,12 +458,42 @@ async function locate(id: HarnessId, s: HarnessSettings): Promise<Located> {
     else if (probe.needsLogin && !s.pithagorasPassword) note = 'Enter the Pithagoras password so XLM Studio can add its provider.'
     return { installed, binPath: dir, files: [], api: installed ? base : undefined, note }
   }
+  if (id === 'kimi') {
+    const bin = await findCommand('kimi')
+    if (!bin) return { installed: false, binPath: null, files: [], note: null }
+    // Kimi CLI 1 kept its config elsewhere and in another layout.
+    if (kimiMajor !== null && kimiMajor < 2) {
+      return { installed: true, binPath: bin, files: [], note: 'An old Kimi CLI is installed. Update to Kimi Code 2 to use the XLM Studio provider.' }
+    }
+    const dir = kimiDir(s)
+    return { installed: true, binPath: bin, files: [{ path: join(dir, 'config.toml'), kind: 'kimi' }, { path: join(dir, 'mcp.json'), kind: 'kimi-mcp' }], note: null }
+  }
+  if (id === 'qwen') {
+    const bin = await findCommand('qwen')
+    return { installed: !!bin, binPath: bin, files: bin ? [{ path: join(qwenDir(s), 'settings.json'), kind: 'qwen' }] : [], note: null }
+  }
+  if (id === 'crush') {
+    const bin = await findCommand('crush')
+    return { installed: !!bin, binPath: bin, files: bin ? [{ path: join(crushDir(s), 'crush.json'), kind: 'crush' }] : [], note: null }
+  }
+  if (id === 'goose') {
+    const bin = await findCommand('goose')
+    const dir = gooseDir(s)
+    const yaml = join(dir, 'config.yaml')
+    const installed = !!bin || await exists(yaml)
+    return {
+      installed,
+      binPath: bin,
+      files: installed ? [{ path: join(dir, 'custom_providers'), kind: 'goose-providers' }, { path: yaml, kind: 'goose' }] : [],
+      note: null
+    }
+  }
   const bin = await findCommand('opencode')
   if (!bin) return { installed: false, binPath: null, files: [], note: null }
   if (opencodeMajor !== null && opencodeMajor < 2) {
     return { installed: true, binPath: bin, files: [], note: 'OpenCode 1 is installed. Update to OpenCode 2 to use the XLM Studio provider.' }
   }
-  return { installed: true, binPath: bin, files: [await opencodeFile(await opencodeConfigDir(s, bin))], note: null }
+  return { installed: true, binPath: bin, files: [{ path: await opencodeFile(await opencodeConfigDir(s, bin)), kind: 'opencode' }], note: null }
 }
 
 // ---------------------------------------------------------------------------
@@ -470,16 +537,26 @@ async function detect(id: HarnessId, s: HarnessSettings): Promise<Detected> {
     return { ...loc, version, source: loc.installed ? 'command' : null, canUpdate: loc.installed, canRebuild: false }
   }
 
+  // Kimi's config layout depends on its version, which is needed before locating it.
+  let cmdVersion: string | null | undefined
+  if (id === 'kimi') {
+    const bin = await findCommand('kimi')
+    cmdVersion = bin ? await commandVersion(bin) : null
+    kimiMajor = cmdVersion ? parseInt(cmdVersion.split('.')[0], 10) : null
+  }
   const loc = await locate(id, s)
   const globals = await npmGlobals()
   const names = [def.npmPackage, ...(def.legacyNpmPackages ?? [])].filter((n): n is string => !!n)
   const npmName = names.find(n => globals[n])
   let version = npmName ? globals[npmName] : null
-  if (!version && loc.binPath) version = await commandVersion(loc.binPath)
-  // pi updates itself whatever installed it; dsh is updated through npm.
-  const canUpdate = id === 'pi' ? loc.installed : !!npmName
+  if (!version && loc.binPath) version = cmdVersion !== undefined ? cmdVersion : await commandVersion(loc.binPath)
+  // pi, Kimi Code and Goose update themselves whatever installed them; the rest go through npm.
+  const selfUpdating = id === 'pi' || id === 'kimi' || id === 'goose'
+  const canUpdate = selfUpdating ? loc.installed && (id !== 'goose' || !!loc.binPath) : !!npmName
   const source = npmName ? 'npm global' : loc.binPath ? 'command' : null
-  const note = loc.note ?? (id === 'dsh' && loc.binPath && !npmName ? 'Not installed with npm: update it yourself.' : null)
+  let note = loc.note
+  if (!note && !selfUpdating && loc.binPath && !npmName) note = 'Not installed with npm: update it yourself.'
+  else if (!note && id === 'goose' && loc.installed && !loc.binPath) note = 'Only its app was found: update it yourself.'
   return { ...loc, version, source, canUpdate, canRebuild: false, note }
 }
 
@@ -487,14 +564,22 @@ interface Latest { version: string | null; available: boolean }
 const latestCache = new Map<HarnessId, Latest>()
 let checkedAt: number | null = null
 
-async function opencodeLatest(): Promise<string | null> {
+// The newest stable release of a GitHub project. The API is rate limited
+// without a token, so the "latest release" redirect is the fallback.
+async function githubLatest(repo: string): Promise<string | null> {
   try {
-    const releases = await fetchJson(OPENCODE_RELEASES)
+    const releases = await fetchJson(`https://api.github.com/repos/${repo}/releases?per_page=20`)
     const versions = (Array.isArray(releases) ? releases : [])
-      .filter((r: any) => !r.prerelease && !r.draft && typeof r.tag_name === 'string')
+      .filter((r: any) => !r.prerelease && !r.draft && typeof r.tag_name === 'string' && !r.tag_name.includes('-'))
       .map((r: any) => extractVersion(r.tag_name))
       .filter((v: string | null): v is string => !!v)
-    return versions.sort((a: string, b: string) => compareVersions(b, a))[0] ?? null
+    const best = versions.sort((a: string, b: string) => compareVersions(b, a))[0]
+    if (best) return best
+  } catch { /* fall through */ }
+  try {
+    const res = await fetch(`https://github.com/${repo}/releases/latest`, { redirect: 'manual', headers: { 'User-Agent': 'XLM-Studio' }, signal: AbortSignal.timeout(15000) })
+    const tag = (res.headers.get('location') || '').split('/tag/')[1] || ''
+    return tag.includes('-') ? null : extractVersion(tag)
   } catch { return null }
 }
 
@@ -512,7 +597,8 @@ async function pithagorasLatest(dir: string): Promise<Latest> {
 async function fetchLatest(id: HarnessId, d: Detected): Promise<Latest> {
   if (!d.installed) return { version: null, available: false }
   if (id === 'pithagoras') return d.binPath && d.canUpdate ? pithagorasLatest(d.binPath) : { version: null, available: false }
-  const version = id === 'opencode' ? await opencodeLatest() : await npmLatest(HARNESSES[id].npmPackage!)
+  const def = HARNESSES[id]
+  const version = id === 'opencode' ? await githubLatest('anomalyco/opencode') : def.githubRepo ? await githubLatest(def.githubRepo) : await npmLatest(def.npmPackage!)
   return { version, available: !!(version && d.version && compareVersions(version, d.version) > 0) }
 }
 
@@ -576,6 +662,18 @@ async function runUpdate(id: HarnessId, d: Detected, s: HarnessSettings, out: Pi
     const r = await execLogged(log, d.binPath!, ['update', '--self'], { shell: WIN_SHELL })
     return r.code === 0 ? null : `pi update failed: ${lastLines(r)}`
   }
+  if (id === 'kimi') {
+    const r = await execLogged(log, d.binPath!, ['upgrade', '-y'], { shell: WIN_SHELL })
+    return r.code === 0 ? null : `kimi upgrade failed: ${lastLines(r)}`
+  }
+  if (id === 'goose') {
+    const r = await execLogged(log, d.binPath!, ['update'], { shell: WIN_SHELL })
+    return r.code === 0 ? null : `goose update failed: ${lastLines(r)}`
+  }
+  if (id === 'qwen' || id === 'crush') {
+    const r = await execLogged(log, 'npm', ['install', '-g', `${HARNESSES[id].npmPackage}@latest`], { shell: WIN_SHELL })
+    return r.code === 0 ? null : `npm failed: ${lastLines(r)}`
+  }
   if (id === 'opencode') {
     // OpenCode 1 only leaves through --major, which removes it.
     const args = opencodeMajor !== null && opencodeMajor < 2 ? ['upgrade', '--major'] : ['upgrade']
@@ -593,8 +691,22 @@ async function runUpdate(id: HarnessId, d: Detected, s: HarnessSettings, out: Pi
   return pithagorasUp(dir, s, out, log)
 }
 
+// Goose's own installer script; CONFIGURE=false skips its interactive setup.
+async function installGoose(log: Log): Promise<string | null> {
+  const env = { CONFIGURE: 'false' }
+  if (process.platform === 'win32') {
+    const script = `$f = Join-Path $env:TEMP 'goose_download_cli.ps1'; Invoke-WebRequest -Uri '${GOOSE_INSTALL_PS1}' -OutFile $f; & $f`
+    const r = await execLogged(log, 'powershell', ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-Command', script], { env })
+    return r.code === 0 ? null : `The Goose installer failed: ${lastLines(r)}`
+  }
+  if (!(await findCommand('curl')) || !(await findCommand('bash'))) return 'curl and bash are needed to install Goose.'
+  const r = await execLogged(log, 'bash', ['-c', `set -o pipefail; curl -fsSL '${GOOSE_INSTALL_SH}' | bash`], { env })
+  return r.code === 0 ? null : `The Goose installer failed: ${lastLines(r)}`
+}
+
 // Returns an error message, or null once the harness is installed.
 async function runInstall(id: HarnessId, s: HarnessSettings, out: PithBuildOut, log: Log): Promise<string | null> {
+  if (id === 'goose') return installGoose(log)
   if (id !== 'pithagoras') {
     const pkg = id === 'dsh' ? '@deepseek-ai/dsh@latest' : id === 'opencode' ? 'opencode-ai@latest' : `${HARNESSES[id].npmPackage}@latest`
     if (!(await findCommand('npm'))) return 'npm was not found. Install Node.js first.'
@@ -631,6 +743,7 @@ async function runRemove(id: HarnessId, d: Detected, log: Log): Promise<string |
     }
     return null
   }
+  if (id === 'goose') return 'Goose has no uninstall command here. Delete its goose command or app yourself.'
   const def = HARNESSES[id]
   const globals = await npmGlobals()
   const names = [def.npmPackage, ...(def.legacyNpmPackages ?? [])].filter((n): n is string => !!n && !!globals[n])
@@ -644,11 +757,15 @@ async function runRemove(id: HarnessId, d: Detected, log: Log): Promise<string |
 // Writing the provider
 // ---------------------------------------------------------------------------
 
-const WRITERS: Record<HarnessId, (text: string | null, providers: HarnessProvider[]) => SyncResult> = {
+const WRITERS: Record<Exclude<ConfigKind, 'goose-providers'>, (text: string | null, providers: HarnessProvider[], mcp: HarnessMcp | null) => SyncResult> = {
   dsh: syncDshPatch,
-  pi: syncPiModels,
-  pithagoras: syncPiModels,
-  opencode: syncOpencodeConfig
+  pi: (text, providers) => syncPiModels(text, providers),
+  opencode: syncOpencodeConfig,
+  kimi: (text, providers) => syncKimiConfig(text, providers),
+  'kimi-mcp': (text, _providers, mcp) => syncKimiMcp(text, mcp),
+  qwen: syncQwenSettings,
+  crush: syncCrushConfig,
+  goose: (text, _providers, mcp) => syncGooseConfig(text, mcp)
 }
 
 // A config kept in a dotfiles repo is often a symlink: write to its target so
@@ -674,15 +791,41 @@ async function writeConfig(file: string, text: string, hadFile: boolean): Promis
   }
 }
 
-async function syncFile(file: string, id: HarnessId, providers: HarnessProvider[], createMissing: boolean): Promise<boolean> {
+// Goose keeps one JSON file per custom provider. Files of ours that are no
+// longer wanted are deleted; every other file in the folder is left alone.
+async function syncGooseProviders(dir: string, providers: HarnessProvider[]): Promise<boolean> {
+  const files: Record<string, string> = {}
+  let names: string[] = []
+  try { names = await fsp.readdir(dir) } catch { /* no folder yet */ }
+  for (const name of names) {
+    if (!/^xlm-studio(-.+)?\.json$/.test(name)) continue
+    try { files[name] = await fsp.readFile(join(dir, name), 'utf-8') } catch { /* vanished */ }
+  }
+  const plan = planGooseProviders(files, providers)
+  for (const f of plan.write) await writeConfig(join(dir, f.name), f.text, false)
+  for (const name of plan.remove) await fsp.rm(join(dir, name), { force: true })
+  return plan.write.length > 0 || plan.remove.length > 0
+}
+
+async function syncFile(file: ConfigFile, providers: HarnessProvider[], mcp: HarnessMcp | null, createMissing: boolean): Promise<boolean> {
+  if (file.kind === 'goose-providers') return syncGooseProviders(file.path, providers)
   let text: string | null = null
-  try { text = await fsp.readFile(file, 'utf-8') } catch { text = null }
+  try { text = await fsp.readFile(file.path, 'utf-8') } catch { text = null }
   // Switching off must not create a file just to hold nothing.
   if (text === null && !createMissing) return false
-  const result = WRITERS[id](text, providers)
+  const result = WRITERS[file.kind](text, providers, mcp)
   if (!result.changed) return false
-  await writeConfig(file, result.text, text !== null)
+  await writeConfig(file.path, result.text, text !== null)
   return true
+}
+
+// XLM Studio's MCP server, for the harnesses that run a live MCP client. Skill
+// mode, or the server turned off, means none: the entry is taken out again.
+function mcpFor(all: SettingsLike, id: HarnessId): HarnessMcp | null {
+  const m = all.mcp
+  if (!hasMcpClient(id)) return null
+  if (!m?.enabled || m.skillMode || !m.port || !m.token) return null
+  return { url: `http://127.0.0.1:${m.port}/mcp`, token: m.token }
 }
 
 // ---------------------------------------------------------------------------
@@ -714,6 +857,7 @@ function detectCached(id: HarnessId, s: HarnessSettings): Promise<Detected> {
 }
 function forgetDetected(): void {
   detectCache.clear()
+  commandCache.clear()
   globalCache = null
   opencodeDirCache = null
 }
@@ -739,17 +883,24 @@ export function initHarnessManager(deps: HarnessDeps) {
     const templates = deps.listTemplates() as unknown as Template[]
     // The builder is synchronous, so the trained contexts are looked up first.
     const autoFit = { enabled: !!all.modelDefaults?.autoFitEnabled, contextLength: Number(all.modelDefaults?.autoFitContextLength) || 0 }
-    // Only a template whose size isn't set needs its model's header read.
+    // Only a template whose size or thinking the launch flags don't settle needs its model's header read.
     const wanted = new Set<string>()
-    for (const t of templates) templateContext(t, autoFit, p => { wanted.add(p); return null })
+    const note = (p: string) => { wanted.add(p); return null }
+    for (const t of templates) { templateContext(t, autoFit, note); templateReasoning(t, note) }
     const native = new Map<string, number>()
+    const chat = new Map<string, string>()
     await Promise.all([...wanted].map(async p => {
-      try { const n = await deps.nativeContext(p); if (n) native.set(p, n) } catch { /* unreadable model */ }
+      try {
+        const info = await deps.modelInfo(p)
+        if (info.context) native.set(p, info.context)
+        if (info.chatTemplate) chat.set(p, info.chatTemplate)
+      } catch { /* unreadable model */ }
     }))
     return buildHarnessProviders(templates, {
       override: all.baseUrlOverride,
       autoFit,
-      nativeContext: p => native.get(p) ?? null
+      nativeContext: p => native.get(p) ?? null,
+      chatTemplate: p => chat.get(p) ?? null
     })
   }
 
@@ -763,7 +914,7 @@ export function initHarnessManager(deps: HarnessDeps) {
     const { all, h } = await settings()
     if (!h.syncOn.length) return
     const { providers } = await providersNow(all)
-    const jobs: Array<{ id: HarnessId; files: string[]; api?: string }> = []
+    const jobs: Array<{ id: HarnessId; files: ConfigFile[]; api?: string }> = []
     for (const id of HARNESS_ORDER) {
       if (!syncOn(h, id)) continue
       const loc = await detectCached(id, h)
@@ -771,7 +922,8 @@ export function initHarnessManager(deps: HarnessDeps) {
     }
     pending = false
     for (const { id, files, api } of jobs) {
-      const signature = JSON.stringify({ providers, files, api, pith: api ? [h.pithagorasUrl, h.pithagorasPassword] : null })
+      const mcp = mcpFor(all, id)
+      const signature = JSON.stringify({ providers, mcp, files, api, pith: api ? [h.pithagorasUrl, h.pithagorasPassword] : null })
       if (!force && written.get(id) === signature) continue
       written.set(id, signature)
       let changed = false
@@ -785,8 +937,8 @@ export function initHarnessManager(deps: HarnessDeps) {
         }
       }
       for (const file of files) {
-        try { changed = (await syncFile(file, id, providers, true)) || changed } catch (err) {
-          error = err instanceof HarnessConfigError ? `${file}: ${err.message}` : `${file}: ${(err as Error).message}`
+        try { changed = (await syncFile(file, providers, mcp, true)) || changed } catch (err) {
+          error = `${file.path}: ${(err as Error).message}`
           written.delete(id)
         }
       }
@@ -801,7 +953,7 @@ export function initHarnessManager(deps: HarnessDeps) {
     const loc = await detectCached(id, h)
     let error: string | null = null
     for (const file of loc.files) {
-      try { await syncFile(file, id, [], false) } catch (err) { error = `${file}: ${(err as Error).message}` }
+      try { await syncFile(file, [], null, false) } catch (err) { error = `${file.path}: ${(err as Error).message}` }
     }
     if (loc.api) {
       try { await syncPithagoras(h, []) } catch (err) { if (!(err instanceof PithDown)) error = (err as Error).message }
@@ -822,7 +974,7 @@ export function initHarnessManager(deps: HarnessDeps) {
     timer = setTimeout(() => { timer = null; void run(() => applySync(false)).catch(() => undefined) }, delayMs)
   }
 
-  async function status(id: HarnessId, h: HarnessSettings): Promise<HarnessStatus> {
+  async function status(id: HarnessId, h: HarnessSettings, all: SettingsLike): Promise<HarnessStatus> {
     const d = await detectCached(id, h)
     const latest = latestCache.get(id)
     return {
@@ -833,13 +985,14 @@ export function initHarnessManager(deps: HarnessDeps) {
       updateAvailable: !!latest?.available && d.installed,
       source: d.source,
       binPath: d.binPath,
-      configFiles: d.files,
+      configFiles: d.files.map(f => f.path),
       api: d.api ?? null,
       syncOn: syncOn(h, id),
       sync: syncInfo.get(id) ?? null,
       canUpdate: d.canUpdate,
       canRebuild: d.canRebuild,
       hasLog: hasLog.has(id),
+      mcp: hasMcpClient(id) ? syncOn(h, id) && !!mcpFor(all, id) : null,
       busy: busy.get(id) ?? null,
       note: d.note
     }
@@ -848,7 +1001,7 @@ export function initHarnessManager(deps: HarnessDeps) {
   async function getState(): Promise<HarnessState> {
     const { all, h } = await settings()
     const { providers, skipped } = await providersNow(all)
-    const statuses = await Promise.all(HARNESS_ORDER.map(id => status(id, h)))
+    const statuses = await Promise.all(HARNESS_ORDER.map(id => status(id, h, all)))
     return {
       settings: h,
       statuses,
@@ -971,9 +1124,9 @@ export function initHarnessManager(deps: HarnessDeps) {
     if (!isHarnessId(id)) return
     const { h } = await settings()
     const loc = await detectCached(id, h)
-    const present = await Promise.all(loc.files.map(exists))
+    const present = await Promise.all(loc.files.map(f => exists(f.path)))
     const i = present.indexOf(true)
-    const file = i >= 0 ? loc.files[i] : loc.files[0]
+    const file = (i >= 0 ? loc.files[i] : loc.files[0])?.path
     if (file) await shell.openPath(i >= 0 ? dirname(file) : dirname(dirname(file)))
     else if (loc.binPath && await exists(loc.binPath)) await shell.openPath(loc.binPath)
   })
