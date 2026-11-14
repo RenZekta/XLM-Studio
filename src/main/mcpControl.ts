@@ -27,7 +27,7 @@ import { buildStrataArgv, buildStrataQuickBaseline, strataGgufDir, strataInfoFor
 // the dependency graph, and importing back from here to ipc.ts would make
 // it circular. Kept in sync manually — the tier numbers, methods, and
 // flags are a stable, rarely-changing reference table.
-type SpecMethod = 'off' | 'native-mtp' | 'draft-model' | 'eagle3' | 'dspark2' | 'dflash2'
+type SpecMethod = 'off' | 'native-mtp' | 'draft-model' | 'eagle3' | 'dspark2' | 'dflash2' | 'lilicorr'
 interface SpecTierDef { tier: number; method: SpecMethod; label: string; flag: string | null; draftMax: number; draftMin: number; draftPMin: number }
 const SPEC_TIER_DEFS: SpecTierDef[] = [
   { tier: 0, method: 'off', label: 'Off', flag: null, draftMax: 0, draftMin: 0, draftPMin: 0 },
@@ -35,7 +35,9 @@ const SPEC_TIER_DEFS: SpecTierDef[] = [
   { tier: 2, method: 'draft-model', label: 'Draft Model', flag: 'draft-simple', draftMax: 5, draftMin: 0, draftPMin: 0.00 },
   { tier: 3, method: 'eagle3', label: 'EAGLE3', flag: 'draft-eagle3', draftMax: 4, draftMin: 0, draftPMin: 0.50 },
   { tier: 4, method: 'dspark2', label: 'DSpark2', flag: 'draft-dspark', draftMax: 6, draftMin: 0, draftPMin: 0.75 },
-  { tier: 5, method: 'dflash2', label: 'DFlash2', flag: 'draft-dflash', draftMax: 5, draftMin: 0, draftPMin: 0.80 }
+  { tier: 5, method: 'dflash2', label: 'DFlash2', flag: 'draft-dflash', draftMax: 5, draftMin: 0, draftPMin: 0.80 },
+  // Needs a build with the draft-lilicorr type (llama.cpp b12377 and later); builds and forks without it run a LiliCorr draft as DFlash2.
+  { tier: 6, method: 'lilicorr', label: 'LiliCorr', flag: 'draft-lilicorr', draftMax: 7, draftMin: 0, draftPMin: 0 }
 ]
 
 export interface ControlDeps {

@@ -441,7 +441,7 @@ export interface CpuInfo {
 export type SpeculationMode = 'off' | 'mtp' | 'draft' | 'dspark'  // superseded by SpecMethod; kept for the stored detection-cache shape
 // Full speculative-decoding tier system: native model-embedded MTP, external
 // draft models, and EAGLE3/DSpark2/DFlash2 draft heads.
-export type SpecMethod = 'off' | 'native-mtp' | 'draft-model' | 'eagle3' | 'dspark2' | 'dflash2'
+export type SpecMethod = 'off' | 'native-mtp' | 'draft-model' | 'eagle3' | 'dspark2' | 'dflash2' | 'lilicorr'
 export interface SpecCandidate { tier: number; method: SpecMethod; label: string; path: string | null; name: string | null; reason: string }
 export interface SpecDetectionResult { tier: number; method: SpecMethod; path?: string | null; reason?: string; candidates: SpecCandidate[]; error?: string }
 

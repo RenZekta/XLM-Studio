@@ -23,7 +23,7 @@ export function buildSpecTypeValue(primaryFlag: string | null, mapK4v: boolean, 
 // The mutually-exclusive PRIMARY draft-method flags (see SPEC_TIER_DEFS in
 // CmdParamsEditor.tsx) — used only to find which segment of --spec-type (if
 // any) is the primary method, so it's preserved when toggling a modifier.
-const PRIMARY_SPEC_FLAGS = ['draft-mtp', 'draft-simple', 'draft-eagle3', 'draft-dspark', 'draft-dflash']
+const PRIMARY_SPEC_FLAGS = ['draft-mtp', 'draft-simple', 'draft-eagle3', 'draft-dspark', 'draft-dflash', 'draft-lilicorr']
 
 export function getNgramModifierState(args: Record<string, any>): { mapK4vOn: boolean; modOn: boolean; primaryFlag: string | null } {
   const raw = args['--spec-type']

@@ -123,7 +123,9 @@ const SPEC_TIER_DEFS: SpecTierDef[] = [
   { tier: 2, method: 'draft-model', label: 'Draft Model', flag: 'draft-simple', draftMax: 5, draftMin: 0, draftPMin: 0.00 },
   { tier: 3, method: 'eagle3', label: 'EAGLE3', flag: 'draft-eagle3', draftMax: 4, draftMin: 0, draftPMin: 0.50 },
   { tier: 4, method: 'dspark2', label: 'DSpark2', flag: 'draft-dspark', draftMax: 6, draftMin: 0, draftPMin: 0.75 },
-  { tier: 5, method: 'dflash2', label: 'DFlash2', flag: 'draft-dflash', draftMax: 5, draftMin: 0, draftPMin: 0.80 }
+  { tier: 5, method: 'dflash2', label: 'DFlash2', flag: 'draft-dflash', draftMax: 5, draftMin: 0, draftPMin: 0.80 },
+  // Needs a build with the draft-lilicorr type (llama.cpp b12377 and later); builds and forks without it run a LiliCorr draft as DFlash2.
+  { tier: 6, method: 'lilicorr', label: 'LiliCorr', flag: 'draft-lilicorr', draftMax: 7, draftMin: 0, draftPMin: 0 }
 ]
 
 // Params visible in "Common" view mode.

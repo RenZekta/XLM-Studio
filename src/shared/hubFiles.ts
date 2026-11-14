@@ -21,9 +21,9 @@ export interface HubEntry {
   modelFolder: string // folder under the models directory the files are downloaded into
 }
 
-const SUPPORT_NAME_RE = /mmproj|mtp|draft|eagle|dflash|dspark/i
+const SUPPORT_NAME_RE = /mmproj|mtp|draft|eagle|dflash|dspark|lilicorr/i
 const MMPROJ_RE = /mmproj/i
-const SUPPORT_FOLDER_RE = /^(mmproj|mtp|draft|eagle3?|dflash2?|dspark2?)$/i
+const SUPPORT_FOLDER_RE = /^(mmproj|mtp|draft|eagle3?|dflash2?|dspark2?|lilicorr)$/i
 // Same bound the Models tab uses to tell a speculative-decoding head from a
 // full model that merely has "mtp" in its name.
 const SUPPORT_MAX_BYTES = 4 * 1024 ** 3

@@ -70,12 +70,13 @@ Edit engine-specific commands through a structured UI with Common and Full views
 
 <img width="480" height="712" alt="image" src="https://github.com/user-attachments/assets/b6c514ea-b6cd-46ee-bd2e-e1fba93e74c0" />
 
-**Speculative Decoding: five tiers, auto-detected**
+**Speculative Decoding: six tiers, auto-detected**
 
 The best available method is selected automatically:
 
 | Tier | Method | Detected via |
 |---|---|---|
+| 6 | **LiliCorr** | sidecar `.gguf` filename containing `lilicorr` (needs llama.cpp b12377 or later) |
 | 5 | **DFlash2** | sidecar `.gguf` filename containing `dflash`/`dflash2` |
 | 4 | **DSpark2** | sidecar filename containing `dspark`/`dspark2` |
 | 3 | **EAGLE3** | sidecar filename containing `eagle` |
