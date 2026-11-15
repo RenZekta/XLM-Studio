@@ -243,7 +243,7 @@ async function buildLaunchArgs(template: Template): Promise<{ args: string[]; ct
   const raw = { ...(template.args || {}) }
   const ignoreCtxOverride = raw['__ignoreCtxOverride'] === true
   const autoCtxFill = (raw['__autoCtxFill'] as 'off' | 'auto') || 'off'
-  const fitMode: 'off' | 'auto' = ignoreCtxOverride ? autoCtxFill : 'off'
+  const fitMode: 'off' | 'auto' = autoCtxFill
   let ctxAutoFitApplied = false
   if (fitMode === 'auto') {
     // Defer to llama-server's own --fit — do not pass --ctx-size at all.

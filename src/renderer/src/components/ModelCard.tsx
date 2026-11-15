@@ -23,7 +23,7 @@ export default function ModelCard({ card, selected, cut }: Props) {
 
   // Compute the EFFECTIVE context that will be passed to
   // llama.cpp on the next run. Precedence:
-  //   1. Per-preset "Ignore Context Length Override" (__ignoreCtxOverride) ON
+  //   1. Per-preset "Ignore Minimum Auto Fit Context length Override" (__ignoreCtxOverride) ON
   //      → use the preset's own --ctx-size (or AutoFill-computed value), ignoring
   //      the global Minimum AutoFit override from Settings.
   //   2. Global "Minimum Context Length Override" (Model Defaults → autoFitEnabled)
@@ -50,7 +50,8 @@ export default function ModelCard({ card, selected, cut }: Props) {
     let base = presetVal > 0 ? presetVal : (native > 0 ? native : 32768)
     // Global override acts as a MINIMUM (floor), not a strict override.
     // When the override is enabled and not ignored, ensure ctx >= autoFitContextLength.
-    if (!ignoreCtxOverride && modelDefaults?.autoFitEnabled) {
+    // (Skipped under Automatic Context Fill: --fit picks the context, nothing is passed.)
+    if (!ignoreCtxOverride && autoCtxFill === 'off' && modelDefaults?.autoFitEnabled) {
       // Was `Math.max(2048, ... || 32768)` — a hard 2048 floor plus a
       // `||` fallback that treats 0 as falsy. Both defeated the point of
       // allowing 0 ("no minimum, defer to the template's/model's own
@@ -64,13 +65,13 @@ export default function ModelCard({ card, selected, cut }: Props) {
       base = Math.max(base, minCtx)
     }
     return base
-  }, [modelDefaults, card.template.args, card.template.modelPath, ggufMetadata, ignoreCtxOverride, cardEngine])
+  }, [modelDefaults, card.template.args, card.template.modelPath, ggufMetadata, ignoreCtxOverride, autoCtxFill, cardEngine])
   // "from override" = the value comes from the global override (blue badge).
   // When the per-preset Ignore-Override is ON, the badge is neutral (preset).
-  const ctxFromOverride = cardEngine === 'llama.cpp' && !ignoreCtxOverride && !!modelDefaults?.autoFitEnabled
-  // When both Ignore-Override + AutoFill (Maximum) are ON, the
-  // hint changes to "*Auto/Max Context Fill".
-  const bothAutoFillOn = ignoreCtxOverride && autoCtxFill !== 'off'
+  const ctxFromOverride = cardEngine === 'llama.cpp' && !ignoreCtxOverride && autoCtxFill === 'off' && !!modelDefaults?.autoFitEnabled
+  // With Automatic Context Fill on (independent of the minimum override),
+  // the hint reads "*Auto Context Fill".
+  const bothAutoFillOn = autoCtxFill !== 'off'
 
   // Overrides tab → "Parallel Inference" block. Mirrors the same
   // "global override wins" shape as the AutoFit context override above, but
@@ -228,7 +229,7 @@ export default function ModelCard({ card, selected, cut }: Props) {
     //   "--fit on" (a bare "--fit" flag crashes llama-server → server closes
     //   instantly).
     // Otherwise: force --ctx-size to the effective context.
-    const autoFitMode = ignoreCtxOverride && autoCtxFill  // 'off' | 'auto'
+    const autoFitMode = autoCtxFill  // 'off' | 'auto'
     const isAutoFitAuto = autoFitMode === 'auto'
     const setCtxArg = (val: number) => {
       const idx = args.indexOf('--ctx-size')
@@ -332,20 +333,19 @@ export default function ModelCard({ card, selected, cut }: Props) {
                 <Gauge size={11} />
                 ctx {effectiveCtx.toLocaleString()}
               </span>}
-              {/* Yellow hint when Ignore Context Length Override is ON. When
-                  AutoFill is also ON, the hint shows "Auto Context Fill" with
-                  a two-row tooltip. */}
+              {/* Yellow hint: "Auto Context Fill" when Automatic Context Fill is on,
+                  else "Override is ignored" when the minimum override is ignored. */}
               {cardEngine !== 'llama.cpp' ? null : bothAutoFillOn ? (
                 <span
                   className="ctx-override-hint"
-                  title={`Ignore Context Length Override in preset settings is turned on\nUse Automatic Context Fill is set to Auto`}
+                  title="Automatic Context Fill is on: llama-server --fit picks the context"
                 >
                   *Auto Context Fill
                 </span>
               ) : ignoreCtxOverride ? (
                 <span
                   className="ctx-override-hint"
-                  title="Ignore Context Length Override in preset settings is turned on"
+                  title="Ignore Minimum Auto Fit Context length Override is turned on in preset settings"
                 >
                   *Override is ignored
                 </span>

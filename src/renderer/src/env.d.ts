@@ -89,6 +89,8 @@ interface LlamaCppApi {
   // File pickers
   pickModelFile: () => Promise<{ name: string; path: string } | null>
   pickAnyFile: () => Promise<string | null>
+  listLlamaDevices: (backendPath: string, exe: string) => Promise<{ name: string; description: string }[]>
+  readTextFile: (filePath: string) => Promise<{ ok: true; text: string } | { ok: false; error: string }>
 
   // Run model
   runModel: (opts: { id: string; name: string; backendPath: string; exe: string; args: string[]; openBrowser: boolean; port: number; ignoreBaseUrlOverride?: boolean; skipCheckpoint?: boolean; checkpointMode?: CheckpointMode; engine?: EngineId; modelPath?: string }) => Promise<{ success: boolean; pid?: number; error?: string; port?: number }>

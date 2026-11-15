@@ -85,6 +85,7 @@ check('the template context is used as set', ctx({ '--ctx-size': 65536 }) === 65
 check('the AutoFit floor lifts a smaller context', ctx({ '--ctx-size': 8192 }, { enabled: true, contextLength: 60000 }) === 60000)
 check('a template that ignores the override keeps its own', ctx({ '--ctx-size': 8192, __ignoreCtxOverride: true }, { enabled: true, contextLength: 60000 }) === 8192)
 check('size 0 falls back to the trained context', ctx({ '--ctx-size': 0 }, null, 131072) === 131072)
+check('Automatic Context Fill needs no ignore switch', ctx({ '--ctx-size': 4096, __autoCtxFill: 'auto' }, { enabled: true, contextLength: 60000 }, 262144) === 262144)
 check('llama-server fitting the context falls back to the trained one', ctx({ '--ctx-size': 4096, __ignoreCtxOverride: true, __autoCtxFill: 'auto' }, null, 262144) === 262144)
 check('an unknown context is 0', ctx({}) === 0)
 

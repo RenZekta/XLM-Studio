@@ -83,6 +83,7 @@ const KV_BPE: Record<string, number> = {
   f32: 4.0,
   f16: 2.0,
   bf16: 2.0,
+  f8_e4m3: 1.0,         // FP8, 1-value blocks
   q8_0: 34 / 32,        // 1.0625
   q4_0: 18 / 32,        // 0.5625
   q4_1: 20 / 32,        // 0.625
@@ -146,7 +147,7 @@ export function useVramBudget(opts: {
   vramOverheadMB?: number
   ramOverheadMB?: number
   autoFillAuto?: boolean     // dense AutoFill "Auto" — ignore ctx, fit model by speed priority
-  // Whether this preset's "Ignore Context Length Override" toggle is ON.
+  // Whether this preset's "Ignore Minimum Auto Fit Context length Override" toggle is ON.
   // Needed so the VRAM/KV preview computes `targetContext` with exactly the
   // same floor logic ModelCard.tsx uses to build the real launch --ctx-size,
   // so the KV number shown in Advanced Parameters can't diverge from what

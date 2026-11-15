@@ -21,7 +21,8 @@ export function resolveMmprojOffloadToRam(mode: MmprojOffloadMode, globalToRam: 
 // Appends --no-mmproj-offload to a flat CLI flag list when the resolved
 // setting is "RAM" and a projector is actually in use. --mmproj-offload is
 // never emitted: GPU offload is llama-server's default, so "off" means no
-// flag at all. Idempotent and a no-op without an mmproj flag.
+// flag at all. With the projector in RAM, --mmproj-device is dropped.
+// Idempotent and a no-op without an mmproj flag.
 export function applyMmprojOffloadFlag(
   flags: string[],
   args: Record<string, any> | undefined,
@@ -31,4 +32,9 @@ export function applyMmprojOffloadFlag(
   if (!hasMmproj) return
   const toRam = resolveMmprojOffloadToRam(getMmprojOffloadMode(args), globalToRam)
   if (toRam && !flags.includes('--no-mmproj-offload')) flags.push('--no-mmproj-offload')
+  // A projector in RAM has no GPU to pick, so a stored device is not passed.
+  if (toRam) {
+    const i = flags.indexOf('--mmproj-device')
+    if (i !== -1) flags.splice(i, 2)
+  }
 }

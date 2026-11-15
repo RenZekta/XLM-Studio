@@ -187,7 +187,7 @@ export default function CmdParamsEditor({ templateId, args, onChange, modelPathF
     detectedSpeculation, setDetectedSpeculation, markSpeculationApplied,
     ggufMetadata, setGgufMetadata, activeBackend, backends, engineGlobals,
     paramViewMode, setParamViewMode,
-    setPresetMode, modelDefaults, samplingPresets, baseUrlOverride
+    setPresetMode, modelDefaults, samplingPresets, baseUrlOverride, vramInfo
   } = useStore()
   const [searchQuery, setSearchQuery] = useState('')
   // Vertical-stack command preview toggle.
@@ -349,7 +349,7 @@ export default function CmdParamsEditor({ templateId, args, onChange, modelPathF
   // The FIRST version of this derivation used
   // `__ignoreCtxOverride === true` as the Quick-vs-FullAuto discriminator —
   // but that flag is ALSO an independent, directly user-toggleable checkbox
-  // ("Ignore Context Length Override"), not something exclusive to FULL
+  // ("Ignore Minimum Auto Fit Context length Override"), not something exclusive to FULL
   // AUTO. So manually turning that checkbox on (with no preset button
   // clicked at all) made the toggle jump to showing FULL AUTO — backwards
   // from the intended relationship ("FULL AUTO turns ON Ignore Override",
@@ -436,7 +436,7 @@ export default function CmdParamsEditor({ templateId, args, onChange, modelPathF
   const ramOverheadMB = ramOverheadEnabled ? (ramOverheadIsSet ? Number(ramOverheadStored) : DEFAULT_RAM_OVERHEAD_MB) : 0
   // Pass whether AutoFill "Auto" is active so useVramBudget can ignore
   // the selected ctx and check full-fit by speed priority for dense models.
-  const autoFillAuto = ignoreCtxOverride && autoCtxFill === 'auto'
+  const autoFillAuto = autoCtxFill === 'auto'
   // Compute the YaRN-scaled effective max context (if RoPE
   // scaling is set to yarn) so the AutoFit guardrail warning doesn't
   // misfire against the model's raw (un-scaled) native context.
@@ -457,7 +457,8 @@ export default function CmdParamsEditor({ templateId, args, onChange, modelPathF
     vramOverheadMB,
     ramOverheadMB,
     autoFillAuto,
-    ignoreCtxOverride,
+    // The minimum does not apply when --fit picks the context.
+    ignoreCtxOverride: ignoreCtxOverride || autoFillAuto,
     ropeScaledMaxContext
   })
   // The VRAM-recommended GPU layer count is a display value only (shown in
@@ -588,6 +589,20 @@ export default function CmdParamsEditor({ templateId, args, onChange, modelPathF
   // preview agree with what the launch actually does.
   const mmprojOffloadMode = getMmprojOffloadMode(args)
   const mmprojOffloadToRam = resolveMmprojOffloadToRam(mmprojOffloadMode, modelDefaults.mmprojOffloadToRam)
+  // Picking the projector's GPU only makes sense with several GPUs and the projector on a GPU.
+  const showMmprojDevice = (vramInfo?.gpuCount ?? 1) > 1 && !mmprojOffloadToRam
+  // The build's own device list (cached in the main process); empty until it
+  // arrives or when it cannot be read, and the field then takes typed text.
+  const [llamaDevices, setLlamaDevices] = useState<{ name: string; description: string }[]>([])
+  const devBackendPath = effectiveBackend && !effectiveBackend.engine ? effectiveBackend.path : null
+  const devBackendExe = effectiveBackend?.exe
+  useEffect(() => {
+    setLlamaDevices([])
+    if (!showMmprojDevice || !devBackendPath || !devBackendExe) return
+    let alive = true
+    window.api.listLlamaDevices(devBackendPath, devBackendExe).then(d => { if (alive) setLlamaDevices(d) }).catch(() => {})
+    return () => { alive = false }
+  }, [showMmprojDevice, devBackendPath, devBackendExe])
   function setMmprojOffloadMode(mode: MmprojOffloadMode) {
     const newArgs = { ...args }
     // 'follow' is the absence of the key, so an untouched Template stays clean.
@@ -855,7 +870,22 @@ export default function CmdParamsEditor({ templateId, args, onChange, modelPathF
   // Changed = user has an explicit override that differs from native, OR
   // explicitly cleared the box (both are "not showing the plain native
   // default anymore" states, so both get the changed-indicator + reset button).
-  const jinjaChanged = (nativeChatTemplate !== null && explicitChatTemplate !== undefined && explicitChatTemplate !== nativeChatTemplate) || jinjaUserCleared
+  // A template kept in its own file: llama-server reads it at launch
+  // (--chat-template-file), so it replaces the text box rather than adding to it.
+  const chatTemplateFile = typeof args['--chat-template-file'] === 'string' ? (args['--chat-template-file'] as string) : ''
+  const [chatTemplateFileText, setChatTemplateFileText] = useState<{ text: string } | { error: string } | null>(null)
+  useEffect(() => {
+    if (!chatTemplateFile) { setChatTemplateFileText(null); return }
+    let alive = true
+    const timer = setTimeout(async () => {
+      const r = await window.api?.readTextFile?.(chatTemplateFile)
+      if (!alive) return
+      setChatTemplateFileText(!r ? { error: 'Cannot read the file here.' } : r.ok ? { text: r.text } : { error: r.error })
+    }, 250)
+    return () => { alive = false; clearTimeout(timer) }
+  }, [chatTemplateFile])
+  const chatTemplateFileBody = chatTemplateFileText && 'text' in chatTemplateFileText ? chatTemplateFileText.text : null
+  const jinjaChanged = (nativeChatTemplate !== null && explicitChatTemplate !== undefined && explicitChatTemplate !== nativeChatTemplate) || jinjaUserCleared || chatTemplateFile !== ''
   // Ensure --jinja: true is set when Jinja is ON (so the flag actually reaches
   // llama-server). We deliberately do NOT auto-populate --chat-template here.
   useEffect(() => {
@@ -874,6 +904,7 @@ export default function CmdParamsEditor({ templateId, args, onChange, modelPathF
       // ever meaningful "under jinja" (it re-injects reasoning_content via
       // the jinja template loop), so it goes with it.
       delete newArgs['--chat-template']
+      delete newArgs['--chat-template-file']
       delete newArgs['--jinja']
       delete newArgs['--reasoning-preserve']
       newArgs['--jinja'] = false
@@ -904,10 +935,38 @@ export default function CmdParamsEditor({ templateId, args, onChange, modelPathF
     if (jinjaOn) newArgs['--jinja'] = true
     commit(newArgs)
   }
+  // The file and the text box are alternatives (llama-server keeps whichever
+  // comes last), so choosing one removes the other.
+  function setChatTemplateFile(path: string) {
+    const newArgs: Record<string, any> = { ...args }
+    if (path === '') delete newArgs['--chat-template-file']
+    else {
+      newArgs['--chat-template-file'] = path
+      delete newArgs['--chat-template']
+      delete newArgs['__jinja_cleared']
+    }
+    if (jinjaOn) newArgs['--jinja'] = true
+    commit(newArgs)
+  }
+  async function pickChatTemplateFile() {
+    const f = await window.api?.pickAnyFile?.()
+    if (f) setChatTemplateFile(f)
+  }
+  // Copies the file's text into the box and stops using the file.
+  function loadChatTemplateFileIntoEditor() {
+    if (chatTemplateFileBody === null) return
+    const newArgs: Record<string, any> = { ...args }
+    delete newArgs['--chat-template-file']
+    newArgs['--chat-template'] = chatTemplateFileBody
+    delete newArgs['__jinja_cleared']
+    if (jinjaOn) newArgs['--jinja'] = true
+    commit(newArgs)
+  }
   function resetJinja() {
     // Reset = revert to the native template (don't pass --chat-template at all).
     const newArgs = { ...args }
     delete newArgs['--chat-template']
+    delete newArgs['--chat-template-file']
     delete newArgs['__jinja_cleared']
     if (jinjaOn) newArgs['--jinja'] = true
     commit(newArgs)
@@ -918,7 +977,7 @@ export default function CmdParamsEditor({ templateId, args, onChange, modelPathF
   // actually in effect (the user's own override if they've set one,
   // otherwise the model's native tokenizer.chat_template) has reasoning-
   // preserve logic to turn on at all — see templateSupportsReasoningPreserve.
-  const effectiveChatTemplateForReasoning = explicitChatTemplate !== undefined ? explicitChatTemplate : nativeChatTemplate
+  const effectiveChatTemplateForReasoning = chatTemplateFile ? chatTemplateFileBody : explicitChatTemplate !== undefined ? explicitChatTemplate : nativeChatTemplate
   const reasoningPreserveSupported = jinjaOn && templateSupportsReasoningPreserve(effectiveChatTemplateForReasoning)
   // On by default: an unset boolean always displays/behaves as OFF regardless
   // of the schema's own `default` (same established pattern as --kv-unified),
@@ -1401,14 +1460,14 @@ export default function CmdParamsEditor({ templateId, args, onChange, modelPathF
     const presetVal = presetCtx !== undefined && presetCtx !== '' && presetCtx !== null ? Number(presetCtx) : 0
     const native = contextLength > 0 ? contextLength : 0
     let base = presetVal > 0 ? presetVal : (native > 0 ? native : 32768)
-    if (!ignoreCtxOverride && modelDefaults?.autoFitEnabled) {
+    if (!ignoreCtxOverride && autoCtxFill === 'off' && modelDefaults?.autoFitEnabled) {
       const minCtx = Math.max(2048, Number(modelDefaults.autoFitContextLength) || 32768)
       base = Math.max(base, minCtx)
     }
     return base
-  }, [args, contextLength, ignoreCtxOverride, modelDefaults])
+  }, [args, contextLength, ignoreCtxOverride, autoCtxFill, modelDefaults])
   const ctxOverriddenInPreview = (() => {
-    if (ignoreCtxOverride || !modelDefaults?.autoFitEnabled) return false
+    if (ignoreCtxOverride || autoCtxFill !== 'off' || !modelDefaults?.autoFitEnabled) return false
     const rawCtx = args['--ctx-size'] !== undefined && args['--ctx-size'] !== '' && args['--ctx-size'] !== null ? Number(args['--ctx-size']) : 0
     return previewEffectiveCtx > rawCtx
   })()
@@ -1445,7 +1504,7 @@ export default function CmdParamsEditor({ templateId, args, onChange, modelPathF
   // (possibly overridden) value in its place — the same transform, reused
   // three times instead of drifting apart again.
   function buildRuntimeArgs(): Record<string, any> {
-    const isAutoFitAuto = ignoreCtxOverride && autoCtxFill === 'auto'
+    const isAutoFitAuto = autoCtxFill === 'auto'
     const runtimeArgs: Record<string, any> = {}
     for (const [k, v] of Object.entries(args)) {
       if (k.startsWith('__')) continue  // internal UI flags never reach llama-server
@@ -1472,7 +1531,7 @@ export default function CmdParamsEditor({ templateId, args, onChange, modelPathF
     if (!runtimeArgs['--alias'] && !runtimeArgs['-a'] && card?.template.name) runtimeArgs['--alias'] = card.template.name
     // Same rule as the real launch (ModelCard.tsx / mcpControl.ts): only with
     // a projector in use, and never --mmproj-offload (GPU offload is the default).
-    if ((runtimeArgs['--mmproj'] || runtimeArgs['-mm']) && mmprojOffloadToRam) runtimeArgs['--no-mmproj-offload'] = true
+    if ((runtimeArgs['--mmproj'] || runtimeArgs['-mm']) && mmprojOffloadToRam) { runtimeArgs['--no-mmproj-offload'] = true; delete runtimeArgs['--mmproj-device'] }
     return runtimeArgs
   }
 
@@ -1528,7 +1587,7 @@ export default function CmdParamsEditor({ templateId, args, onChange, modelPathF
     if (CUSTOM_PARAMS.includes(cmd.arg)) return null
     // When AutoFill "Auto" is active, the Context Size block is
     // disabled (llama-server --fit decides context; we don't pass --ctx-size).
-    const isAutoFitAuto = ignoreCtxOverride && autoCtxFill === 'auto'
+    const isAutoFitAuto = autoCtxFill === 'auto'
     const ctxDisabled = isAutoFitAuto && (cmd.arg === '--ctx-size' || cmd.arg === '-c')
     const val = args[cmd.arg] ?? (cmd.type === 'boolean' ? false : '')
     // changed-param (below) is relative to whichever preset is actually
@@ -1577,7 +1636,7 @@ export default function CmdParamsEditor({ templateId, args, onChange, modelPathF
                 ladderSteps={CONTEXT_POWER_OF_TWO_STEPS}
               />
               {ctxDisabled && (
-                <span style={{ fontSize: 10, color: 'var(--warning)', marginLeft: 6, whiteSpace: 'nowrap' }} title="Automatic Context Fill (Auto) is on — llama-server --fit decides context">
+                <span style={{ fontSize: 10, color: 'var(--warning)', marginLeft: 6, whiteSpace: 'nowrap' }} title="Automatic Context Fill is on — llama-server --fit decides context">
                   auto (--fit)
                 </span>
               )}
@@ -1711,6 +1770,47 @@ export default function CmdParamsEditor({ templateId, args, onChange, modelPathF
         {mmprojOffloadMode === 'disabled' && '--no-mmproj-offload: The projector is offloaded to the GPU (llama-server default), even while the global switch is on.'}
         {mmprojOffloadMode === 'enabled' && '--no-mmproj-offload: The projector stays in RAM to preserve faster memory for the model, even while the global switch is off.'}
       </div>
+      {showMmprojDevice && (
+        <div className="mmproj-widget-row" style={mmprojOn ? {} : { opacity: 0.5 }}>
+          <span className="mmproj-widget-label">Projector GPU</span>
+          {llamaDevices.length > 0 ? (
+            <SelectMenu
+              variant="compact"
+              style={{ width: 280, maxWidth: '100%' }}
+              value={typeof args['--mmproj-device'] === 'string' ? args['--mmproj-device'] : ''}
+              disabled={disabled}
+              options={[
+                { value: '', label: 'Auto (llama.cpp default)' },
+                ...llamaDevices.map(d => ({ value: d.name, label: `${d.name}: ${d.description}` })),
+                ...(typeof args['--mmproj-device'] === 'string' && args['--mmproj-device'] && !llamaDevices.some(d => d.name === args['--mmproj-device'])
+                  ? [{ value: args['--mmproj-device'] as string, label: `${args['--mmproj-device']} (not listed)` }] : [])
+              ]}
+              onChange={v => {
+                const next = { ...args }
+                if (v) next['--mmproj-device'] = v
+                else delete next['--mmproj-device']
+                commit(next)
+              }}
+            />
+          ) : (
+          <input
+            type="text"
+            className="form-input mono"
+            style={{ width: 180, fontSize: 12 }}
+            value={typeof args['--mmproj-device'] === 'string' ? args['--mmproj-device'] : ''}
+            placeholder="CUDA1 (default: auto)"
+            title="--mmproj-device: device name as shown by llama-server --list-devices"
+            disabled={disabled}
+            onChange={(e) => {
+              const next = { ...args }
+              if (e.target.value.trim()) next['--mmproj-device'] = e.target.value
+              else delete next['--mmproj-device']
+              commit(next)
+            }}
+          />
+          )}
+        </div>
+      )}
       {/* Selection + status stay visible (dimmed, not hidden) when the
           projector is OFF, so the user can see and change what WOULD be
           used without first re-enabling it. */}
@@ -1760,7 +1860,7 @@ export default function CmdParamsEditor({ templateId, args, onChange, modelPathF
     <div className={`mmproj-widget ${jinjaChanged ? 'changed-param' : ''}`}>
       {jinjaChanged && <div className="changed-indicator" />}
       <div className="mmproj-widget-title"><MessageSquare size={15} /> Jinja Chat Template</div>
-      <div className="mmproj-widget-arg">--chat-template, --jinja · Custom Jinja chat template string</div>
+      <div className="mmproj-widget-arg">--chat-template, --chat-template-file, --jinja · Custom Jinja chat template, typed or from a file</div>
       <div className="mmproj-widget-row">
         <span className="mmproj-widget-label">Enable Jinja templating</span>
         <div className="toggle-wrap">
@@ -1786,7 +1886,8 @@ export default function CmdParamsEditor({ templateId, args, onChange, modelPathF
           <textarea
             className="cmd-textarea mono"
             style={{ width: '100%', minHeight: 150, fontSize: 13, resize: 'vertical' }}
-            value={jinjaValue}
+            value={chatTemplateFile ? (chatTemplateFileText ? ('text' in chatTemplateFileText ? chatTemplateFileText.text : chatTemplateFileText.error) : '') : jinjaValue}
+            readOnly={!!chatTemplateFile}
             placeholder={
               // The placeholder used to unconditionally say
               // "No chat template found in GGUF metadata" — misleading when a
@@ -1797,7 +1898,7 @@ export default function CmdParamsEditor({ templateId, args, onChange, modelPathF
                 ? "Empty — the model's own Jinja chat template (detected in GGUF metadata) will be used."
                 : 'No chat template found in GGUF metadata. Empty = use llama.cpp internal parser.'
             }
-            onChange={e => setJinjaValue(e.target.value)}
+            onChange={e => { if (!chatTemplateFile) setJinjaValue(e.target.value) }}
             disabled={disabled}
           />
           {jinjaChanged && (
@@ -1805,8 +1906,15 @@ export default function CmdParamsEditor({ templateId, args, onChange, modelPathF
               <RotateCcw size={12} />
             </button>
           )}
+          <div className="mmproj-manual-row" style={{ marginTop: 8 }}>
+            <input type="text" className="form-input mono" style={{ flex: 1, minWidth: 0, fontSize: 12 }} value={chatTemplateFile} placeholder="Or use a template file: /path/to/template.jinja" onChange={e => setChatTemplateFile(e.target.value)} disabled={disabled} />
+            <button type="button" className="btn btn-secondary btn-sm" onClick={pickChatTemplateFile} disabled={disabled} title="Browse for a template file"><FolderOpen size={14} /></button>
+            {chatTemplateFile && <button type="button" className="btn btn-ghost btn-sm" onClick={loadChatTemplateFileIntoEditor} disabled={disabled || chatTemplateFileBody === null} title="Copy the file's text into the box and stop using the file">Load into editor</button>}
+          </div>
           <div style={{ fontSize: 12, color: 'var(--text-muted)', marginTop: 4 }}>
-            {nativeChatTemplate
+            {chatTemplateFile
+              ? 'The template file is passed to llama-server with --chat-template-file and read when the model starts, so changes to the file apply on the next start. The text above is a read-only preview.'
+              : nativeChatTemplate
               ? (jinjaUserCleared
                   ? `Box cleared — the model's native tokenizer.chat_template (${nativeChatTemplate.length} chars) will be used, exactly as if nothing had been typed here. Paste a new template to override it, or hit reset to see the native one again.`
                   : `Showing model's native tokenizer.chat_template (${nativeChatTemplate.length} chars). The native template is NOT passed to llama-server (—jinja alone applies it). Edit to customize — --chat-template is only added when the text differs from the native template by ≥1 symbol.`)
@@ -2246,59 +2354,61 @@ export default function CmdParamsEditor({ templateId, args, onChange, modelPathF
     </div>
   )
 
-  // ----- Context block: Ignore-Override + AutoFill + Memory Overhead -----
-  // (autoFillResult + its effect are computed in the component body above/below)
-  const renderContextBlock = () => {
-    return (
-      <div className="spec-widget">
-        <div className="mmproj-widget-title"><Gauge size={15} /> Context</div>
-        <div className="mmproj-widget-arg">Per-preset context control · --ctx-size · --fit</div>
-        {/* Ignore Context Length Override */}
-        <div className="mmproj-widget-row">
-          <span className="mmproj-widget-label">Ignore Context Length Override</span>
-          <div className="toggle-wrap">
-            <label className="toggle" style={disabled ? { opacity: 0.45, cursor: 'not-allowed' } : {}}>
-              <input type="checkbox" checked={ignoreCtxOverride} onChange={(e) => {
-                const newArgs: Record<string, any> = { ...args, '__ignoreCtxOverride': e.target.checked }
-                // Auto-disable AutoFill when Ignore-Override turns off (can't be used without it).
-                if (!e.target.checked) newArgs['__autoCtxFill'] = 'off'
-                commit(newArgs)
-              }} disabled={disabled} />
-              <span className="toggle-track"></span><span className="toggle-thumb"></span>
-            </label>
-          </div>
+  // ----- Context blocks: Minimum Override + Automatic Context Fill -----
+  // Two independent blocks: the Minimum Override only decides whether the
+  // global minimum applies to this preset, Automatic Context Fill hands the
+  // context to llama-server --fit. Neither needs the other.
+  const renderContextBlock = () => (
+    <div className="spec-widget">
+      <div className="mmproj-widget-title"><Gauge size={15} /> Minimum Context Override</div>
+      <div className="mmproj-widget-arg">Per-preset context control · --ctx-size</div>
+      <div className="mmproj-widget-row">
+        <span className="mmproj-widget-label">Ignore Minimum Auto Fit Context length Override</span>
+        <div className="toggle-wrap">
+          <label className="toggle" style={disabled ? { opacity: 0.45, cursor: 'not-allowed' } : {}}>
+            <input type="checkbox" checked={ignoreCtxOverride} onChange={(e) => {
+              commit({ ...args, '__ignoreCtxOverride': e.target.checked })
+            }} disabled={disabled} />
+            <span className="toggle-track"></span><span className="toggle-thumb"></span>
+          </label>
         </div>
-        {ignoreCtxOverride && (
-          <div style={{ fontSize: 11, color: 'var(--text-muted)', paddingLeft: 4 }}>
-            When ON, this preset uses its own --ctx-size and ignores the global Minimum AutoFit override from Settings.
-          </div>
-        )}
-        {/* Use Automatic Context Fill */}
-        <div className="mmproj-widget-row" style={ignoreCtxOverride ? {} : { opacity: 0.5 }}>
-          <span className="mmproj-widget-label">
-            Use Automatic Context Fill
-            {!ignoreCtxOverride && <span style={{ color: 'var(--text-muted)', marginLeft: 4 }}>(requires Ignore Override)</span>}
-          </span>
-          <div className="toggle-wrap">
-            <label className="toggle" style={disabled ? { opacity: 0.45, cursor: 'not-allowed' } : {}}>
-              <input type="checkbox" checked={autoCtxFill !== 'off'} onChange={(e) => {
-                const newMode = e.target.checked ? 'auto' : 'off'
-                commit({ ...args, '__autoCtxFill': newMode })
-              }} disabled={disabled || !ignoreCtxOverride} />
-              <span className="toggle-track"></span><span className="toggle-thumb"></span>
-            </label>
-          </div>
-        </div>
-        {ignoreCtxOverride && autoCtxFill === 'auto' && (
-          <div style={{ fontSize: 11, color: 'var(--text-muted)', paddingLeft: 4 }}>
-            {isMoe
-              ? 'Auto: llama-server --fit handles GPU offloading + context evaluation automatically.'
-              : 'Dense: llama-server --fit handles GPU offloading + context evaluation automatically, fitting as much context as possible.'}
-          </div>
-        )}
       </div>
-    )
-  }
+      {ignoreCtxOverride && (
+        <div style={{ fontSize: 11, color: 'var(--text-muted)', paddingLeft: 4 }}>
+          When ON, this preset uses its own --ctx-size and ignores the global Minimum AutoFit override from Settings.
+        </div>
+      )}
+    </div>
+  )
+  const renderAutoFillBlock = () => (
+    <div className="spec-widget">
+      <div className="mmproj-widget-title"><Gauge size={15} /> Automatic Context Fill</div>
+      <div className="mmproj-widget-arg">Auto Fit Memory · --fit</div>
+      <div className="mmproj-widget-row">
+        <span className="mmproj-widget-label">Use Automatic Context Fill</span>
+        <div className="toggle-wrap">
+          <label className="toggle" style={disabled ? { opacity: 0.45, cursor: 'not-allowed' } : {}}>
+            <input type="checkbox" checked={autoCtxFill !== 'off'} onChange={(e) => {
+              // This switch owns --fit, so a value stored by an older row goes.
+              const newArgs: Record<string, any> = { ...args, '__autoCtxFill': e.target.checked ? 'auto' : 'off' }
+              delete newArgs['--fit']
+              delete newArgs['-fit']
+              commit(newArgs)
+            }} disabled={disabled} />
+            <span className="toggle-track"></span><span className="toggle-thumb"></span>
+          </label>
+        </div>
+      </div>
+      {autoCtxFill === 'auto' && (
+        <div style={{ fontSize: 11, color: 'var(--text-muted)', paddingLeft: 4 }}>
+          {isMoe
+            ? 'Auto: llama-server --fit handles GPU offloading + context evaluation automatically.'
+            : 'Dense: llama-server --fit handles GPU offloading + context evaluation automatically, fitting as much context as possible.'}
+          {' '}It picks the context itself, so --ctx-size and the minimum override are not passed.
+        </div>
+      )}
+    </div>
+  )
 
   // VRAM/RAM Overhead — on by default (see buildQuickEngineBaseline), split
   // into two independent pools since they're genuinely different costs:
@@ -2454,12 +2564,12 @@ export default function CmdParamsEditor({ templateId, args, onChange, modelPathF
     // When Automatic Context Fill is "Auto" (--fit decides context and
     // layers at launch — --ctx-size is never even passed, see
     // buildLaunchArgs), the ctx-size field itself is blank, and the global
-    // AutoFit Minimum floor is also skipped (ignoreCtxOverride opts out of
-    // it) — so vramBudget.autoFitContext would otherwise be a placeholder
+    // AutoFit Minimum floor does not apply either (the context is not set by
+    // us) — so vramBudget.autoFitContext would otherwise be a placeholder
     // with no relation to what --fit actually picks at runtime. Rather than
     // present a number against a target that isn't real, this mode is
     // called out explicitly below and no fixed recommendation is shown.
-    const isAutoFitAuto = ignoreCtxOverride && autoCtxFill === 'auto'
+    const isAutoFitAuto = autoCtxFill === 'auto'
     // Label depends on Dense vs MoE (vs MoE+"max" strategy).
     const line1Label = isAutoFitAuto
       ? 'Automatic Context Fill (--fit) is on — llama-server decides GPU layers and context together at launch, so a fixed recommendation doesn\'t apply here.'
@@ -2659,7 +2769,10 @@ export default function CmdParamsEditor({ templateId, args, onChange, modelPathF
       { id: 'mmproj', title: 'Multimodal Projector', keywords: 'multimodal projector --mmproj vision image', node: renderMmprojWidget() },
       { id: 'spec', title: 'Speculative Decoding', keywords: 'speculative decoding draft --spec mtp eagle dflash dspark ngram n-gram draft model', node: renderSpecWidget() }
     ],
-    'Context Window': [{ id: 'context', title: 'Context Size', keywords: 'context --ctx-size --fit autofit length override', node: renderContextBlock() }],
+    'Context Window': [
+      { id: 'context', title: 'Minimum Context Override', keywords: 'minimum context override ignore --ctx-size autofit length', node: renderContextBlock() },
+      { id: 'auto-fill', title: 'Automatic Context Fill', keywords: 'automatic context fill --fit auto fit memory autofit', node: renderAutoFillBlock() }
+    ],
     'GPU': [{ id: 'moe', title: 'MoE Offload', keywords: 'moe mixture of experts --n-cpu-moe --cpu-moe expert layers', node: renderMoeWidget() }],
     'Sampling': [{ id: 'sampling-presets', title: 'Sampling Presets', keywords: 'sampling presets preset temperature', node: samplingPresetsRow }],
     'Server': [

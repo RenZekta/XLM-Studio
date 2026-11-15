@@ -77,6 +77,8 @@ const api = {
   // ----- File pickers -----
   pickModelFile: () => ipcRenderer.invoke('pick-model-file'),
   pickAnyFile: () => ipcRenderer.invoke('pick-any-file'),
+  listLlamaDevices: (backendPath: string, exe: string) => ipcRenderer.invoke('list-llama-devices', backendPath, exe),
+  readTextFile: (filePath: string) => ipcRenderer.invoke('read-text-file', filePath),
 
   // ----- Run model -----
   runModel: (opts: object) => ipcRenderer.invoke('run-model', opts),

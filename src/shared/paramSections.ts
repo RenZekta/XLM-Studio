@@ -4,7 +4,7 @@ import type { CommandCategory, CommandParam } from './types'
 // checked against the real schema (scripts/params-sections-verify.js).
 
 // Flags with a custom widget instead of a row.
-export const CUSTOM_PARAMS = ['--model', '--port', '--host', '--api-key', '--mmproj', '--spec-type', '--spec-draft-model', '--chat-template', '--reasoning-budget', '--reasoning-budget-message', '--n-cpu-moe', '--reasoning-preserve',
+export const CUSTOM_PARAMS = ['--model', '--port', '--host', '--api-key', '--mmproj', '--spec-type', '--spec-draft-model', '--chat-template', '--chat-template-file', '--fit', '--mmproj-device', '--reasoning-budget', '--reasoning-budget-message', '--n-cpu-moe', '--reasoning-preserve',
   '--spec-ngram-map-k4v-size-n', '--spec-ngram-map-k4v-size-m', '--spec-ngram-map-k4v-min-hits',
   '--spec-ngram-mod-n-match', '--spec-ngram-mod-n-min', '--spec-ngram-mod-n-max',
   // Rendered inside the Speculative Decoding widget, next to the other draft settings.

@@ -310,7 +310,7 @@ body.card-dragging, body.card-dragging * { cursor: grabbing !important; user-sel
   border-color: rgba(59,130,246,.6);
 }
 /* Task 2.1: yellow hint shown next to the ctx badge when the per-preset
-   "Ignore Context Length Override" is ON (and/or AutoFill is active). */
+   "Ignore Minimum Auto Fit Context length Override" is ON (and/or AutoFill is active). */
 .ctx-override-hint {
   font-size: 10px; font-weight: 600; color: var(--warning);
   white-space: nowrap; flex-shrink: 0;

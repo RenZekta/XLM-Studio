@@ -4,7 +4,7 @@ import {
   unlinkSync, createWriteStream, statSync, rmdirSync, renameSync, promises as fsPromises,
   copyFileSync as fsCopyFileSync
 } from 'fs'
-import { join, extname, basename, dirname, resolve } from 'path'
+import { join, extname, basename, dirname, resolve, isAbsolute } from 'path'
 import { spawn, ChildProcess, exec } from 'child_process'
 import https from 'https'
 import http from 'http'
@@ -3257,6 +3257,47 @@ export function registerIpcHandlers(): void {
     if (r.canceled || !r.filePaths.length) return null
     return r.filePaths[0]
   })
+  // A small text file the user pointed at (a chat template), for the preview next to its path.
+  // Devices a llama.cpp build can use, from `llama-server --list-devices`.
+  // Cached per executable (and its mtime, so an update or rebuild refreshes it)
+  // for every Template that uses the build. A failed run is not cached.
+  const deviceListCache = new Map<string, Promise<{ name: string; description: string }[]>>()
+  ipcMain.handle('list-llama-devices', async (_e, backendPath: string, exe: string): Promise<{ name: string; description: string }[]> => {
+    try {
+      const exePath = join(String(backendPath), String(exe))
+      const s = await loadSettings()
+      if (![BACKEND_DIR, ...s.externalBackendFolders].some(b => isSafePath(b, exePath)) || !existsSync(exePath)) return []
+      const key = `${exePath}|${(await fsPromises.stat(exePath)).mtimeMs}`
+      let job = deviceListCache.get(key)
+      if (!job) {
+        job = runToolArgs(exePath, ['--list-devices']).then(r => {
+          const out: { name: string; description: string }[] = []
+          // Lines look like "  CUDA0: NVIDIA GeForce RTX 4090 (24564 MiB, 23000 MiB free)".
+          for (const line of `${r.stdout}\n${r.stderr}`.split(/\r?\n/)) {
+            const m = /^\s+([A-Za-z][A-Za-z0-9_-]*\d+):\s+(.+?)\s*$/.exec(line)
+            if (m && !/^CPU/i.test(m[1]) && !out.some(d => d.name === m[1])) out.push({ name: m[1], description: m[2] })
+          }
+          if (out.length === 0) deviceListCache.delete(key)
+          return out
+        })
+        deviceListCache.set(key, job)
+      }
+      return await job
+    } catch { return [] }
+  })
+  ipcMain.handle('read-text-file', async (_e, filePath: string): Promise<{ ok: true; text: string } | { ok: false; error: string }> => {
+    try {
+      if (typeof filePath !== 'string' || !isAbsolute(filePath)) return { ok: false, error: 'Use the full path of the file.' }
+      const st = await fsPromises.stat(filePath)
+      if (!st.isFile()) return { ok: false, error: 'That is not a file.' }
+      if (st.size > 1024 * 1024) return { ok: false, error: 'The file is larger than 1 MB, too big for a chat template.' }
+      const buf = await fsPromises.readFile(filePath)
+      if (buf.includes(0)) return { ok: false, error: 'The file is not text.' }
+      return { ok: true, text: buf.toString('utf-8') }
+    } catch (err) {
+      return { ok: false, error: (err as NodeJS.ErrnoException).code === 'ENOENT' ? 'File not found.' : `Cannot read the file: ${(err as Error).message}` }
+    }
+  })
 
   // ----- Run model -----
   async function runModelImpl(opts: { id: string; name: string; backendPath: string; exe: string; args: string[]; openBrowser: boolean; port: number; ignoreBaseUrlOverride?: boolean; skipCheckpoint?: boolean; checkpointMode?: CheckpointMode; engine?: EngineId; modelPath?: string }) {
@@ -3305,7 +3346,7 @@ export function registerIpcHandlers(): void {
     // Ensure --ctx-size is passed so the server uses the model's
     // real context (not the 4096 default). The renderer (ModelCard) is now the
     // source of truth for the EFFECTIVE context — it computes it from the
-    // per-preset "Ignore Context Length Override" flag + the global Minimum
+    // per-preset "Ignore Minimum Auto Fit Context length Override" flag + the global Minimum
     // AutoFit override + the preset's own --ctx-size, and forces --ctx-size to
     // that value. The main process therefore does NOT re-apply the global
     // override (doing so would break the per-preset ignore flag). It only
@@ -5538,7 +5579,7 @@ export function registerIpcHandlers(): void {
           const free = parseInt(parts[0], 10) || 0
           const total = parseInt(parts[1], 10) || 0
           const name = parts.slice(2).join(',').trim()
-          return { freeVRAMMB: free, totalVRAMMB: total, hasNvidia: true, gpuName: name, vendor: 'NVIDIA', gpuType: 'discrete' }
+          return { freeVRAMMB: free, totalVRAMMB: total, hasNvidia: true, gpuName: name, vendor: 'NVIDIA', gpuType: 'discrete', gpuCount: nvidiaOut.split('\n').filter((l: string) => l.trim()).length }
         }
       }
 
@@ -5650,7 +5691,8 @@ export function registerIpcHandlers(): void {
             freeVRAMMB = Math.round(totalVRAMMB * 0.85)
           }
 
-          return { freeVRAMMB, totalVRAMMB, hasNvidia: vendor === 'NVIDIA', gpuName: best.model || best.vendor || null, vendor, gpuType }
+          const gpuCount = controllers.filter(c => isDiscrete(c.vendor || '') || isDiscrete(c.model || '')).length || 1
+          return { freeVRAMMB, totalVRAMMB, hasNvidia: vendor === 'NVIDIA', gpuName: best.model || best.vendor || null, vendor, gpuType, gpuCount }
         }
       }
 

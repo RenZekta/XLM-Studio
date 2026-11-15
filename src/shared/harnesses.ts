@@ -280,7 +280,7 @@ export function templateContext(t: Pick<Template, 'modelPath' | 'args' | 'engine
   const own = Number(args['--ctx-size'] ?? args['-c'] ?? 0) || 0
   const ignore = args['__ignoreCtxOverride'] === true
   let ctx = own
-  if (ignore && args['__autoCtxFill'] === 'auto') ctx = 0
+  if (args['__autoCtxFill'] === 'auto') ctx = 0
   else if (!ignore && autoFit.enabled && autoFit.contextLength > own) ctx = autoFit.contextLength
   if (ctx <= 0 && t.modelPath) ctx = native(t.modelPath) || 0
   return ctx > 0 ? Math.floor(ctx) : 0
