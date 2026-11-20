@@ -9,6 +9,9 @@ files:
 extraResources:
   - from: resources/
     to: resources/
+  # The engine card guide, read by Settings > Engine Cards.
+  - from: docs/engine-cards.md
+    to: resources/engine-cards.md
   # The icon of the app's windows (resources/icon.png, see src/main/appIcon.ts).
   - from: assets/icon_256.png
     to: icon.png

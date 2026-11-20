@@ -124,6 +124,10 @@ export interface CommandParam {
   emptyLabel?: string
   // Display text for select options whose stored value is cryptic.
   optionLabels?: Record<string, string>
+  // Engine cards only: the flag sent when a boolean is switched off on
+  // purpose, and how a value joins its flag ("--flag value" or "--flag=value").
+  offArg?: string
+  format?: 'space' | 'equals'
 }
 export interface CommandCategory {
   name: string

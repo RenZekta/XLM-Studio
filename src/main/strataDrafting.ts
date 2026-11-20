@@ -1,6 +1,7 @@
 import { existsSync, readFileSync, writeFileSync, renameSync } from 'fs'
 import { join } from 'path'
 import { spawn, type SpawnOptions } from 'child_process'
+import { strataSourceDir } from './strataLayout'
 
 // The drafter choice lives in the run config's "drafting" key, which the server
 // reads at every start. setup.py's --drafter only controls what setup downloads
@@ -104,7 +105,9 @@ export interface PrepareInput {
 export async function prepareDrafting(p: PrepareInput): Promise<void> {
   const { io } = p
   try {
-    const cfgPath = runConfigPath(p.cloneDir, p.tags, p.family, p.model)
+    // setup.py, strata.py, .venv and the run configs share one folder.
+    const src = strataSourceDir(p.cloneDir)
+    const cfgPath = runConfigPath(src, p.tags, p.family, p.model)
     if (!cfgPath) {
       if (p.mode !== 'auto') io.log(`Drafter: unknown family "${p.family}", ${p.mode} not saved.`)
       return
@@ -128,14 +131,14 @@ export async function prepareDrafting(p: PrepareInput): Promise<void> {
       io.log(`Drafter: ${p.mode} saved (was ${next.previous}).`)
     }
     if (p.mode !== 'dflash2') return
-    const py = venvPython(p.cloneDir)
+    const py = venvPython(src)
     if (!existsSync(py)) {
       io.log('Drafter: no Python environment yet, DFlash2 files not checked. Without them Strata starts the MTP.')
       return
     }
     io.log('Drafter: checking DFlash2 files (about 1.2 GB if a download is needed) ...')
     const env = { ...process.env, PYTHONUNBUFFERED: '1', PYTHONUTF8: '1', PYTHONIOENCODING: 'utf-8', ...p.env }
-    const code = await runStep(py, draftingFetchArgv(p.cloneDir, cfgPath, p.dataDir), { cwd: p.cloneDir, env, windowsHide: true }, io)
+    const code = await runStep(py, draftingFetchArgv(src, cfgPath, p.dataDir), { cwd: src, env, windowsHide: true }, io)
     if (code !== 0) io.log(`Drafter: DFlash2 check failed (${code === null ? 'could not run' : `exit ${code}`}). Without the files Strata starts the MTP.`)
   } catch (e) {
     io.log(`Drafter: ${(e as Error).message}`)

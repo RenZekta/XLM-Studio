@@ -6,8 +6,9 @@ import { applyMmprojOffloadFlag } from '../../../shared/mmprojOffload'
 import { modelEntryHasPath } from '../../../shared/ggufShards'
 import CmdParamsEditor from './CmdParamsEditor'
 import EngineParamsEditor from './EngineParamsEditor'
+import CardParamsEditor from './CardParamsEditor'
 import LayoutToolbar from './LayoutToolbar'
-import { ENGINES, engineOf } from '../../../shared/engines'
+import { engineDef, engineOf } from '../../../shared/engines'
 import { buildStrataArgv, strataGgufDir, strataInfoFor } from '../../../shared/strata'
 import { resolveEngineBackend, resolveLlamaTarget } from '../utils/engineBackends'
 import { effectiveTemplatePort, starColorForPort } from '../utils/templatePort'
@@ -117,13 +118,35 @@ export default function ModelCard({ card, selected, cut }: Props) {
       return
     }
     if (cardEngine !== 'llama.cpp') {
+      if (engineDef(cardEngine).missing) {
+        alert(`The engine card "${cardEngine}" is not loaded. Add it in Settings > Engine Cards, or edit the Template to pick another engine.`)
+        return
+      }
       const build = resolveEngineBackend(cardEngine, { backendKey: card.template.backendKey }, backends, activeBackend, useStore.getState().engineGlobals)
       if (!build || !build.exe) {
-        alert(`${ENGINES[cardEngine].label} is not installed. Install it from Settings > Engine Tracker.`)
+        alert(`${engineDef(cardEngine).label} is not installed. Install it from Settings > Engine Tracker.`)
         return
       }
       const modelPath = card.template.modelPath
       if (!modelPath) { alert('This Template has no model file selected.'); return }
+      if (engineDef(cardEngine).card) {
+        const cardRes = await window.api.runModel({
+          id: card.template.id,
+          name: card.template.name,
+          backendPath: build.path,
+          exe: build.exe,
+          args: [],
+          openBrowser: useStore.getState().modelDefaults?.autoOpenChatUI === true,
+          port: card.template.serverPort || 8080,
+          ignoreBaseUrlOverride: card.template.args?.['__ignoreBaseUrlOverride'] === true,
+          engine: cardEngine,
+          modelPath,
+          cardArgs: card.template.args
+        })
+        if (cardRes.success) setCardStatus(card.template.id, 'running', cardRes.pid, cardRes.port)
+        else { alert(`Failed to run: ${cardRes.error}`); setCardStatus(card.template.id, 'error') }
+        return
+      }
       const meta = ggufMetadata[modelPath]
       // The Overrides page can force one parallel value on every Strata
       // Template, like the llama.cpp parallel override does for its own.
@@ -327,7 +350,7 @@ export default function ModelCard({ card, selected, cut }: Props) {
                     ? `Context: ${effectiveCtx.toLocaleString()} tokens — from Minimum Context Length Override (Model Defaults). Passed to llama.cpp, /props and the chat window.`
                     : cardEngine === 'llama.cpp'
                       ? `Context: ${effectiveCtx.toLocaleString()} tokens - from this preset's --ctx-size. Passed to llama.cpp, /props and the chat window.`
-                      : `Context: ${effectiveCtx.toLocaleString()} tokens - from this Template's --context. Passed to ${ENGINES[cardEngine].label} and the chat window.`
+                      : `Context: ${effectiveCtx.toLocaleString()} tokens - from this Template's --context. Passed to ${engineDef(cardEngine).label} and the chat window.`
                 }
               >
                 <Gauge size={11} />
@@ -418,7 +441,9 @@ export default function ModelCard({ card, selected, cut }: Props) {
         <div className={`expanded-inner ${layoutEditing ? 'layout-editing-pad' : ''}`}>
           {engineOf(card.template) === 'llama.cpp'
             ? <CmdParamsEditor templateId={card.template.id} args={card.template.args} layoutEditing={layoutEditing} />
-            : <EngineParamsEditor engine={engineOf(card.template)} templateId={card.template.id} args={card.template.args} layoutEditing={layoutEditing} />}
+            : engineOf(card.template) === 'strata'
+              ? <EngineParamsEditor engine="strata" templateId={card.template.id} args={card.template.args} layoutEditing={layoutEditing} />
+              : <CardParamsEditor engine={engineOf(card.template)} templateId={card.template.id} args={card.template.args} layoutEditing={layoutEditing} />}
         </div>
       </div>
     </div>

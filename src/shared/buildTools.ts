@@ -152,6 +152,22 @@ export function planTools(tools: ToolId[], mode: 'install' | 'update', platform:
 // version exists, or the package is already installed.
 export const WINGET_NOTHING_TO_DO = new Set([-1978335189, -1978335135, 2316632107, 2316632161])
 
+// The version `winget list --upgrade-available` offers for a package, read from
+// its table row (Name  Id  Version  Available  Source). Null when the package
+// is not in the output or the row has no version in that position.
+export function parseWingetAvailable(stdout: string, id: string): string | null {
+  for (const line of stdout.split(/\r?\n/)) {
+    const tokens = line.trim().split(/\s+/)
+    const at = tokens.findIndex(t => t.toLowerCase() === id.toLowerCase())
+    if (at < 0) continue
+    let next = at + 1
+    if (tokens[next] === '<' || tokens[next] === '>') next++
+    const available = tokens[next + 1]
+    return available && /\d/.test(available) ? available : null
+  }
+  return null
+}
+
 // One line a person can run themselves, for when elevation is not possible.
 export function describeCommand(c: PlannedCommand): string {
   return c.cmd === 'sh' ? c.args[1] : [c.cmd, ...c.args.map(a => /\s/.test(a) ? `"${a}"` : a)].join(' ')

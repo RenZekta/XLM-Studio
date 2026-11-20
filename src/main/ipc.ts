@@ -4,7 +4,7 @@ import {
   unlinkSync, createWriteStream, statSync, rmdirSync, renameSync, promises as fsPromises,
   copyFileSync as fsCopyFileSync
 } from 'fs'
-import { join, extname, basename, dirname, resolve, isAbsolute } from 'path'
+import { join, extname, basename, dirname, resolve, isAbsolute, sep } from 'path'
 import { spawn, ChildProcess, exec } from 'child_process'
 import https from 'https'
 import http from 'http'
@@ -26,7 +26,9 @@ import { initPerfMonitor, registerPerfHandlers, startTracking, stopTracking, sto
 import { initMcpLayer, registerMcpHandlers } from './mcpServer'
 import { toolTemplateAction, launchCommandForId } from './mcpControl'
 import { randomBytes } from 'crypto'
-import { engineOf, type EngineId } from '../shared/engines'
+import { engineOf, engineDef, isBuiltinEngine, isEngineId, type EngineId } from '../shared/engines'
+import { initEngineCards, listLoadedCards, customCardsDir, refreshEngineCards, engineCardOf, cardForFolder, scanCardEngine, buildCardSpawn } from './engineCards'
+import { buildCardArgv, cardEnv, cardLauncherFile, DEFAULT_READY } from '../shared/engineCard'
 import { migrateHarnessSettings, type HarnessSettings } from '../shared/harnesses'
 import { initHarnessManager } from './harnesses'
 import { assetMatchesHost } from '../shared/assetPlatform'
@@ -47,12 +49,12 @@ import { parseFamilyTags, parseStrataCatalog, type StrataCatalog } from './strat
 import { prepareDrafting, runStep, splitDrafter } from './strataDrafting'
 import { LineAssembler } from './lineAssembler'
 import {
-  STRATA_DATA_DIRNAME, DEFAULT_STRATA_DATA, strataLauncherName, looksLikeStrataClone, gitAvailable,
+  STRATA_DATA_DIRNAME, DEFAULT_STRATA_DATA, strataLauncherName, looksLikeStrataClone, strataSourceDir, gitAvailable,
   gitEngineVersionLabel, baseTagOf, compareTags, latestRemoteTag, updateGitEngine, githubCloneUrl, cloneGitEngine,
   probeGitEngine, readRememberedDataDir, resolveStrataData, buildStrataSpawn,
   gitEngineInstances, instanceForOs, instanceToCopy, instanceNameFor, cloneGitEngineFrom
 } from './strataEngine'
-import { prepareBuildTools, installBuildTools, buildToolsStatus, invalidateBuildToolsCaches, type ToolsPlanStatus, type ToolsContext } from './buildTools'
+import { prepareBuildTools, installBuildTools, initBuildToolsState, buildToolsStatus, invalidateBuildToolsCaches, type ToolsPlanStatus, type ToolsContext } from './buildTools'
 import { findInstalledRocm, type RocmChannel } from './rocmSdk'
 import { ROCM_GPUS, gfxForGpuName, rocmGpu, type RocmSdkSource } from '../shared/rocm'
 import {
@@ -406,7 +408,7 @@ function migrateGlobalEngineBackends(raw: any): Partial<Record<EngineId, { backe
   const out: Partial<Record<EngineId, { backendKey: string }>> = {}
   if (raw && typeof raw === 'object') {
     for (const id of Object.keys(raw)) {
-      if (id !== 'llama.cpp' && engineOf(id) === id && typeof raw[id]?.backendKey === 'string') out[id as EngineId] = { backendKey: raw[id].backendKey }
+      if (id !== 'llama.cpp' && isEngineId(id) && typeof raw[id]?.backendKey === 'string') out[id as EngineId] = { backendKey: raw[id].backendKey }
     }
   }
   return out
@@ -648,6 +650,14 @@ function isPortAvailable(port: number): Promise<boolean> {
 // that long to exit before the SIGKILL. Strata releases tens of GB of pinned
 // RAM when it is allowed to shut down cleanly. Windows always force-kills the
 // tree, which frees that memory with the processes.
+// How long an engine gets to exit by itself before it is killed: Strata
+// shuts its own children down, a card engine says so in its card.
+function stopGrace(engine: EngineId | undefined, strataMs: number): { graceMs: number } | undefined {
+  if (engine === 'strata') return { graceMs: strataMs }
+  const grace = engine ? engineDef(engine).card?.launch.stop?.graceMs : undefined
+  return grace ? { graceMs: Math.min(grace, strataMs) } : undefined
+}
+
 function killProcessTree(proc: ChildProcess, opts?: { graceMs?: number }): Promise<void> {
   return new Promise((resolve) => {
     if (!proc || proc.exitCode !== null || proc.signalCode) {
@@ -1247,6 +1257,11 @@ async function scanBackendRoot(rootDir: string, rootExternal: boolean, rootIndex
     // Strata's shared data folder lives beside the repo folders.
     if (e.name.toLowerCase() === STRATA_DATA_DIRNAME.toLowerCase()) continue
     const forkDir = join(rootDir, e.name)
+    const folderCard = cardForFolder(e.name)
+    if (folderCard) {
+      out.push(...scanCardEngine(folderCard, forkDir, e.name, rootDir, rootIndex, rootExternal))
+      continue
+    }
     let l2Entries: import('fs').Dirent[]
     try {
       l2Entries = await fsPromises.readdir(forkDir, { withFileTypes: true })
@@ -1378,7 +1393,10 @@ const ENGINE_COMMANDS_FILES: Record<EngineId, string> = {
 
 // The built-in parameter schema of an engine, read fresh from resources/.
 function loadEngineCommandsSchema(engine: EngineId): CommandsSchema | null {
+  const card = engineCardOf(engine)
+  if (card) return { version: `card-${card.cardVersion}`, categories: JSON.parse(JSON.stringify(card.params?.categories ?? [])) }
   const file = ENGINE_COMMANDS_FILES[engine]
+  if (!file) return null
   const path = app.isPackaged
     ? join(process.resourcesPath, 'resources', file)
     : join(process.cwd(), 'resources', file)
@@ -2393,7 +2411,7 @@ export async function cleanupAllProcesses(): Promise<void> {
   // processes actually die, so their data gets persisted to history instead
   // of just vanishing.
   stopAllTracking()
-  await Promise.all(entries.map(([_id, e]) => killProcessTree(e.proc, e.engine === 'strata' ? { graceMs: 8000 } : undefined).catch(() => {})))
+  await Promise.all(entries.map(([_id, e]) => killProcessTree(e.proc, stopGrace(e.engine, 8000)).catch(() => {})))
 }
 
 // Peek at the running-process count so the quit handler can decide whether to
@@ -2405,7 +2423,48 @@ export function getRunningProcessCount(): number {
 // ==========================================================================
 // IPC handlers
 // ==========================================================================
+function cardGuidePath(): string {
+  return app.isPackaged ? join(process.resourcesPath, 'resources', 'engine-cards.md') : join(process.cwd(), 'docs', 'engine-cards.md')
+}
+
+function broadcastEngineCards(): void {
+  BrowserWindow.getAllWindows().forEach(win => {
+    if (!win.isDestroyed()) win.webContents.send('engine-cards-changed')
+  })
+}
+
 export function registerIpcHandlers(): void {
+  initEngineCards(
+    app.isPackaged ? join(process.resourcesPath, 'resources', 'engine-cards') : join(process.cwd(), 'resources', 'engine-cards'),
+    join(APP_ROOT, 'engine-cards'),
+    broadcastEngineCards
+  )
+  ipcMain.handle('get-engine-cards', () => listLoadedCards().map(c => ({
+    id: c.id, label: c.card?.label ?? c.id, description: c.card?.description, folder: c.card?.engine.folder,
+    file: c.file, source: c.source, valid: !!c.card, card: c.card, replaces: !!c.replaces, errors: c.errors, warnings: c.warnings,
+    launcher: c.card ? cardLauncherFile(c.card, process.platform) : null
+  })))
+  ipcMain.handle('refresh-engine-cards', () => { refreshEngineCards(); broadcastEngineCards() })
+  ipcMain.handle('open-engine-cards-folder', () => shell.openPath(customCardsDir()))
+  ipcMain.handle('open-engine-folder', async (_e, cardId: string) => {
+    const card = engineCardOf(cardId)
+    if (!card) return 'Engine card not loaded'
+    const dir = join(BACKEND_DIR, card.engine.folder)
+    await fsPromises.mkdir(dir, { recursive: true })
+    return shell.openPath(dir)
+  })
+  ipcMain.handle('get-engine-card-prompt', () => {
+    let guide = ''
+    try { guide = readFileSync(cardGuidePath(), 'utf-8') } catch { guide = '(The engine card guide was not found in this install.)' }
+    return [
+      'Write an engine card for XLM Studio for the engine in this folder. Follow the guide below.',
+      `Save it as <engine-id>.json in: ${customCardsDir()}`,
+      `The engine's own folder goes in: ${BACKEND_DIR}${sep}<engine.folder>`,
+      'XLM Studio validates the card when the file appears. If it is invalid, a <engine-id>.errors.txt file is written beside it; read it and fix the card.',
+      '',
+      guide
+    ].join('\n')
+  })
   // Read a template's CURRENT name directly from disk, by id — used so
   // session tracking always reflects live renames rather than a name
   // snapshotted at session-start (same pattern as LogsView.tsx's liveName()).
@@ -2454,6 +2513,7 @@ export function registerIpcHandlers(): void {
   })
   registerPerfHandlers()
   initGithubToken(APP_ROOT)
+  initBuildToolsState(APP_ROOT)
 
   // Paths extraction was already started for in this session. A file that
   // fails to parse is never cached, so without this every model listing would
@@ -2974,6 +3034,8 @@ export function registerIpcHandlers(): void {
   // engineHint covers a repo folder with no tracker entry (e.g. a clone
   // placed by hand), whose engine cannot be read from settings.
   async function getCommandsImpl(backendKey: string, engineHint?: string): Promise<CommandsSchema | null> {
+    // A card is the only source of its parameters; nothing is saved beside it.
+    if (engineHint && engineCardOf(engineHint)) return loadEngineCommandsSchema(engineHint)
     if (!backendKey) return loadEngineCommandsSchema(engineOf(engineHint))
     const s = await loadSettings()
     const tracked = s.trackedBackends.find(t => t.folderName === backendKey || t.id === backendKey)
@@ -3300,8 +3362,14 @@ export function registerIpcHandlers(): void {
   })
 
   // ----- Run model -----
-  async function runModelImpl(opts: { id: string; name: string; backendPath: string; exe: string; args: string[]; openBrowser: boolean; port: number; ignoreBaseUrlOverride?: boolean; skipCheckpoint?: boolean; checkpointMode?: CheckpointMode; engine?: EngineId; modelPath?: string }) {
-    const isStrata = engineOf(opts.engine) === 'strata'
+  async function runModelImpl(opts: { id: string; name: string; backendPath: string; exe: string; args: string[]; openBrowser: boolean; port: number; ignoreBaseUrlOverride?: boolean; skipCheckpoint?: boolean; checkpointMode?: CheckpointMode; engine?: EngineId; modelPath?: string; cardArgs?: Record<string, unknown> }) {
+    const engineId = engineOf(opts.engine)
+    const isStrata = engineId === 'strata'
+    const isLlama = engineId === 'llama.cpp'
+    const card = isBuiltinEngine(engineId) ? null : engineCardOf(engineId)
+    if (!isBuiltinEngine(engineId) && !card) {
+      return { success: false, error: `The engine card "${engineId}" is not loaded. Add its card in Settings > Engine Cards or pick another engine in the Template.` }
+    }
     if (runningProcesses.has(opts.id)) return { success: false, error: 'Already running' }
     // If base URL override is enabled, use the override port, ignoring
     // the template's original Server Port completely. A template with its
@@ -3320,7 +3388,7 @@ export function registerIpcHandlers(): void {
     // port (which may be the override port), regardless of whether that
     // port needed conflict resolution below — otherwise the server can
     // start on the original port from args instead of the resolved one.
-    {
+    if (!card) {
       const portIdx = finalArgs.indexOf('--port')
       if (portIdx !== -1 && portIdx + 1 < finalArgs.length) {
         finalArgs[portIdx + 1] = String(finalPort)
@@ -3352,7 +3420,7 @@ export function registerIpcHandlers(): void {
     // override (doing so would break the per-preset ignore flag). It only
     // ensures --ctx-size is present (0 = native) when the renderer didn't set
     // one (e.g. MoE Auto mode passes --fit and leaves ctx to llama-server).
-    if (!isStrata) {
+    if (isLlama) {
       const hasFit = finalArgs.includes('--fit') || finalArgs.includes('-fit')
       if (!hasFit) {
         const idx = finalArgs.indexOf('--ctx-size')
@@ -3364,11 +3432,11 @@ export function registerIpcHandlers(): void {
     // be polled, regardless of whether the user has it in their own template
     // args. Doesn't change behavior other than exposing the /metrics
     // endpoint — safe to always add.
-    if (!isStrata && !finalArgs.includes('--metrics')) finalArgs.push('--metrics')
+    if (isLlama && !finalArgs.includes('--metrics')) finalArgs.push('--metrics')
     // The server answers to the Template's name, so a coding harness (see
     // harnesses.ts) and the MCP tools address the same id. An explicit --alias
     // in the Template wins.
-    if (!isStrata && opts.name && !finalArgs.includes('--alias') && !finalArgs.includes('-a')) finalArgs.push('--alias', opts.name)
+    if (isLlama && opts.name && !finalArgs.includes('--alias') && !finalArgs.includes('-a')) finalArgs.push('--alias', opts.name)
     // Force-enable --slot-save-path when checkpointing is active, the same
     // unconditional way as --metrics above, so the /slots save/restore
     // endpoints exist regardless of the template's own args. Skipped for
@@ -3380,18 +3448,42 @@ export function registerIpcHandlers(): void {
     // on the command line for THIS run, so it (not a fresh re-read of
     // settings later) is what Stop and the restore-on-ready poll must use.
     let kvCheckpointsEnabled = false
-    if (!opts.skipCheckpoint && !isStrata) {
+    if (!opts.skipCheckpoint && isLlama) {
       const kvSettings = await loadSettings()
       kvCheckpointsEnabled = resolveCheckpointEnabled(!!kvSettings.kvCacheCheckpoints?.enabled, opts.checkpointMode)
       if (kvCheckpointsEnabled && !finalArgs.includes('--slot-save-path')) {
         finalArgs.push('--slot-save-path', await resolveCheckpointFolder())
       }
     }
+    let cardEnvVars: Record<string, string> = {}
+    if (card) {
+      // The card says where the port, host and key go, so the argument list
+      // is built here, once the resolved port and the overrides are known.
+      const ovr = opts.ignoreBaseUrlOverride ? undefined : (await loadSettings()).baseUrlOverride
+      // Starts that do not come from the editor (MCP tools) pass no args, so
+      // the saved Template is read.
+      let cardArgs = opts.cardArgs
+      if (!cardArgs) {
+        try { cardArgs = JSON.parse(readFileSync(join(TEMPLATES_DIR, `${opts.id}.json`), 'utf-8')).args } catch { /* no saved Template */ }
+      }
+      const input = {
+        modelPath: opts.modelPath ?? '',
+        port: finalPort,
+        host: ovr?.enabled && ovr.serveOnLocalNetwork ? '0.0.0.0' : undefined,
+        apiKey: ovr?.enabled && ovr.apiKeyEnabled && ovr.apiKey ? ovr.apiKey : undefined,
+        engineDir: opts.backendPath,
+        args: cardArgs ?? {}
+      }
+      const built = buildCardArgv(card, input)
+      if ('error' in built) return { success: false, error: built.error }
+      finalArgs = built.argv
+      cardEnvVars = cardEnv(card, input)
+    }
     // Apply "Serve on local network" (--host 0.0.0.0) and
     // "API Key" (--api-key <key>) from the Base URL Override settings.
     // Skipped entirely when this template ignores the Base URL Override,
     // same scope as the port substitution above.
-    if (!opts.ignoreBaseUrlOverride) {
+    if (!opts.ignoreBaseUrlOverride && !card) {
       const s2 = await loadSettings()
       const ovr = s2.baseUrlOverride
       if (ovr?.enabled && ovr.serveOnLocalNetwork) {
@@ -3428,8 +3520,8 @@ export function registerIpcHandlers(): void {
       // the user can see exactly what is being passed to llama.cpp.
       serverReadyFlags.delete(opts.id)
       modelLoadingFlags.delete(opts.id)
-      if (isStrata) {
-        emitAppLog(opts.id, opts.name, `Launching "${opts.name}" - engine=Strata - port=${finalPort}${overridePort !== null ? ' (override)' : ''}`)
+      if (!isLlama) {
+        emitAppLog(opts.id, opts.name, `Launching "${opts.name}" - engine=${engineDef(engineId).label} - port=${finalPort}${overridePort !== null ? ' (override)' : ''}`)
       } else {
         const ctxArgIdx = finalArgs.indexOf('--ctx-size')
         const ctxArgShortIdx = finalArgs.indexOf('-c')
@@ -3485,7 +3577,7 @@ export function registerIpcHandlers(): void {
         if ('error' in strataSpawn) return { success: false, error: strataSpawn.error }
         const valueAfter = (flag: string) => { const i = finalArgs.indexOf(flag); return i !== -1 ? finalArgs[i + 1] ?? '' : '' }
         let setupText: string | null = null
-        try { setupText = readFileSync(join(opts.backendPath, 'setup.py'), 'utf8') } catch { /* tags stay empty */ }
+        try { setupText = readFileSync(join(strataSourceDir(opts.backendPath), 'setup.py'), 'utf8') } catch { /* tags stay empty */ }
         const sendLine = (line: string) => BrowserWindow.getAllWindows().forEach(win => {
           if (!win.isDestroyed()) win.webContents.send('server-log', { id: opts.id, name: opts.name, stream: 'stdout', line, ts: Date.now() })
         })
@@ -3502,17 +3594,25 @@ export function registerIpcHandlers(): void {
       // detached:true on POSIX so we get a new process group we can SIGKILL
       // wholesale (covers llama-server's child threads). On Windows we rely on
       // `taskkill /F /T` instead, so detached doesn't matter there.
-      const proc = strataSpawn && !('error' in strataSpawn)
+      let cardSpawn: ReturnType<typeof buildCardSpawn> | null = null
+      if (card) {
+        cardSpawn = buildCardSpawn(exePath, finalArgs, cardEnvVars)
+        if ('error' in cardSpawn) return { success: false, error: cardSpawn.error }
+      }
+      const proc = cardSpawn && !('error' in cardSpawn)
+        ? spawn(cardSpawn.command, cardSpawn.args, cardSpawn.options)
+        : strataSpawn && !('error' in strataSpawn)
         ? spawn(strataSpawn.command, strataSpawn.args, strataSpawn.options)
         : spawn(exePath, finalArgs, { detached: process.platform !== 'win32', stdio: 'pipe', cwd: dirname(exePath), windowsHide: false, env: engineRuntimeEnv(dirname(exePath)) })
-      if (isStrata) {
-        // setup, the server and the engine's narration all arrive on these
+      if (isStrata || card) {
+        // Setup, the server and the engine's narration all arrive on these
         // two pipes; whole lines go to the Logs view, one entry per line.
+        const readyLine = isStrata ? /^ready: https?:\/\// : card?.launch.ready?.log ? new RegExp(card.launch.ready.log) : null
         const emitLine = (stream: 'stdout' | 'stderr') => (text: string) => {
           BrowserWindow.getAllWindows().forEach(win => {
             if (!win.isDestroyed()) win.webContents.send('server-log', { id: opts.id, name: opts.name, stream, line: text, ts: Date.now() })
           })
-          if (!serverReadyFlags.get(opts.id) && /^ready: https?:\/\//.test(text.trim())) {
+          if (!serverReadyFlags.get(opts.id) && readyLine?.test(text.trim())) {
             serverReadyFlags.set(opts.id, true)
             emitAppLog(opts.id, opts.name, `Server ready - listening on port ${finalPort}`)
             return
@@ -3611,15 +3711,33 @@ export function registerIpcHandlers(): void {
       })
       runningProcesses.set(opts.id, {
         proc, port: finalPort,
-        modelPath: (isStrata ? opts.modelPath : extractArgValue(finalArgs, '--model', '-m')) || undefined,
+        modelPath: (!isLlama ? opts.modelPath : extractArgValue(finalArgs, '--model', '-m')) || undefined,
         templateName: opts.name,
         checkpointsActive: kvCheckpointsEnabled,
-        apiKey: (!isStrata && extractArgValue(finalArgs, '--api-key')) || undefined,
-        engine: isStrata ? 'strata' : undefined,
+        apiKey: (isLlama && extractArgValue(finalArgs, '--api-key')) || undefined,
+        engine: isLlama ? undefined : engineId,
         cloneDir: isStrata ? opts.backendPath : undefined
       })
       // Begin polling this instance's /metrics endpoint.
-      startTracking(opts.id, finalPort, opts.name, isStrata ? 'strata' : 'llama.cpp')
+      startTracking(opts.id, finalPort, opts.name, engineId)
+      const readyHttp = card ? card.launch.ready?.http ?? (card.launch.ready?.log ? null : DEFAULT_READY.http) : null
+      if (readyHttp) {
+        // Any answer below 500 means the server is listening; engines that
+        // are still loading a model usually answer 503.
+        const startedAt = Date.now()
+        const probe = setInterval(() => {
+          if (runningProcesses.get(opts.id)?.proc !== proc || serverReadyFlags.get(opts.id) || Date.now() - startedAt > 60 * 60 * 1000) { clearInterval(probe); return }
+          const req = http.get({ host: '127.0.0.1', port: finalPort, path: readyHttp, timeout: 2000 }, res => {
+            res.resume()
+            if ((res.statusCode ?? 500) < 500 && !serverReadyFlags.get(opts.id)) {
+              serverReadyFlags.set(opts.id, true)
+              emitAppLog(opts.id, opts.name, `Server ready - listening on port ${finalPort}`)
+            }
+          })
+          req.on('error', () => {})
+          req.on('timeout', () => req.destroy())
+        }, 1500)
+      }
       // Kick off the KV cache checkpoint restore (if one applies) in the
       // background -- it waits on the server's /health itself, so it never
       // delays this function's own return.
@@ -3668,14 +3786,14 @@ export function registerIpcHandlers(): void {
         // the badge isn't shown with a misleading "0"; the built-in web UI
         // reads the real n_ctx from the server's /props endpoint.
         const ctxIdx2 = finalArgs.indexOf(isStrata ? '--context' : '--ctx-size')
-        const shortCtxIdx2 = isStrata ? -1 : finalArgs.indexOf('-c')
+        const shortCtxIdx2 = isLlama ? finalArgs.indexOf('-c') : -1
         const cidx = ctxIdx2 !== -1 ? ctxIdx2 : shortCtxIdx2
         let ctxSize: number | undefined
         if (cidx !== -1 && cidx + 1 < finalArgs.length) {
           const v = parseInt(finalArgs[cidx + 1], 10)
           if (!isNaN(v) && v > 0) ctxSize = v
         }
-        if (isStrata) {
+        if (!isLlama) {
           // Strata only listens once the model is loaded, which takes
           // minutes (and far longer the first time, while it prepares the
           // model), so wait for the ready line instead of a fixed delay.
@@ -3713,7 +3831,7 @@ export function registerIpcHandlers(): void {
       return { success: false, error: String(err) }
     }
   }
-  ipcMain.handle('run-model', async (_e, opts: { id: string; name: string; backendPath: string; exe: string; args: string[]; openBrowser: boolean; port: number; ignoreBaseUrlOverride?: boolean; skipCheckpoint?: boolean; checkpointMode?: CheckpointMode }) => runModelImpl(opts))
+  ipcMain.handle('run-model', async (_e, opts: { id: string; name: string; backendPath: string; exe: string; args: string[]; openBrowser: boolean; port: number; ignoreBaseUrlOverride?: boolean; skipCheckpoint?: boolean; checkpointMode?: CheckpointMode; engine?: EngineId; modelPath?: string; cardArgs?: Record<string, unknown> }) => runModelImpl(opts))
 
   // When base URL override is enabled, ALL port values are overridden.
   // The app ignores the template's original Server Port completely and uses
@@ -3899,7 +4017,7 @@ export function registerIpcHandlers(): void {
     // Kill the whole process tree (children included) and wait for the process
     // to actually exit. This fixes the Stop→Start race where the port was still
     // bound when the user clicked Start again right after Stop.
-    await killProcessTree(proc, entry.engine === 'strata' ? { graceMs: 20000 } : undefined)
+    await killProcessTree(proc, stopGrace(entry.engine, 20000))
     // Now poll the port until the OS releases the listening socket. This is the
     // critical step: without it, a rapid restart reports "port already in use".
     await waitForPortFree(port, 8000, 100)
@@ -5405,7 +5523,7 @@ export function registerIpcHandlers(): void {
       if (t.kind !== 'git') continue
       const clone = await findGitEngineClone(t)
       if (!clone) continue
-      const own = join(clone, 'data', 'gguf_fingerprints.json')
+      const own = join(strataSourceDir(clone), 'data', 'gguf_fingerprints.json')
       // Only the default Strata falls back to the snapshot: another fork's
       // models are not the ones the snapshot lists.
       const file = existsSync(own) ? own : t.id === 'strata' ? bundled : null
@@ -5448,9 +5566,9 @@ export function registerIpcHandlers(): void {
       clone = await findGitEngineClone(t)
       isDefault = t.id === 'strata'
     }
-    const own = clone ? join(clone, 'data', 'gguf_fingerprints.json') : null
+    const own = clone ? join(strataSourceDir(clone), 'data', 'gguf_fingerprints.json') : null
     const tableFile = own && existsSync(own) ? own : (!clone || isDefault) ? bundled : null
-    const setupFile = clone ? join(clone, 'setup.py') : null
+    const setupFile = clone ? join(strataSourceDir(clone), 'setup.py') : null
     const mtime = (f: string | null) => { try { return f ? String(statSync(f).mtimeMs) : '-' } catch { return '-' } }
     const stamp = `${clone}|${mtime(tableFile)}|${mtime(setupFile)}`
     const hit = strataCatalogCache.get(backendKey)

@@ -9,6 +9,9 @@ import https from 'https'
 import type { EngineId, InstallKind } from '../shared/engines'
 import type { StrataDataSettings } from '../shared/types'
 import { cleanPathArg } from '../shared/strata'
+import { GIT_ENGINE_MARKERS, looksLikeStrataClone } from './strataLayout'
+
+export { GIT_ENGINE_MARKERS, looksLikeStrataClone, strataSourceDir } from './strataLayout'
 
 export { cleanPathArg }
 
@@ -21,13 +24,6 @@ export const STRATA_DATA_DIRNAME = 'Strata-data'
 
 export function strataLauncherName(): string {
   return process.platform === 'win32' ? 'START-HERE.bat' : 'setup.sh'
-}
-
-// The same structural markers local discovery and the add-by-link probe use.
-export const GIT_ENGINE_MARKERS = ['setup.py', 'serve/server.py']
-
-export function looksLikeStrataClone(dir: string): boolean {
-  return GIT_ENGINE_MARKERS.every(m => existsSync(join(dir, ...m.split('/'))))
 }
 
 // --------------------------------------------------------------------------
@@ -270,8 +266,12 @@ function urlExists(url: string): Promise<boolean> {
 // release-asset detection the caller already has.
 export async function probeGitEngine(slug: string, branch = 'HEAD'): Promise<{ engine: EngineId; kind: InstallKind } | null> {
   if (!githubCloneUrl(slug)) return null
-  const checks = await Promise.all(GIT_ENGINE_MARKERS.map(m => urlExists(`https://raw.githubusercontent.com/${slug}/${branch}/${m}`)))
-  return checks.every(Boolean) ? { engine: 'strata', kind: 'git' } : null
+  // The same markers local discovery uses, at the root (older layout) or in terminal/.
+  for (const prefix of ['', 'terminal/']) {
+    const checks = await Promise.all(GIT_ENGINE_MARKERS.map(m => urlExists(`https://raw.githubusercontent.com/${slug}/${branch}/${prefix}${m}`)))
+    if (checks.every(Boolean)) return { engine: 'strata', kind: 'git' }
+  }
+  return null
 }
 
 // --------------------------------------------------------------------------

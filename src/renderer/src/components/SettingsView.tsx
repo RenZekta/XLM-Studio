@@ -8,13 +8,14 @@ import {
 import CommandsEditor from './CommandsEditor'
 import ExternalFolderList from './ExternalFolderList'
 import McpSettingsSection from './McpSettingsSection'
+import EngineCardsSection from './EngineCardsSection'
 import LaunchSettingsSection from './LaunchSettingsSection'
 import HarnessManagerSection from './HarnessManagerSection'
 import { changeTheme } from '../hooks/useTheme'
 import { formatBytes } from '../utils/format'
 import SegmentedToggle from './SegmentedToggle'
 import SourceBuildPanel from './SourceBuildPanel'
-import { ENGINES, engineOf, type EngineId } from '../../../shared/engines'
+import { ENGINES, engineDef, engineOf, type EngineId } from '../../../shared/engines'
 import type { StrataSettings, EngineInstallMode } from '../../../shared/types'
 import { pickDefaultAsset, setLastAssetType } from '../utils/backendAssetPref'
 import type { ThemePref, TrackedBackend, TrackedBackendRelease, RedundantCheckpoint } from '../../../shared/types'
@@ -1120,7 +1121,7 @@ export default function SettingsView() {
                       <div className="settings-row-label flex items-center gap-2">
                         <Layers size={13} style={{ color: 'var(--text-muted)', flexShrink: 0 }} />
                         <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{b.displayName}</span>
-                        {engineOf(b) !== 'llama.cpp' && <span className="version-badge">{ENGINES[engineOf(b)].label}</span>}
+                        {engineOf(b) !== 'llama.cpp' && <span className="version-badge">{engineDef(b).label}</span>}
                         {(engineOf(b) === 'llama.cpp'
                           ? activeBackend?.id === b.id
                           : engineGlobals[engineOf(b)]?.backendKey === b.backendKey) && <span className="version-badge active-version">Active</span>}
@@ -1274,7 +1275,7 @@ export default function SettingsView() {
               value={customEngine}
               onChange={v => setCustomEngine(v as '' | EngineId)}
               title="Engine of this repository"
-              options={[{ value: '', label: 'Detect engine' }, ...(Object.keys(ENGINES) as EngineId[]).map(id => ({ value: id, label: ENGINES[id].label }))]}
+              options={[{ value: '', label: 'Detect engine' }, ...(Object.keys(ENGINES).filter(id => ENGINES[id].install !== 'local') as EngineId[]).map(id => ({ value: id, label: ENGINES[id].label }))]}
             />
             <button className="btn btn-primary" onClick={handleAddTrackedBackend} disabled={!customBackendLink.trim()}>
               <Plus size={14} /> Add engine from link
@@ -1347,6 +1348,7 @@ export default function SettingsView() {
       </div>
 
       <HarnessManagerSection />
+      <EngineCardsSection />
       <McpSettingsSection />
       <LaunchSettingsSection />
     </div>

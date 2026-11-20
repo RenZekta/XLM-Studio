@@ -15,7 +15,7 @@ import type { Template, CheckpointMode, CommandsSchema } from '../shared/types'
 import { applyMmprojOffloadFlag, MMPROJ_OFFLOAD_MODE_KEY, getMmprojOffloadMode, resolveMmprojOffloadToRam } from '../shared/mmprojOffload'
 import { applySpecDraftKvDefaults } from '../shared/specDraftKv'
 import { resolvePinned } from '../shared/backendPin'
-import { engineOf, ENGINES, type EngineId } from '../shared/engines'
+import { engineOf, engineDef, type EngineId } from '../shared/engines'
 import { syncYarnAuto } from '../shared/yarnAuto'
 import { buildStrataArgv, buildStrataQuickBaseline, strataGgufDir, strataInfoFor, strataIsCommon } from '../shared/strata'
 
@@ -59,7 +59,7 @@ export interface ControlDeps {
   // that). Used by info-models so listing models stays cheap.
   getCachedMetadata: (modelPath: string) => any | null
   getCommands: (backendKey: string) => Promise<any>
-  runModel: (opts: { id: string; name: string; backendPath: string; exe: string; args: string[]; openBrowser: boolean; port: number; ignoreBaseUrlOverride?: boolean; skipCheckpoint?: boolean; checkpointMode?: CheckpointMode; engine?: EngineId; modelPath?: string }) => Promise<{ success: boolean; pid?: number; error?: string; port?: number }>
+  runModel: (opts: { id: string; name: string; backendPath: string; exe: string; args: string[]; openBrowser: boolean; port: number; ignoreBaseUrlOverride?: boolean; skipCheckpoint?: boolean; checkpointMode?: CheckpointMode; engine?: EngineId; modelPath?: string; cardArgs?: Record<string, unknown> }) => Promise<{ success: boolean; pid?: number; error?: string; port?: number }>
   stopModel: (id: string, opts?: { skipCheckpoint?: boolean }) => Promise<{ success: boolean; error?: string }>
   isRunning: (templateId: string) => { running: boolean; port?: number }
   getOverridePort: () => Promise<number | null>
@@ -138,7 +138,7 @@ async function resolveBackend(template: Template): Promise<any> {
   if (backends.length === 0) {
     throw new ToolError(engine === 'llama.cpp'
       ? 'No backends installed - install a backend in the Backends tab first.'
-      : `${ENGINES[engine].label} is not installed - install it in the Engine Tracker first.`)
+      : `${engineDef(engine).label} is not installed - install it in the Engine Tracker first.`)
   }
   const settings = await D().loadSettings()
   // llama.cpp keeps its global selection in globalBackend; every other
@@ -238,6 +238,8 @@ async function buildStrataLaunchArgs(template: Template): Promise<{ args: string
 
 async function buildLaunchArgs(template: Template): Promise<{ args: string[]; ctxAutoFitApplied: boolean; fitMode: 'off' | 'auto' }> {
   if (engineOf(template) === 'strata') return buildStrataLaunchArgs(template)
+  // A card engine's arguments are built at launch from the Template's saved args.
+  if (engineDef(template).card) return { args: [], ctxAutoFitApplied: false, fitMode: 'off' }
   const settings = await D().loadSettings()
   const md = settings.modelDefaults || {}
   const raw = { ...(template.args || {}) }
@@ -872,6 +874,7 @@ export async function toolApplyParametersPreset(args: { preset: string | number;
   const t = findTemplate(args.template)
   await assertEditAllowed(t)
   const preset = normalizePreset(args.preset)
+  if (engineDef(t).card) throw new ToolError(`${engineDef(t).label} has no presets.`)
   if (engineOf(t) !== 'llama.cpp') {
     // Other engines have their own, much smaller presets (see
     // EngineParamsEditor): Full Auto sends nothing and Quick is the shared

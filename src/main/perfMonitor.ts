@@ -22,7 +22,7 @@ import { join } from 'path'
 import { randomUUID } from 'crypto'
 import * as http from 'http'
 import { BrowserWindow, ipcMain, dialog } from 'electron'
-import type { EngineId } from '../shared/engines'
+import { engineDef, type EngineId } from '../shared/engines'
 import { parseStrataMetrics } from './strataMetrics'
 
 export interface PerfGenPoint { ts: number; contextTokens: number; genTps: number }
@@ -116,7 +116,7 @@ function fetchMetrics(port: number, engine: EngineId): Promise<Record<string, nu
     // Strata answers /metrics with Prometheus text when Accept mentions
     // text/plain, so asking for both would never return the JSON it parses.
     const accept = engine === 'strata' ? 'application/json' : 'text/plain'
-    const req = http.get({ host: '127.0.0.1', port, path: '/metrics', timeout: 3000, headers: { Accept: accept } }, (res) => {
+    const req = http.get({ host: '127.0.0.1', port, path: engineDef(engine).card?.launch.metrics?.path ?? '/metrics', timeout: 3000, headers: { Accept: accept } }, (res) => {
       let data = ''
       res.on('data', (chunk) => { data += chunk })
       res.on('end', () => {
@@ -225,6 +225,9 @@ export function initPerfMonitor(appRoot: string, opts: {
 }
 
 export function startTracking(templateId: string, port: number, templateName: string, engine: EngineId = 'llama.cpp') {
+  // A card engine is polled only when its card says it serves metrics.
+  const cardMetrics = engineDef(engine).card?.launch.metrics
+  if (engineDef(engine).card && cardMetrics?.format !== 'prometheus') return
   if (active.has(templateId)) stopTracking(templateId)  // shouldn't happen, but stay safe
   const session: PerfSessionData = {
     id: randomUUID(),

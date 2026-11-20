@@ -1,7 +1,7 @@
 import { execFile } from 'child_process'
 import { join } from 'path'
 import { tmpdir } from 'os'
-import { readdirSync, statSync } from 'fs'
+import { readdirSync, statSync, readFileSync, writeFileSync } from 'fs'
 import { run, fail } from './runLogged'
 import { ensureToolEnv, onPath } from './toolEnv'
 import { detectToolchain, invalidateToolchain, type BuildToolchain } from './sourceBuild'
@@ -10,7 +10,7 @@ import { rocmGpu, rocmOsFor, ROCM_PIP_INDEX, type RocmSdkSource } from '../share
 import { findCudaRoot, missingCudaParts } from './cudaSdk'
 import { installCudaToolkit, resolveCudaInstaller, cudaUpdateAvailable } from './cudaInstaller'
 import {
-  planTools, requiredToolsFor, isManagedTool, packageNames, describeCommand, TOOL_LABELS, WINGET_NOTHING_TO_DO,
+  planTools, requiredToolsFor, isManagedTool, packageNames, describeCommand, parseWingetAvailable, TOOL_LABELS, WINGET_NOTHING_TO_DO,
   type ToolId, type PackageManager, type PlannedCommand
 } from '../shared/buildTools'
 
@@ -168,6 +168,35 @@ const outdatedCache = new Map<string, { at: number; value: Promise<boolean> }>()
 // ask for administrator rights every time.
 const updateAttempted = new Set<string>()
 
+// winget lists some packages as upgradable that `winget upgrade` then refuses
+// as not applicable (installer type, scope or architecture differs from what is
+// installed). The version it refused is kept on disk so the same version is not
+// offered on every launch; a newer one is offered again.
+let declinedPath = ''
+let declined: Record<string, string> | null = null
+const lastListed = new Map<string, string>()
+
+export function initBuildToolsState(root: string): void {
+  declinedPath = join(root, 'build-tools-state.json')
+  declined = null
+}
+
+function declinedVersions(): Record<string, string> {
+  if (declined) return declined
+  declined = {}
+  try {
+    const stored = JSON.parse(readFileSync(declinedPath, 'utf8')) as { declined?: Record<string, string> }
+    if (stored.declined && typeof stored.declined === 'object') declined = stored.declined
+  } catch { /* none saved yet */ }
+  return declined
+}
+
+function declineVersion(id: string, version: string): void {
+  declinedVersions()[id] = version
+  if (!declinedPath) return
+  try { writeFileSync(declinedPath, JSON.stringify({ declined: declined }, null, 2)) } catch { /* kept for this session only */ }
+}
+
 function attemptKey(tool: ToolId, pm: PackageManager | null, ctx: ToolsContext): string {
   if (tool === 'cuda') return `cuda|${ctx.cudaSeries ?? 'newest'}`
   if (isManagedTool(tool, process.platform)) {
@@ -187,7 +216,10 @@ function cachedCheck(key: string, check: () => Promise<boolean>): Promise<boolea
 async function packageOutdated(pm: PackageManager, pkgs: string[]): Promise<boolean> {
   if (pm === 'winget') {
     const r = await capture(wingetBin, ['list', '--id', pkgs[0], '-e', '--upgrade-available', '--accept-source-agreements'])
-    return r.code === 0 && r.stdout.toLowerCase().includes(pkgs[0].toLowerCase())
+    if (r.code !== 0 || !r.stdout.toLowerCase().includes(pkgs[0].toLowerCase())) return false
+    const available = parseWingetAvailable(r.stdout, pkgs[0])
+    if (available) lastListed.set(pkgs[0], available)
+    return !available || declinedVersions()[pkgs[0]] !== available
   }
   if (pm === 'apt') {
     // A simulated upgrade lists every package that would be replaced.
@@ -290,6 +322,17 @@ export interface InstallOutcome {
   manual: { tool: ToolId; reason: string }[]
 }
 
+async function rememberNotApplicable(args: string[]): Promise<void> {
+  const id = args[args.indexOf('--id') + 1]
+  if (!id) return
+  let available = lastListed.get(id)
+  if (!available) {
+    const r = await capture(wingetBin, ['list', '--id', id, '-e', '--upgrade-available', '--accept-source-agreements'])
+    available = parseWingetAvailable(r.stdout, id) ?? undefined
+  }
+  if (available) declineVersion(id, available)
+}
+
 // Installs missing tools, or updates installed ones, and refreshes the
 // environment so the build sees them without restarting the app.
 export async function installBuildTools(tools: ToolId[], mode: 'install' | 'update', hooks: RocmHooks, ctx: ToolsContext): Promise<InstallOutcome> {
@@ -314,6 +357,7 @@ export async function installBuildTools(tools: ToolId[], mode: 'install' | 'upda
       const code = await run(real.cmd, real.args, hooks, { heartbeat: { everyMs: 30_000, describe: viaWinget ? wingetActivityReporter() : undefined } })
       if (code === null) fail('Cancelled')
       const nothingToDo = process.platform === 'win32' && WINGET_NOTHING_TO_DO.has(code)
+      if (nothingToDo && mode === 'update' && viaWinget) await rememberNotApplicable(real.args)
       if (code !== 0 && !nothingToDo) {
         const hint = real.cmd === 'pkexec' && (code === 126 || code === 127) ? ' The password dialog was dismissed or refused.' : ''
         fail(`The package manager failed (exit code ${code}).${hint} Run this yourself to see why:\n${describeCommand(c)}`)

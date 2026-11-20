@@ -19,6 +19,7 @@ import { phrases } from './utils/phrases'
 import { useTheme } from './hooks/useTheme'
 import type { Template } from '../../shared/types'
 import { engineOf } from '../../shared/engines'
+import { loadEngineCards } from './utils/engineCards'
 
 export default function App() {
   const searchParams = new URLSearchParams(window.location.search)
@@ -60,6 +61,7 @@ export default function App() {
   useEffect(() => {
     async function init() {
       try {
+        await loadEngineCards().catch(() => {})
         const [paths, backendsData, modelsData, extModelFolders, extBackendFolders, tracked] = await Promise.all([
           window.api.getPaths(),
           window.api.listBackends(),
@@ -173,6 +175,14 @@ export default function App() {
     // or edited Template stayed invisible until the app was restarted.
     // Merges by id rather than replacing `cards` wholesale, so a currently
     // running card's live status/expanded/tempPort survive the refresh.
+    try {
+      window.api?.onEngineCardsChanged?.(async () => {
+        try {
+          await loadEngineCards()
+          useStore.getState().setBackends(await window.api.listBackends())
+        } catch {}
+      })
+    } catch {}
     try {
       window.api?.onTemplatesChanged?.(async () => {
         try {

@@ -2,7 +2,7 @@ import React, { useEffect, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
 import { Save, X, Menu, Minimize2, Maximize2, Plus, Pencil, Trash, Check } from 'lucide-react'
 import { useStore } from '../store/useStore'
-import { ENGINES } from '../../../shared/engines'
+import { engineDef } from '../../../shared/engines'
 import { activeLayoutPreset, isDefaultLayoutId, layoutPresetsOf } from '../../../shared/paramLayout'
 import { useOverlayClose } from '../hooks/useOverlayClose'
 
@@ -92,7 +92,7 @@ export default function LayoutToolbar() {
       </button>
       {listOpen && (
         <div className="layout-presets-pop">
-          <div className="layout-presets-title">{ENGINES[engine].label} layouts</div>
+          <div className="layout-presets-title">{engineDef(engine).label} layouts</div>
           <div className="layout-presets-list">
             {presets.map(p => {
               const isDefault = isDefaultLayoutId(p.id)

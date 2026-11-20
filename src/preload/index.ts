@@ -5,6 +5,7 @@ import type {
   TrackedBackendRelease, ThemePref, ReleaseInfo, CpuInfo, SpecDetectionResult, StrataSettings, EngineInstallMode
 } from '../shared/types'
 import type { EngineId } from '../shared/engines'
+import type { EngineCardInfo } from '../shared/engineCard'
 import type { HarnessSettings, HarnessState } from '../shared/harnesses'
 
 const api = {
@@ -98,6 +99,17 @@ const api = {
   onTemplatesChanged: (cb: () => void) => {
     ipcRenderer.removeAllListeners('templates-changed')
     ipcRenderer.on('templates-changed', () => cb())
+  },
+
+  // ----- Engine cards -----
+  getEngineCards: () => ipcRenderer.invoke('get-engine-cards') as Promise<EngineCardInfo[]>,
+  refreshEngineCards: () => ipcRenderer.invoke('refresh-engine-cards') as Promise<void>,
+  openEngineCardsFolder: () => ipcRenderer.invoke('open-engine-cards-folder') as Promise<string>,
+  openEngineFolder: (cardId: string) => ipcRenderer.invoke('open-engine-folder', cardId) as Promise<string>,
+  getEngineCardPrompt: () => ipcRenderer.invoke('get-engine-card-prompt') as Promise<string>,
+  onEngineCardsChanged: (cb: () => void) => {
+    ipcRenderer.removeAllListeners('engine-cards-changed')
+    ipcRenderer.on('engine-cards-changed', () => cb())
   },
 
   // ----- HuggingFace -----

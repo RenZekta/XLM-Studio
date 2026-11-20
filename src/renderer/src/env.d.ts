@@ -4,6 +4,7 @@ import type {
   CpuInfo, SpeculationMode, KvCacheCheckpointSettings, RedundantCheckpoint, CheckpointMode, StrataSettings, EngineInstallMode
 } from '../../shared/types'
 import type { EngineId } from '../../shared/engines'
+import type { EngineCardInfo } from '../../shared/engineCard'
 import type { HarnessSettings, HarnessState } from '../../shared/harnesses'
 
 interface ModelDownloadInfo {
@@ -93,12 +94,18 @@ interface LlamaCppApi {
   readTextFile: (filePath: string) => Promise<{ ok: true; text: string } | { ok: false; error: string }>
 
   // Run model
-  runModel: (opts: { id: string; name: string; backendPath: string; exe: string; args: string[]; openBrowser: boolean; port: number; ignoreBaseUrlOverride?: boolean; skipCheckpoint?: boolean; checkpointMode?: CheckpointMode; engine?: EngineId; modelPath?: string }) => Promise<{ success: boolean; pid?: number; error?: string; port?: number }>
+  runModel: (opts: { id: string; name: string; backendPath: string; exe: string; args: string[]; openBrowser: boolean; port: number; ignoreBaseUrlOverride?: boolean; skipCheckpoint?: boolean; checkpointMode?: CheckpointMode; engine?: EngineId; modelPath?: string; cardArgs?: Record<string, unknown> }) => Promise<{ success: boolean; pid?: number; error?: string; port?: number }>
   stopModel: (id: string, opts?: { skipCheckpoint?: boolean }) => Promise<{ success: boolean; error?: string; alreadyStopped?: boolean }>
   onModelError: (cb: (data: { id: string; error: string }) => void) => void
   onModelExited: (cb: (data: { id: string }) => void) => void
   onModelStarted: (cb: (data: { id: string; pid?: number; port: number }) => void) => void
   onTemplatesChanged: (cb: () => void) => void
+  getEngineCards: () => Promise<EngineCardInfo[]>
+  refreshEngineCards: () => Promise<void>
+  openEngineCardsFolder: () => Promise<string>
+  openEngineFolder: (cardId: string) => Promise<string>
+  getEngineCardPrompt: () => Promise<string>
+  onEngineCardsChanged: (cb: () => void) => void
 
   // HuggingFace
   hfSearch: (query: string, sort?: string, direction?: number) => Promise<HfModelResult[] | { error: string }>

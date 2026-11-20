@@ -2,7 +2,7 @@ import React, { useEffect, useRef, useState } from 'react'
 import { useStore } from '../store/useStore'
 import { Link2, Database, Shield, Copy, Check, Server, Save } from 'lucide-react'
 import SegmentedToggle from './SegmentedToggle'
-import { ENGINES, ENGINE_IDS, type EngineId } from '../../../shared/engines'
+import { ENGINE_IDS, engineDef, type EngineId } from '../../../shared/engines'
 import { formatWithSpaces, parseSpacedNumber, CONTEXT_POWER_OF_TWO_STEPS, snapToNearestPowerOfTwo, indexOnLadder } from '../utils/contextFormat'
 
 
@@ -329,7 +329,7 @@ export default function OverridesView() {
             label="Engine:"
             options={ENGINE_IDS.map(id => ({
               value: id,
-              label: `${ENGINES[id].label}${activeOverrides[id] > 0 ? ` (${activeOverrides[id]} active)` : ''}`
+              label: `${engineDef(id).label}${activeOverrides[id] > 0 ? ` (${activeOverrides[id]} active)` : ''}`
             }))}
             value={engineTab}
             onChange={v => setEngineTab(v as EngineId)}
@@ -715,6 +715,9 @@ export default function OverridesView() {
       </div>
 
       </>
+      )}
+      {engineTab !== 'llama.cpp' && engineTab !== 'strata' && (
+        <div className="text-muted text-sm">{engineDef(engineTab).label} has no global overrides.</div>
       )}
       {engineTab === 'strata' && (
         <div className="settings-section">

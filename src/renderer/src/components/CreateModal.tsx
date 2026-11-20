@@ -2,13 +2,14 @@ import React, { useState, useEffect, useRef } from 'react'
 import { useStore } from '../store/useStore'
 import { FolderOpen, ChevronDown, Terminal } from 'lucide-react'
 import type { Template, CommandsSchema, BackendVersion, EngineValues } from '../../../shared/types'
-import { ENGINES, ENGINE_IDS, engineOf, engineAcceptsModel, modelSpecificEngines, type EngineId } from '../../../shared/engines'
+import { ENGINES, ENGINE_IDS, engineDef, engineOf, engineAcceptsModel, modelSpecificEngines, type EngineId } from '../../../shared/engines'
 import { modelEntryHasPath } from '../../../shared/ggufShards'
 import { buildStrataQuickBaseline } from '../../../shared/strata'
 import { backendTypeGroupLabel } from '../../../shared/backendType'
 import { backendsOfEngine, globalBackendOf, resolveEngineBackend, autoEngineFor, missingEngineFor } from '../utils/engineBackends'
 import CmdParamsEditor from './CmdParamsEditor'
 import EngineParamsEditor from './EngineParamsEditor'
+import CardParamsEditor from './CardParamsEditor'
 import SelectMenu from './SelectMenu'
 import { buildQuickEngineBaseline, seedSamplingArgsFromPreset } from '../../../shared/presetBaselines'
 import { useOverlayClose } from '../hooks/useOverlayClose'
@@ -23,6 +24,7 @@ function seedArgsFor(engine: EngineId, activeBackend: BackendVersion | null, sam
   if (engine === 'strata') {
     return { ...buildStrataQuickBaseline({ contextLength: meta?.contextLength }), __lastPreset: 'quick' }
   }
+  if (engine !== 'llama.cpp') return {}
   const seeded: Record<string, any> = seedSamplingArgsFromPreset(samplingPresets)
   Object.assign(seeded, buildQuickEngineBaseline({
     cpuInfo: useStore.getState().cpuInfo,
@@ -416,9 +418,9 @@ export default function CreateModal() {
                   variant="field"
                   value={engine}
                   onChange={id => switchEngine(id as EngineId)}
-                  options={ENGINE_IDS.map(id => ({
+                  options={(ENGINES[engine] ? ENGINE_IDS : [...ENGINE_IDS, engine]).map(id => ({
                     value: id,
-                    label: `${ENGINES[id].label}${ENGINES[id].kind === 'model-specific' ? ' (model-specific)' : ''}${backendsOfEngine(backends, id).length === 0 ? ' - not installed' : ''}`
+                    label: `${engineDef(id).label}${engineDef(id).kind === 'model-specific' ? ' (model-specific)' : ''}${engineDef(id).missing ? '' : backendsOfEngine(backends, id).length === 0 ? ' - not installed' : ''}`
                   }))}
                 />
               </div>
@@ -447,13 +449,13 @@ export default function CreateModal() {
             <div className="form-group">
               <label style={{ display: 'flex', alignItems: 'center', gap: 8, cursor: 'pointer' }}>
                 <input type="checkbox" checked={follow} onChange={e => pinTo(e.target.checked ? undefined : shownBuild)} />
-                <span style={{ fontSize: 13, fontWeight: 600 }}>{ENGINES[engine].followLabel}</span>
+                <span style={{ fontSize: 13, fontWeight: 600 }}>{engineDef(engine).followLabel}</span>
               </label>
               <div className="form-hint">
                 {engineBuilds.length === 0
-                  ? `${ENGINES[engine].label} is not installed. Install it from Settings > Engine Tracker.`
+                  ? `${engineDef(engine).label} is not installed. ${engineDef(engine).install === 'local' ? 'Put it in its folder inside the engines folder (Settings > Engine Cards).' : 'Install it from Settings > Engine Tracker.'}`
                   : follow
-                    ? `Uses ${shownBuild?.displayName || ENGINES[engine].label}, the engine's selection in the sidebar. Choosing a repo or backend below pins this Template to it.`
+                    ? `Uses ${shownBuild?.displayName || engineDef(engine).label}, the engine's selection in the sidebar. Choosing a repo or backend below pins this Template to it.`
                     : 'Pinned: this Template keeps using the repo below when the global selection changes.'}
               </div>
             </div>
@@ -471,7 +473,7 @@ export default function CreateModal() {
                     options={repoKeys.map(k => ({ value: k, label: k }))}
                   />
                 </div>
-                {ENGINES[engine].caps.backendSelection === 'builds' && (
+                {engineDef(engine).caps.backendSelection === 'builds' && (
                   <div className="form-group">
                     <label className="form-label">Backend</label>
                     <SelectMenu
@@ -568,6 +570,17 @@ export default function CreateModal() {
                     backendKey={backendKey}
                     backendVersionName={backendVersion}
                     backendType={backendType}
+                    headerPortalTarget={headerAnchor}
+                  />
+                ) : engine !== 'strata' ? (
+                  <CardParamsEditor
+                    engine={engine}
+                    args={args}
+                    onChange={setArgs}
+                    modelPathFallback={modelPath}
+                    serverPortFallback={serverPort}
+                    onServerPortChange={setServerPort}
+                    backendKey={backendKey}
                     headerPortalTarget={headerAnchor}
                   />
                 ) : (

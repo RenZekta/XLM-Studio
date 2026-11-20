@@ -14,7 +14,9 @@ const { execFileSync } = require('child_process')
 const esbuild = require('esbuild')
 
 const root = path.join(__dirname, '..')
-const strataDir = process.argv[2] || process.env.STRATA_DIR || ''
+const strataClone = process.argv[2] || process.env.STRATA_DIR || ''
+// Strata 0.2.16 keeps its sources in terminal/; older clones keep them at the root.
+const strataDir = strataClone && fs.existsSync(path.join(strataClone, 'terminal', 'setup.py')) ? path.join(strataClone, 'terminal') : strataClone
 const hasStrata = strataDir && fs.existsSync(path.join(strataDir, 'setup.py'))
 
 let failed = 0
@@ -39,7 +41,7 @@ const C = bundle('src/main/strataCatalog.ts', 'catalog')
 const DM = bundle('src/main/strataDrafting.ts', 'drafting')
 
 // -- engine registry ---------------------------------------------------------
-check('engineOf defaults legacy records to llama.cpp', E.engineOf({}) === 'llama.cpp' && E.engineOf(undefined) === 'llama.cpp' && E.engineOf('bogus') === 'llama.cpp')
+check('engineOf defaults legacy records to llama.cpp and keeps unknown ids', E.engineOf({}) === 'llama.cpp' && E.engineOf(undefined) === 'llama.cpp' && E.engineOf('bogus') === 'bogus')
 check('engineOf resolves strata', E.engineOf({ engine: 'strata' }) === 'strata')
 check('strata is the only model-specific engine', E.modelSpecificEngines().map(e => e.id).join() === 'strata')
 
@@ -231,6 +233,21 @@ check('low-RAM mode auto-detected when RAM is short', S.estimateStrataMemory({ v
 
 // -- git install/update helpers -----------------------------------------------
 const SE = bundle('src/main/strataEngine.ts', 'engine')
+
+// -- clone layouts: 0.2.16 moved the sources into terminal/ -------------------
+{
+  const mk = (base, files) => { for (const f of files) { const p = path.join(base, ...f.split('/')); fs.mkdirSync(path.dirname(p), { recursive: true }); fs.writeFileSync(p, '') } }
+  const oldDir = path.join(tmp, 'layout-old'), newDir = path.join(tmp, 'layout-new'), halfDir = path.join(tmp, 'layout-half')
+  mk(oldDir, ['setup.py', 'serve/server.py', 'START-HERE.bat'])
+  mk(newDir, ['START-HERE.bat', 'setup.sh', 'terminal/setup.py', 'terminal/serve/server.py', 'terminal/data/gguf_fingerprints.json'])
+  mk(halfDir, ['START-HERE.bat', 'terminal/setup.py'])
+  check('an older clone is recognised', SE.looksLikeStrataClone(oldDir))
+  check('a terminal/ clone is recognised', SE.looksLikeStrataClone(newDir))
+  check('a clone with the server missing is not', !SE.looksLikeStrataClone(halfDir))
+  check('the source folder of an older clone is the root', SE.strataSourceDir(oldDir) === oldDir)
+  check('the source folder of a terminal/ clone is terminal/', SE.strataSourceDir(newDir) === path.join(newDir, 'terminal'))
+  check('instances find a terminal/ clone', (() => { const fork = path.join(tmp, 'layout-fork'); fs.mkdirSync(fork); fs.cpSync(newDir, path.join(fork, 'Strata-windows'), { recursive: true }); return SE.gitEngineInstances(fork).length === 1 })())
+}
 check('compareTags orders numerically', SE.compareTags('v0.1.9', 'v0.1.41') < 0 && SE.compareTags('v1.0', 'v0.9.9') > 0 && SE.compareTags('v0.1.41', '0.1.41') === 0)
 check('baseTagOf strips describe suffix', SE.baseTagOf('v0.1.41-12-gabc1234') === 'v0.1.41' && SE.baseTagOf('v0.1.41') === 'v0.1.41' && SE.baseTagOf('abc1234') === null)
 check('only GitHub owner/repo slugs make clone URLs', SE.githubCloneUrl('Niko1221/Strata') === 'https://github.com/Niko1221/Strata.git' &&
@@ -541,7 +558,7 @@ import sys, json
 sys.path.insert(0, ${JSON.stringify(strataDir)})
 import setup
 t = {}
-for d in (setup.FAMILIES, setup.OWN_PATH_FAMILIES, setup.MULTI_FILE_FAMILIES):
+for d in (setup.FAMILIES, setup.OWN_PATH_FAMILIES, getattr(setup, "MULTI_FILE_FAMILIES", {})):
     t.update({k: v["tag"] for k, v in d.items()})
 print(json.dumps(t))
 `]).toString())
