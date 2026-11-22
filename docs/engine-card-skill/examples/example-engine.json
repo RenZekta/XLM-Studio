@@ -1,0 +1,64 @@
+{
+  "cardVersion": 1,
+  "id": "example-engine",
+  "label": "Example Engine",
+  "description": "A Python server installed from GitHub. Shows install steps, a launcher per platform, widgets, rules, presets and an override section.",
+  "engine": { "folder": "ExampleEngine" },
+  "source": { "repo": "example-org/example-engine", "branch": "main" },
+  "install": {
+    "steps": [
+      { "run": ["python", "-m", "venv", ".venv"] },
+      { "run": [".venv/Scripts/python.exe", "-m", "pip", "install", "-e", "."], "platform": ["windows"] },
+      { "run": [".venv/bin/python", "-m", "pip", "install", "-e", "."], "platform": ["linux", "macos"] }
+    ]
+  },
+  "launch": {
+    "file": { "windows": ".venv/Scripts/example-server.exe", "default": ".venv/bin/example-server" },
+    "argv": ["--model", "{model}", "--port", "{port}", ["--host", "{host}"], ["--api-key", "{apiKey}"], "{params}"],
+    "ready": { "http": "/v1/models" },
+    "stop": { "graceMs": 5000 }
+  },
+  "params": {
+    "categories": [
+      {
+        "name": "Generation",
+        "icon": "Zap",
+        "commands": [
+          { "arg": "--max-context", "label": "Context size", "description": "Tokens of context. The slider stops at the model's own limit.", "type": "number", "widget": "slider",
+            "slider": { "min": 512, "max": { "expr": "min(model.contextLength, 131072)" }, "step": 256, "scale": "ladder", "allowAuto": true, "recommended": 8192 } },
+          { "arg": "--max-parallel", "label": "Parallel requests", "description": "Requests decoded at the same time.", "type": "number", "min": 1, "max": 8 },
+          { "arg": "--batch", "label": "Batch size", "description": "Prompt tokens processed together.", "type": "number", "min": 1, "max": 4096 },
+          { "arg": "--kv-dtype", "label": "KV cache type", "description": "Precision of the KV cache.", "type": "select", "widget": "segmented", "options": ["f16", "q8_0", "q4_0"] },
+          { "arg": "--spec", "label": "Speculative decoding", "description": "Draft tokens with a small model.", "type": "boolean", "internal": true },
+          { "arg": "--draft-model", "label": "Draft model", "description": "GGUF of the draft model.", "type": "string", "widget": "file" }
+        ]
+      }
+    ],
+    "rules": [
+      { "id": "low-vram", "when": "system.vram.freeMB < 6000",
+        "then": [
+          { "clamp": { "arg": "--max-context", "max": 16384 } },
+          { "warn": "Only ${round(system.vram.freeMB / 1024, 1)} GB of VRAM is free; the context is capped at 16384.", "tone": "warning", "at": "--max-context" }
+        ] },
+      { "id": "draft-needs-spec", "when": "!arg(\"--spec\")", "then": [{ "hide": ["--draft-model"] }] },
+      { "id": "draft-required", "when": "arg(\"--spec\")", "then": [{ "require": ["--draft-model"], "message": "Pick a draft model, or turn speculative decoding off." }] }
+    ],
+    "blocks": [
+      { "id": "gpu", "kind": "stat", "label": "GPU", "value": "system.vram.gpus[0].name" },
+      { "id": "estimate", "kind": "estimate", "label": "Estimated memory" }
+    ],
+    "presets": [
+      { "id": "fast", "name": "Fast", "description": "Short context, small batch.", "args": { "--max-context": 8192, "--batch": 512 } },
+      { "id": "long", "name": "Long context", "mode": "replace", "args": { "--max-context": { "expr": "min(model.contextLength, 65536)" }, "--kv-dtype": "q8_0" } }
+    ]
+  },
+  "overrides": {
+    "sections": [
+      { "id": "perf", "title": "Performance", "fields": [
+        { "id": "batch", "label": "Batch size for every Template", "type": "number", "min": 1, "max": 4096, "applyTo": "--batch" }
+      ] }
+    ],
+    "global": { "parallel": "--max-parallel" }
+  },
+  "memory": { "estimator": "llama", "map": { "contextLength": "--max-context", "cacheTypeK": "--kv-dtype" } }
+}

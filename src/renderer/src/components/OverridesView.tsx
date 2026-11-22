@@ -2,6 +2,7 @@ import React, { useEffect, useRef, useState } from 'react'
 import { useStore } from '../store/useStore'
 import { Link2, Database, Shield, Copy, Check, Server, Save } from 'lucide-react'
 import SegmentedToggle from './SegmentedToggle'
+import CardOverridesPanel from './CardOverridesPanel'
 import { ENGINE_IDS, engineDef, type EngineId } from '../../../shared/engines'
 import { formatWithSpaces, parseSpacedNumber, CONTEXT_POWER_OF_TWO_STEPS, snapToNearestPowerOfTwo, indexOnLadder } from '../utils/contextFormat'
 
@@ -144,7 +145,7 @@ function BaseUrlField({ port, onPortChange, onPortBlur }: {
 export default function OverridesView() {
   const {
     modelDefaults, setModelDefaults, baseUrlOverride, setBaseUrlOverride, cpuInfo,
-    vramInfo, systemRam, kvCacheCheckpoints, setKvCacheCheckpoints
+    vramInfo, systemRam, kvCacheCheckpoints, setKvCacheCheckpoints, engineOverrides
   } = useStore()
   // "Recommended CPU Threads override" — local text-input draft state so
   // the user can type any % while editing, snapping to a whole-core-accurate
@@ -170,6 +171,7 @@ export default function OverridesView() {
       modelDefaults.cpuThreadsOverrideEnabled, modelDefaults.mmprojOffloadToRam].filter(Boolean).length,
     strata: strataParallel !== null ? 1 : 0
   }
+  for (const id of Object.keys(engineOverrides)) if (id !== 'llama.cpp' && id !== 'strata') activeOverrides[id] = Object.keys(engineOverrides[id] ?? {}).length
 
   return (
     <div className="max-w-3xl">
@@ -717,7 +719,9 @@ export default function OverridesView() {
       </>
       )}
       {engineTab !== 'llama.cpp' && engineTab !== 'strata' && (
-        <div className="text-muted text-sm">{engineDef(engineTab).label} has no global overrides.</div>
+        engineDef(engineTab).card
+          ? <CardOverridesPanel card={engineDef(engineTab).card!} />
+          : <div className="text-muted text-sm">{engineDef(engineTab).label} has no global overrides.</div>
       )}
       {engineTab === 'strata' && (
         <div className="settings-section">

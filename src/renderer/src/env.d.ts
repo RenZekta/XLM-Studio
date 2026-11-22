@@ -90,6 +90,7 @@ interface LlamaCppApi {
   // File pickers
   pickModelFile: () => Promise<{ name: string; path: string } | null>
   pickAnyFile: () => Promise<string | null>
+  pickFolder: () => Promise<string | null>
   listLlamaDevices: (backendPath: string, exe: string) => Promise<{ name: string; description: string }[]>
   readTextFile: (filePath: string) => Promise<{ ok: true; text: string } | { ok: false; error: string }>
 
@@ -104,7 +105,10 @@ interface LlamaCppApi {
   refreshEngineCards: () => Promise<void>
   openEngineCardsFolder: () => Promise<string>
   openEngineFolder: (cardId: string) => Promise<string>
-  getEngineCardPrompt: () => Promise<string>
+  getCardSkillState: () => Promise<{ installed: boolean; dir: string }>
+  addCardSkill: () => Promise<{ success: boolean; dir?: string; error?: string }>
+  removeCardSkill: () => Promise<{ success: boolean }>
+  checkForkCard: (cardId: string) => Promise<{ checked: number; missing: string[]; build?: string; error?: string }>
   onEngineCardsChanged: (cb: () => void) => void
 
   // HuggingFace
@@ -203,6 +207,13 @@ interface LlamaCppApi {
   removeSkillFiles: () => Promise<{ success: boolean }>
 
   // KV Cache Checkpoints
+  installCardEngine: (cardId: string) => Promise<{ success: boolean; path?: string; error?: string }>
+  cancelCardInstall: (cardId: string) => Promise<{ success: boolean }>
+  onCardInstallLog: (cb: (e: { id: string; line: string; app: boolean }) => void) => () => void
+  onCardInstallState: (cb: (e: { id: string; busy: boolean }) => void) => () => void
+  getEngineOverrides: () => Promise<Record<string, Record<string, unknown>>>
+  setEngineOverrides: (engine: string, values: Record<string, unknown>) => Promise<{ success: boolean }>
+  onEngineOverridesChanged: (cb: (all: Record<string, Record<string, unknown>>) => void) => () => void
   getKvCacheCheckpoints: () => Promise<KvCacheCheckpointSettings>
   setKvCacheCheckpoints: (opts: Partial<KvCacheCheckpointSettings>) => Promise<{ success: boolean }>
   listExternalCheckpointFolders: () => Promise<string[]>

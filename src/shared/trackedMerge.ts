@@ -1,4 +1,5 @@
 import type { TrackedBackend } from './types'
+import type { ForkCard } from './engineCard'
 
 // Brings the saved tracker entries and the built-in ones together. Built-in
 // entries always exist and always carry their current schema overrides (stored
@@ -30,6 +31,45 @@ export function mergeDefaultTracked(saved: TrackedBackend[], defaults: TrackedBa
     tracked[idx] = existing.id === def.id
       ? { ...existing, ...def }
       : { ...def, id: existing.id, folderName: existing.folderName }
+  }
+  return tracked
+}
+
+// Brings the tracker entries that fork cards define into the saved list. An
+// entry made from a card follows the card (name, branch, parameters) and goes
+// away with it. A hand-made entry for the same repo and branch is taken over in
+// place, keeping its folder so installed builds and pinned Templates still
+// resolve. A built-in entry for the same repo and branch has parameters of its
+// own, so a card for it is left out.
+export function mergeCardForks(
+  saved: TrackedBackend[],
+  forks: ForkCard[],
+  folderFor: (repo: string, taken: Set<string>, branch?: string) => string
+): TrackedBackend[] {
+  const ids = new Set(forks.map(f => f.id))
+  const tracked = saved.filter(t => !t.fromCard || ids.has(t.fromCard))
+  for (const fork of forks) {
+    const repo = fork.source.repo
+    const branch = fork.source.branch || undefined
+    const same = (t: TrackedBackend) => t.repo.toLowerCase() === repo.toLowerCase() && (t.branch ?? '') === (branch ?? '')
+    const own = tracked.findIndex(t => t.fromCard === fork.id)
+    const at = own !== -1 ? own : tracked.findIndex(t => !t.isDefault && !t.fromCard && same(t))
+    if (at === -1 && tracked.some(t => t.isDefault && same(t))) continue
+    const base = at !== -1 ? tracked[at] : null
+    const taken = new Set(tracked.map(t => t.folderName.toLowerCase()))
+    const entry: TrackedBackend = {
+      ...(base ?? {}),
+      id: base?.id ?? `card-${fork.id}`,
+      repo,
+      name: fork.label,
+      folderName: base?.folderName ?? folderFor(repo, taken, branch),
+      isDefault: false,
+      fromCard: fork.id
+    }
+    if (branch) entry.branch = branch; else delete entry.branch
+    if (fork.params) entry.extraCommands = fork.params.categories; else delete entry.extraCommands
+    if (fork.defaultOptions) entry.defaultOptions = fork.defaultOptions; else delete entry.defaultOptions
+    if (at !== -1) tracked[at] = entry; else tracked.push(entry)
   }
   return tracked
 }

@@ -7,6 +7,14 @@
 import type { CommandCategory, CommandParam } from './types'
 import type { EngineDef } from './engines'
 import { isBuiltinEngine } from './engines'
+import { exprRefs, parseExpr, type Ast } from './cardExpr'
+import { emptyCardContext, type CardContext } from './cardContext'
+import {
+  checkCardLogic, checkInstall, checkSource,
+  type CardBlock, type CardCheckpoints, type CardInstall, type CardMemory, type CardOverrides, type CardPreset, type CardRule, type CardSource
+} from './cardLogic'
+import { cardParamTokens, resolveCard, type ResolvedCard } from './cardRules'
+import { CUSTOM_ARGS_KEY, customArgsLaunchTokens } from './customArgs'
 
 export const CARD_VERSION = 1
 
@@ -26,9 +34,13 @@ export interface CardMetrics {
   format: 'prometheus' | 'none'
 }
 
+export type CardFile = string | string[]
+
 export interface CardLaunch {
-  // Launcher, relative to the engine folder: one file, or one per platform.
-  file: string | Partial<Record<CardPlatform, string>>
+  // Launcher, relative to the engine folder: a file, or a list of candidates
+  // of which the first that exists is used ("*" matches within one name), or
+  // one of those per platform.
+  file: CardFile | Partial<Record<CardPlatform, CardFile>>
   // A string is one argument. An array is a group that is left out when any
   // placeholder in it has no value (["--api-key", "{apiKey}"]).
   argv: Array<string | string[]>
@@ -38,32 +50,71 @@ export interface CardLaunch {
   metrics?: CardMetrics
 }
 
+export interface CardParams {
+  categories: CommandCategory[]
+  rules?: CardRule[]
+  blocks?: CardBlock[]
+  presets?: CardPreset[]
+}
+
 export interface EngineCard {
   cardVersion: number
   id: string
   label: string
   description?: string
   engine: { folder: string }
+  // Where the engine's code comes from and how it is made ready. XLM Studio
+  // clones the repository into the engine folder and runs the steps there.
+  source?: CardSource
+  install?: CardInstall
   launch: CardLaunch
-  params?: { categories: CommandCategory[] }
+  params?: CardParams
+  overrides?: CardOverrides
+  checkpoints?: CardCheckpoints
+  memory?: CardMemory
 }
 
-export const CARD_PLACEHOLDERS = ['model', 'modelDir', 'port', 'host', 'apiKey', 'engineDir', 'params'] as const
+// A card for a llama.cpp fork. XLM Studio already clones, builds, launches and
+// configures llama.cpp, so the card only names the fork and lists the
+// parameters that fork adds. It becomes an Engine Tracker entry; there is no
+// launcher, no folder and no script.
+export interface ForkCard {
+  cardVersion: number
+  id: string
+  label: string
+  description?: string
+  extends: 'llama.cpp'
+  source: { repo: string; branch?: string }
+  params?: { categories: CommandCategory[] }
+  // Replaces the option list of a built-in select, by its arg.
+  defaultOptions?: Record<string, string[]>
+}
+
+export const CARD_PLACEHOLDERS = ['model', 'modelDir', 'port', 'host', 'apiKey', 'engineDir', 'name', 'params'] as const
 const PLACEHOLDER_RE = /\{([A-Za-z]+)\}/g
 
 export const DEFAULT_READY: CardReady = { http: '/v1/models' }
 
 const PARAM_TYPES = ['boolean', 'number', 'string', 'select', 'text']
+const WIDGET_TYPES: Record<string, string[]> = {
+  slider: ['number'], segmented: ['select'], tristate: ['boolean'], password: ['string', 'text'], textarea: ['text', 'string'],
+  file: ['string', 'text'], folder: ['string', 'text'], list: ['string', 'text'], keyvalue: ['text', 'string']
+}
+const DYNAMIC_FIELDS = ['label', 'description', 'default', 'min', 'max']
+const SLIDER_SCALES = ['linear', 'ladder']
 const METRIC_FORMATS = ['prometheus', 'none']
 const PLATFORMS = ['windows', 'macos', 'linux', 'default']
 const RESERVED_FOLDERS = new Set(['strata-data'])
 
 export interface CardValidation {
   card: EngineCard | null
+  // Set instead of `card` when the file is a fork card.
+  fork?: ForkCard | null
   errors: string[]
   warnings: string[]
 }
 
+const refsOf = (ast: Ast): string[] => exprRefs(ast).args
 const isObj = (v: unknown): v is Record<string, unknown> => !!v && typeof v === 'object' && !Array.isArray(v)
 const isStr = (v: unknown): v is string => typeof v === 'string' && v.trim() !== ''
 
@@ -88,11 +139,104 @@ function checkArgvToken(token: string, where: string, errors: string[], allowPar
   }
 }
 
-function checkParams(raw: unknown, errors: string[], warnings: string[]): { categories: CommandCategory[] } | undefined {
+interface PendingExpr { where: string; src: string }
+
+// Moves { "expr": "..." } values out of a parameter into `exprs`, leaving the
+// static fields for the editor to use when nothing is computed.
+function takeExprs(q: Record<string, unknown>, where: string, errors: string[], pending: PendingExpr[]): Record<string, string> {
+  const exprs: Record<string, string> = {}
+  const take = (key: string, into: string, from: Record<string, unknown>) => {
+    const v = from[key]
+    if (!isObj(v) || !('expr' in v)) return
+    delete from[key]
+    if (typeof v.expr !== 'string') { errors.push(`${where}.${key}: "expr" must be a string`); return }
+    const parsed = parseExpr(v.expr)
+    if ('error' in parsed) errors.push(`${where}.${key}: ${parsed.error} (at ${parsed.at}) in "${v.expr}"`)
+    else { exprs[into] = v.expr; pending.push({ where: `${where}.${key}`, src: v.expr }) }
+  }
+  for (const k of DYNAMIC_FIELDS) take(k, k, q)
+  take('emit', 'emit', q)
+  if (isObj(q.slider)) {
+    const sl = { ...q.slider }
+    take('min', 'min', sl)
+    take('max', 'max', sl)
+    q.slider = sl
+  }
+  return exprs
+}
+
+function checkParam(p: Record<string, unknown>, where: string, errors: string[], warnings: string[], pending: PendingExpr[]): CommandParam | null {
+  const q: Record<string, unknown> = { ...p }
+  const exprs = takeExprs(q, where, errors, pending)
+  if (!isStr(q.label) && exprs.label === undefined) errors.push(`${where}: needs a "label"`)
+  if (typeof q.type !== 'string' || !PARAM_TYPES.includes(q.type)) { errors.push(`${where}: "type" must be one of ${PARAM_TYPES.join(', ')}`); return null }
+  const type = q.type
+  if (isObj(q.options) || (q.options !== undefined && !Array.isArray(q.options))) errors.push(`${where}: "options" must be a list of strings; use "optionsBy" for options that depend on another parameter`)
+  if (type === 'select' && q.optionsBy === undefined && (!Array.isArray(q.options) || q.options.length === 0 || q.options.some(o => typeof o !== 'string'))) errors.push(`${where}: a select needs a list of string "options"`)
+  if (typeof q.min === 'number' && typeof q.max === 'number' && q.min > q.max) errors.push(`${where}: "min" is above "max"`)
+  if (q.offArg !== undefined && type !== 'boolean') errors.push(`${where}: "offArg" is only for booleans`)
+  if (q.format !== undefined && q.format !== 'space' && q.format !== 'equals') errors.push(`${where}: "format" must be "space" or "equals"`)
+
+  const widget = q.widget
+  if (widget !== undefined) {
+    if (typeof widget !== 'string' || !(widget in WIDGET_TYPES)) errors.push(`${where}.widget: must be one of ${Object.keys(WIDGET_TYPES).join(', ')}`)
+    else if (!WIDGET_TYPES[widget].includes(type)) errors.push(`${where}.widget: "${widget}" is for ${WIDGET_TYPES[widget].join(' or ')} parameters, not ${type}`)
+    else if (widget === 'segmented' && Array.isArray(q.options) && q.options.length > 4) errors.push(`${where}.widget: "segmented" holds at most 4 options`)
+    else if (widget === 'tristate' && q.offArg === undefined) errors.push(`${where}.widget: "tristate" needs "offArg"`)
+  }
+  if (q.slider !== undefined) {
+    const sl = q.slider
+    if (widget !== 'slider') errors.push(`${where}.slider: only for "widget": "slider"`)
+    else if (!isObj(sl)) errors.push(`${where}.slider: must be an object`)
+    else {
+      unknownKeys(sl, ['min', 'max', 'step', 'scale', 'allowAuto', 'recommended', 'recommendedLabel'], `${where}.slider`, warnings)
+      for (const k of ['min', 'max']) {
+        if (sl[k] === undefined) continue
+        if (typeof sl[k] === 'number') q[k] = sl[k]
+        else errors.push(`${where}.slider.${k}: must be a number or { "expr": "..." }`)
+      }
+      delete sl.min
+      delete sl.max
+      if (sl.step !== undefined && !(typeof sl.step === 'number' && sl.step > 0)) errors.push(`${where}.slider.step: must be a positive number`)
+      if (sl.scale !== undefined && !SLIDER_SCALES.includes(sl.scale as string)) errors.push(`${where}.slider.scale: must be one of ${SLIDER_SCALES.join(', ')}`)
+    }
+  }
+  if (widget === 'slider') {
+    const hasMin = typeof q.min === 'number' || exprs.min !== undefined
+    const hasMax = typeof q.max === 'number' || exprs.max !== undefined
+    if (!hasMin || !hasMax) errors.push(`${where}: a slider needs "slider.min" and "slider.max"`)
+  }
+  if ((q.repeat !== undefined || q.join !== undefined) && widget !== 'list' && widget !== 'keyvalue') errors.push(`${where}: "repeat" and "join" are for list and keyvalue widgets`)
+  if (q.join !== undefined && typeof q.join !== 'string') errors.push(`${where}.join: must be a string`)
+  if (q.valueMap !== undefined) {
+    if (type !== 'select') errors.push(`${where}.valueMap: only for selects`)
+    else if (!isObj(q.valueMap) || Object.values(q.valueMap).some(v => typeof v !== 'string')) errors.push(`${where}.valueMap: must map option values to strings`)
+  }
+  if (q.optionsBy !== undefined) {
+    const ob = q.optionsBy
+    if (type !== 'select') errors.push(`${where}.optionsBy: only for selects`)
+    else if (!isObj(ob) || typeof ob.arg !== 'string' || !isObj(ob.map) || Object.values(ob.map).some(v => !Array.isArray(v) || v.some(x => typeof x !== 'string'))) errors.push(`${where}.optionsBy: needs "arg" and a "map" from its values to lists of options`)
+  }
+  if (q.internal !== undefined) {
+    if (typeof q.internal !== 'boolean') errors.push(`${where}.internal: must be true or false`)
+    else if (q.internal && (q.offArg !== undefined || q.format !== undefined || exprs.emit !== undefined)) errors.push(`${where}: an internal parameter is never sent, so it cannot have "offArg", "format" or "emit"`)
+  }
+  const keys = ['arg', 'short', 'aliases', 'label', 'description', 'type', 'default', 'options', 'min', 'max', 'placeholder', 'env', 'deprecated', 'requireValue', 'emptyLabel', 'optionLabels', 'offArg', 'format', 'widget', 'slider', 'internal', 'repeat', 'join', 'valueMap', 'optionsBy', 'icon']
+  for (const k of Object.keys(q)) if (!keys.includes(k)) warnings.push(`${where}: unknown key "${k}" is ignored`)
+  return {
+    ...(q as unknown as CommandParam),
+    label: typeof q.label === 'string' ? q.label : String(exprs.label ?? q.arg),
+    description: typeof q.description === 'string' ? q.description : '',
+    ...(Object.keys(exprs).length > 0 ? { exprs } : {})
+  }
+}
+
+function checkParams(raw: unknown, errors: string[], warnings: string[], allowLogic: boolean): { params: { categories: CommandCategory[] }; declared: Map<string, CommandParam>; pending: PendingExpr[] } | undefined {
   if (!isObj(raw)) { errors.push('params: must be an object with a "categories" list'); return undefined }
-  unknownKeys(raw, ['categories'], 'params', warnings)
+  if (!allowLogic) unknownKeys(raw, ['categories'], 'params', warnings)
   if (!Array.isArray(raw.categories)) { errors.push('params.categories: must be a list'); return undefined }
-  const seen = new Set<string>()
+  const declared = new Map<string, CommandParam>()
+  const pending: PendingExpr[] = []
   const categories: CommandCategory[] = []
   raw.categories.forEach((c, ci) => {
     const at = `params.categories[${ci}]`
@@ -102,28 +246,35 @@ function checkParams(raw: unknown, errors: string[], warnings: string[]): { cate
     c.commands.forEach((p, pi) => {
       const where = `${at}.commands[${pi}]`
       if (!isObj(p) || !isStr(p.arg)) { errors.push(`${where}: needs an "arg"`); return }
-      if (seen.has(p.arg)) { errors.push(`${where}: "${p.arg}" is listed twice`); return }
-      seen.add(p.arg)
+      if (declared.has(p.arg)) { errors.push(`${where}: "${p.arg}" is listed twice`); return }
       if (p.arg.startsWith('__')) errors.push(`${where}: "${p.arg}" is reserved for internal settings`)
-      if (!isStr(p.label)) errors.push(`${where}: needs a "label"`)
-      if (typeof p.type !== 'string' || !PARAM_TYPES.includes(p.type)) { errors.push(`${where}: "type" must be one of ${PARAM_TYPES.join(', ')}`); return }
-      if (p.type === 'select' && (!Array.isArray(p.options) || p.options.length === 0 || p.options.some(o => typeof o !== 'string'))) errors.push(`${where}: a select needs a list of string "options"`)
-      if (typeof p.min === 'number' && typeof p.max === 'number' && p.min > p.max) errors.push(`${where}: "min" is above "max"`)
-      if (p.offArg !== undefined && p.type !== 'boolean') errors.push(`${where}: "offArg" is only for booleans`)
-      if (p.format !== undefined && p.format !== 'space' && p.format !== 'equals') errors.push(`${where}: "format" must be "space" or "equals"`)
-      commands.push({ ...(p as unknown as CommandParam), description: typeof p.description === 'string' ? p.description : '' })
+      const param = checkParam(p, where, errors, warnings, pending)
+      if (!param) { declared.set(p.arg, { arg: p.arg, label: p.arg, description: '', type: 'string' }); return }
+      declared.set(p.arg, param)
+      commands.push(param)
     })
     categories.push({ name: c.name, icon: typeof c.icon === 'string' ? c.icon : 'Sliders', commands })
   })
-  return { categories }
+  return { params: { categories }, declared, pending }
 }
 
-export function validateEngineCard(raw: unknown): CardValidation {
-  const errors: string[] = []
-  const warnings: string[] = []
-  if (!isObj(raw)) return { card: null, errors: ['The file must hold one JSON object.'], warnings }
-  unknownKeys(raw, ['cardVersion', 'id', 'label', 'description', 'engine', 'launch', 'params'], 'card', warnings)
+// References between parameters, once every parameter is known.
+function checkParamRefs(declared: Map<string, CommandParam>, pending: PendingExpr[], errors: string[]): void {
+  for (const { where, src } of pending) {
+    const parsed = parseExpr(src)
+    if (!('ast' in parsed)) continue
+    for (const a of refsOf(parsed.ast)) if (!declared.has(a)) errors.push(`${where}: "${a}" is not a parameter of this card`)
+  }
+  for (const p of declared.values()) {
+    if (!p.optionsBy) continue
+    const dep = declared.get(p.optionsBy.arg)
+    if (!dep) errors.push(`${p.arg}.optionsBy: "${p.optionsBy.arg}" is not a parameter of this card`)
+    else if (dep.arg === p.arg) errors.push(`${p.arg}.optionsBy: a select cannot depend on itself`)
+    else if (dep.type !== 'select') errors.push(`${p.arg}.optionsBy: "${dep.arg}" is not a select`)
+  }
+}
 
+function checkIdentity(raw: Record<string, unknown>, errors: string[]): void {
   if (typeof raw.cardVersion !== 'number') errors.push('cardVersion: required, a number (currently 1)')
   else if (raw.cardVersion > CARD_VERSION) errors.push(`cardVersion ${raw.cardVersion} was made for a newer XLM Studio`)
   else if (raw.cardVersion < 1) errors.push('cardVersion: must be 1 or higher')
@@ -131,6 +282,58 @@ export function validateEngineCard(raw: unknown): CardValidation {
   if (!isStr(raw.id) || !/^[a-z0-9][a-z0-9._-]{0,39}$/.test(raw.id)) errors.push('id: required, lowercase letters, digits, ".", "_" or "-", up to 40 characters')
   else if (isBuiltinEngine(raw.id)) errors.push(`id: "${raw.id}" is a built-in engine`)
   if (!isStr(raw.label)) errors.push('label: required, the name shown in the app')
+}
+
+function validateForkCard(raw: Record<string, unknown>): CardValidation {
+  const errors: string[] = []
+  const warnings: string[] = []
+  unknownKeys(raw, ['cardVersion', 'id', 'label', 'description', 'extends', 'source', 'params', 'defaultOptions', 'engine', 'launch'], 'card', warnings)
+  checkIdentity(raw, errors)
+  if (raw.extends !== 'llama.cpp') errors.push('extends: only "llama.cpp" is supported')
+  for (const k of ['engine', 'launch']) {
+    if (raw[k] !== undefined) errors.push(`${k}: a fork card has none. XLM Studio builds and launches llama.cpp forks itself; remove it`)
+  }
+  let source: ForkCard['source'] | null = null
+  if (!isObj(raw.source) || !isStr(raw.source.repo) || !/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(raw.source.repo.trim())) {
+    errors.push('source.repo: required, the GitHub repository as "owner/repo"')
+  } else {
+    unknownKeys(raw.source, ['repo', 'branch'], 'source', warnings)
+    if (raw.source.branch !== undefined && !(isStr(raw.source.branch) && !/\s/.test(raw.source.branch))) errors.push('source.branch: must be a branch name')
+    else source = { repo: raw.source.repo.trim(), ...(isStr(raw.source.branch) ? { branch: raw.source.branch.trim() } : {}) }
+  }
+  const checked = raw.params === undefined ? undefined : checkParams(raw.params, errors, warnings, false)
+  const params = checked?.params
+  let defaultOptions: Record<string, string[]> | undefined
+  if (raw.defaultOptions !== undefined) {
+    if (!isObj(raw.defaultOptions) || Object.values(raw.defaultOptions).some(v => !Array.isArray(v) || v.some(x => typeof x !== 'string'))) errors.push('defaultOptions: must map an arg to a list of strings')
+    else defaultOptions = raw.defaultOptions as Record<string, string[]>
+  }
+  if (errors.length > 0 || !source) return { card: null, fork: null, errors, warnings }
+  return {
+    card: null,
+    fork: {
+      cardVersion: raw.cardVersion as number,
+      id: raw.id as string,
+      label: (raw.label as string).trim(),
+      description: typeof raw.description === 'string' ? raw.description : undefined,
+      extends: 'llama.cpp',
+      source,
+      params,
+      defaultOptions
+    },
+    errors,
+    warnings
+  }
+}
+
+export function validateEngineCard(raw: unknown): CardValidation {
+  const errors: string[] = []
+  const warnings: string[] = []
+  if (!isObj(raw)) return { card: null, errors: ['The file must hold one JSON object.'], warnings }
+  if (raw.extends !== undefined) return validateForkCard(raw)
+  unknownKeys(raw, ['cardVersion', 'id', 'label', 'description', 'engine', 'source', 'install', 'launch', 'params', 'overrides', 'checkpoints', 'memory'], 'card', warnings)
+
+  checkIdentity(raw, errors)
 
   let folder = ''
   if (!isObj(raw.engine) || !isStr(raw.engine.folder)) errors.push('engine.folder: required, the engine\'s folder name inside the engines folder')
@@ -147,12 +350,16 @@ export function validateEngineCard(raw: unknown): CardValidation {
     const l = raw.launch
     unknownKeys(l, ['file', 'argv', 'env', 'ready', 'stop', 'metrics'], 'launch', warnings)
     const files: string[] = []
-    if (isStr(l.file)) files.push(l.file)
+    const addFile = (v: unknown, where: string): void => {
+      const list = Array.isArray(v) ? v : [v]
+      if (list.length === 0 || list.some(x => !isStr(x))) errors.push(`${where}: must be a file name, or a list of file names`)
+      else files.push(...(list as string[]))
+    }
+    if (isStr(l.file) || Array.isArray(l.file)) addFile(l.file, 'launch.file')
     else if (isObj(l.file) && Object.keys(l.file).length > 0) {
       for (const [k, v] of Object.entries(l.file)) {
         if (!PLATFORMS.includes(k)) errors.push(`launch.file: unknown platform "${k}" (use ${PLATFORMS.join(', ')})`)
-        else if (!isStr(v)) errors.push(`launch.file.${k}: must be a file name`)
-        else files.push(v)
+        else addFile(v, `launch.file.${k}`)
       }
     } else errors.push('launch.file: required, the launcher relative to the engine folder (or one per platform)')
     for (const f of files) { const bad = relativeFileProblem(f); if (bad) errors.push(`launch.file "${f}": ${bad}`) }
@@ -189,8 +396,18 @@ export function validateEngineCard(raw: unknown): CardValidation {
     launch = l as unknown as CardLaunch
   }
 
-  const params = raw.params === undefined ? undefined : checkParams(raw.params, errors, warnings)
+  const checked = raw.params === undefined ? undefined : checkParams(raw.params, errors, warnings, true)
+  const declared = checked?.declared ?? new Map<string, CommandParam>()
+  if (checked) checkParamRefs(declared, checked.pending, errors)
+  const categoryNames = checked?.params.categories.map(c => c.name) ?? []
+  const logic = checkCardLogic({ raw, params: declared, categories: categoryNames, errors, warnings })
+  const source = checkSource(raw.source, 'source', errors, warnings)
+  const install = checkInstall(raw.install, errors, warnings)
+  if (logic.rules || logic.blocks || logic.presets) {
+    if (!checked) errors.push('params.rules, blocks and presets need params.categories')
+  }
   if (errors.length > 0 || !launch) return { card: null, errors, warnings }
+  const params = checked ? { ...checked.params, ...(logic.rules ? { rules: logic.rules } : {}), ...(logic.blocks ? { blocks: logic.blocks } : {}), ...(logic.presets ? { presets: logic.presets } : {}) } : undefined
   return {
     card: {
       cardVersion: raw.cardVersion as number,
@@ -198,8 +415,13 @@ export function validateEngineCard(raw: unknown): CardValidation {
       label: (raw.label as string).trim(),
       description: typeof raw.description === 'string' ? raw.description : undefined,
       engine: { folder },
+      ...(source ? { source } : {}),
+      ...(install ? { install } : {}),
       launch,
-      params
+      params,
+      ...(logic.overrides ? { overrides: logic.overrides } : {}),
+      ...(logic.checkpoints ? { checkpoints: logic.checkpoints } : {}),
+      ...(logic.memory ? { memory: logic.memory } : {})
     },
     errors,
     warnings
@@ -211,8 +433,11 @@ export function cardToEngineDef(card: EngineCard): EngineDef {
     id: card.id,
     label: card.label,
     kind: 'generic',
-    install: 'local',
-    caps: { gpuLayers: false, backendSelection: 'flag', paramViewModes: false, slotCheckpoints: false, autoFit: false, samplingFlags: false, vramEstimator: 'none' },
+    install: card.source ? 'git' : 'local',
+    caps: {
+      gpuLayers: false, backendSelection: 'flag', paramViewModes: false, slotCheckpoints: !!card.checkpoints,
+      autoFit: false, samplingFlags: false, vramEstimator: card.memory ? 'llama' : 'none'
+    },
     buildLabel: 'Engine version',
     followLabel: 'Follow global repo',
     card
@@ -221,31 +446,56 @@ export function cardToEngineDef(card: EngineCard): EngineDef {
 
 const PLATFORM_KEY: Record<string, CardPlatform> = { win32: 'windows', darwin: 'macos', linux: 'linux' }
 
-// The launcher file for a platform, or null when the card has none for it.
-export function cardLauncherFile(card: EngineCard, platform: string): string | null {
+// Launcher candidates for a platform, in the order they are tried.
+export function cardLauncherCandidates(card: EngineCard, platform: string): string[] {
   const f = card.launch.file
-  if (typeof f === 'string') return f
-  return f[PLATFORM_KEY[platform] ?? 'default'] ?? f.default ?? null
+  const list = (v: CardFile | undefined): string[] => (v === undefined ? [] : Array.isArray(v) ? v : [v])
+  if (typeof f === 'string' || Array.isArray(f)) return list(f)
+  const own = f[PLATFORM_KEY[platform] ?? 'default']
+  return own !== undefined ? list(own) : list(f.default)
 }
 
-function paramTokens(card: EngineCard, args: Record<string, unknown>): string[] {
-  const out: string[] = []
-  for (const cat of card.params?.categories ?? []) {
-    for (const cmd of cat.commands) {
-      const v = args[cmd.arg]
-      if (v === undefined || v === null) continue
-      if (cmd.type === 'boolean') {
-        if (v === true) out.push(cmd.arg)
-        else if (v === false && cmd.offArg) out.push(cmd.offArg)
-        continue
+// The first launcher candidate, for showing in the interface.
+export function cardLauncherFile(card: EngineCard, platform: string): string | null {
+  return cardLauncherCandidates(card, platform)[0] ?? null
+}
+
+export interface LauncherFs {
+  exists: (path: string) => boolean
+  // Names inside a folder; empty when it cannot be read.
+  list: (path: string) => string[]
+}
+
+function segmentPattern(seg: string): RegExp {
+  return new RegExp('^' + seg.replace(/[.+?^${}()|[\]\\]/g, '\\$&').replace(/\*/g, '[^/]*') + '$', 'i')
+}
+
+// The first launcher candidate that exists under `dir`, as a path relative to it.
+// "*" matches within one name, so "venv/*/python.exe" finds whichever folder is there.
+export function findLauncher(dir: string, candidates: string[], fs: LauncherFs): string | null {
+  for (const cand of candidates) {
+    const segs = cand.split('/').filter(Boolean)
+    let found: string[] = ['']
+    for (const seg of segs) {
+      const next: string[] = []
+      for (const base of found) {
+        const abs = base ? `${dir}/${base}` : dir
+        if (!seg.includes('*')) {
+          const rel = base ? `${base}/${seg}` : seg
+          if (fs.exists(`${dir}/${rel}`)) next.push(rel)
+          continue
+        }
+        const re = segmentPattern(seg)
+        for (const name of fs.list(abs).sort((a, b) => b.localeCompare(a, undefined, { numeric: true }))) {
+          if (re.test(name)) next.push(base ? `${base}/${name}` : name)
+        }
       }
-      const text = String(v).trim()
-      if (!text) continue
-      if (cmd.format === 'equals') out.push(`${cmd.arg}=${text}`)
-      else out.push(cmd.arg, text)
+      found = next
+      if (found.length === 0) break
     }
+    if (found.length > 0 && segs.length > 0) return found[0]
   }
-  return out
+  return null
 }
 
 export interface CardLaunchInput {
@@ -255,6 +505,10 @@ export interface CardLaunchInput {
   apiKey?: string
   engineDir: string
   args: Record<string, unknown>
+  // What expressions can see besides the arguments; empty values when left out.
+  context?: Partial<CardContext>
+  // Parameters forced by the engine's override fields, by arg.
+  overrideArgs?: Record<string, unknown>
 }
 
 function dirOf(p: string): string {
@@ -271,7 +525,8 @@ export function cardPlaceholderValues(input: CardLaunchInput): Record<string, st
     port: input.port > 0 ? String(input.port) : '',
     host: hostArg ? String(hostArg) : '',
     apiKey: keyArg ? String(keyArg) : '',
-    engineDir: input.engineDir
+    engineDir: input.engineDir,
+    name: input.context?.template?.name ?? ''
   }
 }
 
@@ -285,14 +540,24 @@ function fill(text: string, values: Record<string, string>): { text: string; emp
   return { text: out, empty }
 }
 
-// The launcher's arguments, or what is missing for them.
-export function buildCardArgv(card: EngineCard, input: CardLaunchInput): { argv: string[] } | { error: string } {
-  const values = cardPlaceholderValues(input)
+export function cardContextOf(input: CardLaunchInput): CardContext {
+  const base = emptyCardContext()
+  return { ...base, ...input.context, args: input.args }
+}
+
+// The launcher's arguments, or what is missing for them. `resolved` is the
+// state the arguments were built from, for previews that show what was applied.
+export function buildCardArgv(card: EngineCard, input: CardLaunchInput): { argv: string[]; resolved: ResolvedCard } | { error: string } {
+  const ctx = cardContextOf(input)
+  const resolved = resolveCard(card, input.args, ctx, input.overrideArgs)
+  if (resolved.missing.length > 0) return { error: resolved.missing.map(m => m.message).join(' ') }
+  const values = cardPlaceholderValues({ ...input, args: resolved.args })
   const usesModel = JSON.stringify(card.launch.argv).includes('{model')
   if (usesModel && !values.model) return { error: `${card.label} needs a model file. Pick one in the Template.` }
   const argv: string[] = []
   for (const token of card.launch.argv) {
-    if (token === '{params}') { argv.push(...paramTokens(card, input.args)); continue }
+    // Free-text flags the card does not list follow the listed parameters.
+    if (token === '{params}') { argv.push(...cardParamTokens(card, resolved, ctx), ...customArgsLaunchTokens(resolved.args[CUSTOM_ARGS_KEY])); continue }
     if (Array.isArray(token)) {
       const filled = token.map(t => fill(t, values))
       if (!filled.some(f => f.empty)) argv.push(...filled.map(f => f.text))
@@ -301,7 +566,7 @@ export function buildCardArgv(card: EngineCard, input: CardLaunchInput): { argv:
     const f = fill(token, values)
     if (!f.empty) argv.push(f.text)
   }
-  return { argv }
+  return { argv, resolved }
 }
 
 export function cardEnv(card: EngineCard, input: CardLaunchInput): Record<string, string> {
@@ -315,6 +580,11 @@ export function cardEnv(card: EngineCard, input: CardLaunchInput): Record<string
 export interface EngineCardInfo {
   id: string
   label: string
+  // An engine card starts a program; a fork card adds a llama.cpp fork to the tracker.
+  kind: 'engine' | 'fork'
+  repo?: string
+  branch?: string
+  paramCount: number
   description?: string
   folder?: string
   file: string

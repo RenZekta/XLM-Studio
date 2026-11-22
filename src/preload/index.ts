@@ -78,6 +78,7 @@ const api = {
   // ----- File pickers -----
   pickModelFile: () => ipcRenderer.invoke('pick-model-file'),
   pickAnyFile: () => ipcRenderer.invoke('pick-any-file'),
+  pickFolder: () => ipcRenderer.invoke('pick-folder') as Promise<string | null>,
   listLlamaDevices: (backendPath: string, exe: string) => ipcRenderer.invoke('list-llama-devices', backendPath, exe),
   readTextFile: (filePath: string) => ipcRenderer.invoke('read-text-file', filePath),
 
@@ -106,7 +107,10 @@ const api = {
   refreshEngineCards: () => ipcRenderer.invoke('refresh-engine-cards') as Promise<void>,
   openEngineCardsFolder: () => ipcRenderer.invoke('open-engine-cards-folder') as Promise<string>,
   openEngineFolder: (cardId: string) => ipcRenderer.invoke('open-engine-folder', cardId) as Promise<string>,
-  getEngineCardPrompt: () => ipcRenderer.invoke('get-engine-card-prompt') as Promise<string>,
+  getCardSkillState: () => ipcRenderer.invoke('get-card-skill-state') as Promise<{ installed: boolean; dir: string }>,
+  addCardSkill: () => ipcRenderer.invoke('add-card-skill') as Promise<{ success: boolean; dir?: string; error?: string }>,
+  removeCardSkill: () => ipcRenderer.invoke('remove-card-skill') as Promise<{ success: boolean }>,
+  checkForkCard: (cardId: string) => ipcRenderer.invoke('check-fork-card', cardId) as Promise<{ checked: number; missing: string[]; build?: string; error?: string }>,
   onEngineCardsChanged: (cb: () => void) => {
     ipcRenderer.removeAllListeners('engine-cards-changed')
     ipcRenderer.on('engine-cards-changed', () => cb())
@@ -240,6 +244,25 @@ const api = {
   removeSkillFiles: () => ipcRenderer.invoke('remove-skill-files') as Promise<{ success: boolean }>,
 
   // ----- KV Cache Checkpoints -----
+  installCardEngine: (cardId: string) => ipcRenderer.invoke('install-card-engine', cardId) as Promise<{ success: boolean; path?: string; error?: string }>,
+  cancelCardInstall: (cardId: string) => ipcRenderer.invoke('cancel-card-install', cardId) as Promise<{ success: boolean }>,
+  onCardInstallLog: (cb: (e: { id: string; line: string; app: boolean }) => void) => {
+    const h = (_e: unknown, d: { id: string; line: string; app: boolean }) => cb(d)
+    ipcRenderer.on('card-install-log', h)
+    return () => ipcRenderer.removeListener('card-install-log', h)
+  },
+  onCardInstallState: (cb: (e: { id: string; busy: boolean }) => void) => {
+    const h = (_e: unknown, d: { id: string; busy: boolean }) => cb(d)
+    ipcRenderer.on('card-install-state', h)
+    return () => ipcRenderer.removeListener('card-install-state', h)
+  },
+  getEngineOverrides: () => ipcRenderer.invoke('get-engine-overrides') as Promise<Record<string, Record<string, unknown>>>,
+  setEngineOverrides: (engine: string, values: Record<string, unknown>) => ipcRenderer.invoke('set-engine-overrides', engine, values) as Promise<{ success: boolean }>,
+  onEngineOverridesChanged: (cb: (all: Record<string, Record<string, unknown>>) => void) => {
+    const handler = (_e: unknown, all: Record<string, Record<string, unknown>>) => cb(all)
+    ipcRenderer.on('engine-overrides-changed', handler)
+    return () => ipcRenderer.removeListener('engine-overrides-changed', handler)
+  },
   getKvCacheCheckpoints: () => ipcRenderer.invoke('get-kv-cache-checkpoints') as Promise<any>,
   setKvCacheCheckpoints: (opts: any) => ipcRenderer.invoke('set-kv-cache-checkpoints', opts) as Promise<{ success: boolean }>,
   listExternalCheckpointFolders: () => ipcRenderer.invoke('list-external-checkpoint-folders') as Promise<string[]>,

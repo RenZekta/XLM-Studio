@@ -128,6 +128,23 @@ export interface CommandParam {
   // purpose, and how a value joins its flag ("--flag value" or "--flag=value").
   offArg?: string
   format?: 'space' | 'equals'
+  // Engine cards only. `widget` picks how the value is edited, the rest shapes
+  // what is sent and lets values depend on the model, the hardware or other
+  // parameters.
+  widget?: 'slider' | 'segmented' | 'tristate' | 'password' | 'textarea' | 'file' | 'folder' | 'list' | 'keyvalue'
+  slider?: { step?: number; scale?: 'linear' | 'ladder'; allowAuto?: boolean; recommended?: number; recommendedLabel?: string }
+  // Stored and shown, never sent: a switch that rules and groups react to.
+  internal?: boolean
+  // List widgets: one flag per item, or one flag with the items joined.
+  repeat?: boolean
+  join?: string
+  // Maps what the editor stores to what is sent.
+  valueMap?: Record<string, string>
+  // Expressions, by the field they compute (min, max, default, label,
+  // description, options) or, for `emit`, the value that is sent.
+  exprs?: Partial<Record<'min' | 'max' | 'default' | 'label' | 'description' | 'options' | 'emit', string>>
+  // Options that depend on another select's value.
+  optionsBy?: { arg: string; map: Record<string, string[]> }
 }
 export interface CommandCategory {
   name: string
@@ -239,6 +256,7 @@ export const MCP_TOOL_IDS = [
   'info-models',
   'info-backends',
   'info-tracked-backends',
+  'list-engine-parameters',
   'template-duplicate',
   'template-create',
   'template-edit',
@@ -339,6 +357,9 @@ export interface TrackedBackend {
   // Branch to follow. Absent means the repo's default branch, so an entry only
   // carries one when it was added from a link to some other branch.
   branch?: string
+  // Set for an entry a fork card defines (see shared/engineCard.ts). It follows
+  // the card: renamed, re-parametrised or removed with it.
+  fromCard?: string
 }
 
 // How a llama.cpp-style engine is installed: release assets are downloaded as

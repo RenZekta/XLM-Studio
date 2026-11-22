@@ -4,8 +4,8 @@ import {
   unlinkSync, createWriteStream, statSync, rmdirSync, renameSync, promises as fsPromises,
   copyFileSync as fsCopyFileSync
 } from 'fs'
-import { join, extname, basename, dirname, resolve, isAbsolute, sep } from 'path'
-import { spawn, ChildProcess, exec } from 'child_process'
+import { join, extname, basename, dirname, resolve, isAbsolute } from 'path'
+import { spawn, ChildProcess, exec, execFile } from 'child_process'
 import https from 'https'
 import http from 'http'
 import { app } from 'electron'
@@ -27,8 +27,16 @@ import { initMcpLayer, registerMcpHandlers } from './mcpServer'
 import { toolTemplateAction, launchCommandForId } from './mcpControl'
 import { randomBytes } from 'crypto'
 import { engineOf, engineDef, isBuiltinEngine, isEngineId, type EngineId } from '../shared/engines'
-import { initEngineCards, listLoadedCards, customCardsDir, refreshEngineCards, engineCardOf, cardForFolder, scanCardEngine, buildCardSpawn } from './engineCards'
-import { buildCardArgv, cardEnv, cardLauncherFile, DEFAULT_READY } from '../shared/engineCard'
+import { sendWindowsCtrlC } from './gracefulStop'
+import { installCardEngine } from './cardInstall'
+import { cardSkillDir, cardSkillInstalled, removeCardSkill, writeCardSkill } from './cardSkill'
+import { missingFromHelp } from '../shared/cardReport'
+import { initEngineCards, listLoadedCards, customCardsDir, refreshEngineCards, engineCardOf, activeForkCards, cardForFolder, scanCardEngine, buildCardSpawn } from './engineCards'
+import { buildCardArgv, cardEnv, cardLauncherFile, DEFAULT_READY, type EngineCard } from '../shared/engineCard'
+import type { CardCheckpoints, CardHttpSpec } from '../shared/cardLogic'
+import { buildModelContext, buildSystemContext, emptyCardContext, type CardContext } from '../shared/cardContext'
+import { overrideArgsFor } from '../shared/cardRules'
+import { globalOverrideValues } from '../shared/cardGlobals'
 import { migrateHarnessSettings, type HarnessSettings } from '../shared/harnesses'
 import { initHarnessManager } from './harnesses'
 import { assetMatchesHost } from '../shared/assetPlatform'
@@ -38,7 +46,7 @@ import { parseRepoLink, pickBranch, branchSlug, trackedDisplayName, splitBuildAr
 import { findCudaRoot } from './cudaSdk'
 import { mergeEngineFolder } from './engineFolders'
 import { cloneOsOf } from './workDirs'
-import { mergeDefaultTracked } from '../shared/trackedMerge'
+import { mergeDefaultTracked, mergeCardForks } from '../shared/trackedMerge'
 import { setBackendKeyAliases } from '../shared/backendPin'
 import { NATIVE_PLATFORM, BACKEND_TYPE_MARKER, platformOfBuildDir, installVersionName } from './buildPlatform'
 import { strataTableHash, strataVerdict, bestStrataInfo, STRATA_NO_TABLE, type StrataTable, type StrataFingerprint } from '../shared/strata'
@@ -284,6 +292,9 @@ interface AppSettings {
   launchOnStartup?: boolean
   autostartMainTemplates?: boolean
   kvCacheCheckpoints?: KvCacheCheckpointSettings
+  // Override fields of card engines: engine id -> field id -> value. An absent
+  // or null field forces nothing.
+  engineOverrides?: Record<string, Record<string, unknown>>
 }
 
 // Default Base URL Override: enabled by default, port 1234, no LAN, no API key.
@@ -388,7 +399,20 @@ const DEFAULT_SETTINGS: AppSettings = {
   launchOnStartup: false,
   autostartMainTemplates: false,
   kvCacheCheckpoints: { ...DEFAULT_KV_CACHE_CHECKPOINTS },
+  engineOverrides: {},
   harnesses: migrateHarnessSettings(null)
+}
+
+function migrateEngineOverrides(raw: any): Record<string, Record<string, unknown>> {
+  const out: Record<string, Record<string, unknown>> = {}
+  if (!raw || typeof raw !== 'object') return out
+  for (const [engine, fields] of Object.entries(raw)) {
+    if (!fields || typeof fields !== 'object' || Array.isArray(fields)) continue
+    const clean: Record<string, unknown> = {}
+    for (const [id, v] of Object.entries(fields as Record<string, unknown>)) if (v !== null && v !== undefined && v !== '') clean[id] = v
+    if (Object.keys(clean).length > 0) out[engine] = clean
+  }
+  return out
 }
 
 function migrateStrataSettings(raw: any): StrataSettings {
@@ -467,7 +491,8 @@ async function loadSettings(): Promise<AppSettings> {
     // built-in) is promoted in place, keeping its folder so installed
     // binaries and pinned templates still resolve.
     const merged = mergeDefaultTracked(tracked, DEFAULT_TRACKED)
-    const dedupedTracked = dedupeTrackedBackendFolders(merged)
+    // llama.cpp forks that cards define join the list and follow their card.
+    const dedupedTracked = dedupeTrackedBackendFolders(mergeCardForks(merged, activeForkCards(), backendFolderNameFor))
     setBackendKeyAliases(dedupedTracked)
     return {
       externalModelFolders: Array.isArray(data.externalModelFolders) ? data.externalModelFolders : [],
@@ -534,6 +559,7 @@ async function loadSettings(): Promise<AppSettings> {
       launchOnStartup: !!data.launchOnStartup,
       autostartMainTemplates: !!data.autostartMainTemplates,
       kvCacheCheckpoints: migrateKvCacheCheckpoints(data.kvCacheCheckpoints),
+      engineOverrides: migrateEngineOverrides(data.engineOverrides),
       harnesses: migrateHarnessSettings(data.harnesses)
     }
   } catch {
@@ -598,7 +624,7 @@ async function backendRoots(): Promise<{ dir: string; external: boolean }[]> {
   return roots
 }
 
-const runningProcesses = new Map<string, { proc: ChildProcess; port: number; modelPath?: string; templateName?: string; checkpointsActive?: boolean; apiKey?: string; engine?: EngineId; cloneDir?: string }>
+const runningProcesses = new Map<string, { proc: ChildProcess; port: number; modelPath?: string; templateName?: string; checkpointsActive?: boolean; checkpoints?: CardCheckpoints; apiKey?: string; engine?: EngineId; cloneDir?: string }>
 let sharedChatWindow: BrowserWindow | null = null
 
 // Per-model flags so we only emit each "important" app-log event once per run.
@@ -646,15 +672,18 @@ function isPortAvailable(port: number): Promise<boolean> {
 // POSIX: SIGKILL to the negative group id after detaching into its own group),
 // then poll the port until it's free (or a timeout). This makes Stop→Start
 // reliable without orphaned children.
-// graceMs (POSIX only): send SIGTERM to the process group first and give it
-// that long to exit before the SIGKILL. Strata releases tens of GB of pinned
-// RAM when it is allowed to shut down cleanly. Windows always force-kills the
-// tree, which frees that memory with the processes.
-// How long an engine gets to exit by itself before it is killed: Strata
-// shuts its own children down, a card engine says so in its card.
+// graceMs: ask the engine to exit first (SIGTERM to the process group on
+// POSIX, Ctrl+C on Windows) and give it that long before the force kill.
+// llama.cpp saves its prompt cache and closes its slots on that request; Strata
+// releases tens of GB of pinned RAM when it is allowed to shut down cleanly.
+// How long an engine gets to exit by itself before it is killed: a card engine
+// says so in its card, llama.cpp gets a short fixed one.
+const LLAMA_STOP_GRACE_MS = 5000
+
 function stopGrace(engine: EngineId | undefined, strataMs: number): { graceMs: number } | undefined {
   if (engine === 'strata') return { graceMs: strataMs }
-  const grace = engine ? engineDef(engine).card?.launch.stop?.graceMs : undefined
+  if (!engine || engine === 'llama.cpp') return { graceMs: LLAMA_STOP_GRACE_MS }
+  const grace = engineDef(engine).card?.launch.stop?.graceMs
   return grace ? { graceMs: Math.min(grace, strataMs) } : undefined
 }
 
@@ -675,12 +704,22 @@ function killProcessTree(proc: ChildProcess, opts?: { graceMs?: number }): Promi
     proc.once('exit', done)
 
     if (process.platform === 'win32') {
-      // /F = force, /T = kill the whole process tree (children included).
-      exec(`taskkill /F /T /PID ${pid}`, { timeout: 5000 }, () => {
-        // taskkill returns non-zero if the process is already gone — ignore.
-        // Give the OS a beat to release the socket.
-        setTimeout(done, 200)
-      })
+      const hardKill = () => {
+        if (settled) return
+        // /F = force, /T = kill the whole process tree (children included).
+        exec(`taskkill /F /T /PID ${pid}`, { timeout: 5000 }, () => {
+          // taskkill returns non-zero if the process is already gone - ignore.
+          // Give the OS a beat to release the socket.
+          setTimeout(done, 200)
+        })
+      }
+      if (opts?.graceMs && pid) {
+        // The helper's own start-up counts against the grace.
+        void sendWindowsCtrlC(pid).then(sent => { if (!sent) hardKill() })
+        setTimeout(hardKill, opts.graceMs)
+      } else {
+        hardKill()
+      }
     } else {
       const hardKill = () => {
         try {
@@ -1420,7 +1459,8 @@ function buildTrackedCommandsSchema(tracked: TrackedBackend): CommandsSchema | n
   }
   for (const extra of tracked.extraCommands || []) {
     const cat = base.categories.find(c => c.name === extra.name)
-    const known = new Set(cat ? cat.commands.map(c => c.arg) : [])
+    // A parameter the schema already has, in any group, is not added again.
+    const known = new Set(base.categories.flatMap(c => c.commands.flatMap(x => [x.arg, ...(x.aliases ?? [])])))
     const added = extra.commands.filter(c => !known.has(c.arg)).map(c => ({ ...c }))
     if (cat) cat.commands.push(...added)
     else base.categories.push({ name: extra.name, icon: extra.icon, commands: added })
@@ -1862,11 +1902,11 @@ const SLOT_IO_TIMEOUT_MS = 120_000
 // unlike the streaming chat completion used by the benchmark tool. llama-server
 // reports failures as a 4xx/5xx with a JSON error body, so those reject rather
 // than resolve. The slot endpoints sit behind --api-key, hence the optional key.
-function postJsonLocal(port: number, path: string, body: unknown, opts: { timeoutMs?: number; apiKey?: string } = {}): Promise<any> {
+function postJsonLocal(port: number, path: string, body: unknown, opts: { timeoutMs?: number; apiKey?: string; method?: string } = {}): Promise<any> {
   return new Promise((resolvePromise, reject) => {
     const payload = JSON.stringify(body)
     const req = http.request({
-      hostname: '127.0.0.1', port, path, method: 'POST',
+      hostname: '127.0.0.1', port, path, method: opts.method ?? 'POST',
       headers: {
         'Content-Type': 'application/json',
         'Content-Length': Buffer.byteLength(payload),
@@ -1920,12 +1960,25 @@ function resolveCheckpointEnabled(globalEnabled: boolean, checkpointMode: Checkp
   return globalEnabled
 }
 
+// llama.cpp's slot endpoints, which a card replaces with its own.
+const LLAMA_CHECKPOINTS: Required<Pick<CardCheckpoints, 'save' | 'restore'>> = {
+  save: { method: 'POST', path: '/slots/0?action=save', body: { filename: '{filename}' } },
+  restore: { method: 'POST', path: '/slots/0?action=restore', body: { filename: '{filename}' } }
+}
+
+function checkpointRequest(spec: CardHttpSpec, vars: { filename: string; checkpointDir: string }): { method: string; path: string; body: Record<string, unknown> } {
+  const fill = (t: string) => t.replace(/\{(filename|checkpointDir)\}/g, (_m, k: 'filename' | 'checkpointDir') => vars[k])
+  const body: Record<string, unknown> = {}
+  for (const [k, v] of Object.entries(spec.body ?? {})) body[k] = typeof v === 'string' ? fill(v) : v
+  return { method: spec.method ?? 'POST', path: fill(spec.path), body }
+}
+
 // Save the currently running slot's KV cache to disk and record its token
 // count in the index. Never throws -- a failed save (backend without
 // --slot-save-path support, disk full, server already gone) is logged and
 // otherwise ignored, since it must never block Stop.
 async function saveSlotCheckpoint(opts: {
-  port: number; modelPath: string; templateId: string; templateName: string; enabled: boolean; apiKey?: string
+  port: number; modelPath: string; templateId: string; templateName: string; enabled: boolean; apiKey?: string; spec?: CardCheckpoints
 }): Promise<void> {
   try {
     if (!opts.enabled || !opts.modelPath) return
@@ -1934,7 +1987,10 @@ async function saveSlotCheckpoint(opts: {
     const dir = await resolveCheckpointFolder()
     const filename = checkpointFileName(opts.modelPath, cfg.mode, opts.templateName)
     const filePath = join(dir, filename)
-    const res = await postJsonLocal(opts.port, '/slots/0?action=save', { filename }, { timeoutMs: SLOT_IO_TIMEOUT_MS, apiKey: opts.apiKey })
+    const saveSpec = opts.spec?.save
+    if (opts.spec && !saveSpec) return
+    const req = checkpointRequest(saveSpec ?? LLAMA_CHECKPOINTS.save, { filename, checkpointDir: dir })
+    const res = await postJsonLocal(opts.port, req.path, req.body, { timeoutMs: SLOT_IO_TIMEOUT_MS, apiKey: opts.apiKey, method: req.method })
     // llama.cpp's save response has reported the saved token count under a
     // couple of different key names across versions -- try each rather than
     // pinning to one.
@@ -1986,7 +2042,7 @@ function findCheckpointForTemplate(dir: string, modelPath: string, mode: 'model'
 // corrupt llama-server's buffer). ctxSize of 0 means native/unbounded, so
 // the guard never applies. Never throws.
 async function restoreSlotCheckpoint(opts: {
-  port: number; modelPath: string; templateId: string; templateName: string; ctxSize: number; enabled: boolean; apiKey?: string
+  port: number; modelPath: string; templateId: string; templateName: string; ctxSize: number; enabled: boolean; apiKey?: string; spec?: CardCheckpoints
 }): Promise<void> {
   try {
     if (!opts.enabled || !opts.modelPath) return
@@ -2002,7 +2058,10 @@ async function restoreSlotCheckpoint(opts: {
       saveCheckpointIndex()
       return
     }
-    const res = await postJsonLocal(opts.port, '/slots/0?action=restore', { filename: basename(filePath) }, { timeoutMs: SLOT_IO_TIMEOUT_MS, apiKey: opts.apiKey })
+    const restoreSpec = opts.spec?.restore
+    if (opts.spec && !restoreSpec) return
+    const req = checkpointRequest(restoreSpec ?? LLAMA_CHECKPOINTS.restore, { filename: basename(filePath), checkpointDir: dir })
+    const res = await postJsonLocal(opts.port, req.path, req.body, { timeoutMs: SLOT_IO_TIMEOUT_MS, apiKey: opts.apiKey, method: req.method })
     // Same key-name tolerance as the save path -- llama.cpp has used
     // different field names for the restored token count across versions.
     const tokens = typeof res?.n_restored === 'number' ? res.n_restored
@@ -2039,7 +2098,7 @@ function probeHealth(port: number): Promise<boolean> {
 // so a server that never becomes ready (crashes, hangs on load) isn't polled
 // forever.
 function restoreCheckpointWhenReady(opts: {
-  templateId: string; port: number; modelPath: string; templateName: string; ctxSize: number; enabled: boolean; apiKey?: string
+  templateId: string; port: number; modelPath: string; templateName: string; ctxSize: number; enabled: boolean; apiKey?: string; spec?: CardCheckpoints
 }): void {
   const startedAt = Date.now()
   const timeoutMs = 10 * 60 * 1000
@@ -2047,7 +2106,8 @@ function restoreCheckpointWhenReady(opts: {
   const stillCurrent = () => !!proc && runningProcesses.get(opts.templateId)?.proc === proc
   const poll = async () => {
     if (!stillCurrent() || Date.now() - startedAt > timeoutMs) return
-    if (await probeHealth(opts.port)) {
+    // A card engine is ready when the launch's own readiness check says so.
+    if (opts.spec ? serverReadyFlags.get(opts.templateId) === true : await probeHealth(opts.port)) {
       if (!stillCurrent()) return
       await restoreSlotCheckpoint(opts)
       return
@@ -2423,6 +2483,11 @@ export function getRunningProcessCount(): number {
 // ==========================================================================
 // IPC handlers
 // ==========================================================================
+// docs/engine-card-skill: the skill's SKILL.md, the checker and the examples.
+function cardSkillSourceDir(): string {
+  return app.isPackaged ? join(process.resourcesPath, 'resources', 'engine-card-skill') : join(process.cwd(), 'docs', 'engine-card-skill')
+}
+
 function cardGuidePath(): string {
   return app.isPackaged ? join(process.resourcesPath, 'resources', 'engine-cards.md') : join(process.cwd(), 'docs', 'engine-cards.md')
 }
@@ -2437,11 +2502,14 @@ export function registerIpcHandlers(): void {
   initEngineCards(
     app.isPackaged ? join(process.resourcesPath, 'resources', 'engine-cards') : join(process.cwd(), 'resources', 'engine-cards'),
     join(APP_ROOT, 'engine-cards'),
-    broadcastEngineCards
+    broadcastEngineCards,
+    () => (loadEngineCommandsSchema('llama.cpp')?.categories ?? []).flatMap(c => c.commands.flatMap(x => [x.arg, ...(x.aliases ?? [])]))
   )
   ipcMain.handle('get-engine-cards', () => listLoadedCards().map(c => ({
-    id: c.id, label: c.card?.label ?? c.id, description: c.card?.description, folder: c.card?.engine.folder,
-    file: c.file, source: c.source, valid: !!c.card, card: c.card, replaces: !!c.replaces, errors: c.errors, warnings: c.warnings,
+    id: c.id, label: c.card?.label ?? c.fork?.label ?? c.id, description: c.card?.description ?? c.fork?.description, folder: c.card?.engine.folder,
+    kind: c.kind, repo: c.fork?.source.repo, branch: c.fork?.source.branch,
+    paramCount: (c.card?.params ?? c.fork?.params)?.categories.reduce((n, cat) => n + cat.commands.length, 0) ?? 0,
+    file: c.file, source: c.source, valid: !!(c.card || c.fork), card: c.card, replaces: !!c.replaces, errors: c.errors, warnings: c.warnings,
     launcher: c.card ? cardLauncherFile(c.card, process.platform) : null
   })))
   ipcMain.handle('refresh-engine-cards', () => { refreshEngineCards(); broadcastEngineCards() })
@@ -2449,21 +2517,37 @@ export function registerIpcHandlers(): void {
   ipcMain.handle('open-engine-folder', async (_e, cardId: string) => {
     const card = engineCardOf(cardId)
     if (!card) return 'Engine card not loaded'
-    const dir = join(BACKEND_DIR, card.engine.folder)
+    const dir = join(await resolveMainBackendFolder(), card.engine.folder)
     await fsPromises.mkdir(dir, { recursive: true })
     return shell.openPath(dir)
   })
-  ipcMain.handle('get-engine-card-prompt', () => {
-    let guide = ''
-    try { guide = readFileSync(cardGuidePath(), 'utf-8') } catch { guide = '(The engine card guide was not found in this install.)' }
-    return [
-      'Write an engine card for XLM Studio for the engine in this folder. Follow the guide below.',
-      `Save it as <engine-id>.json in: ${customCardsDir()}`,
-      `The engine's own folder goes in: ${BACKEND_DIR}${sep}<engine.folder>`,
-      'XLM Studio validates the card when the file appears. If it is invalid, a <engine-id>.errors.txt file is written beside it; read it and fix the card.',
-      '',
-      guide
-    ].join('\n')
+  // The skill that teaches an agent to write an engine card (Settings > Engine Cards).
+  ipcMain.handle('get-card-skill-state', () => ({ installed: cardSkillInstalled(), dir: cardSkillDir() }))
+  ipcMain.handle('add-card-skill', async () => {
+    const r = writeCardSkill(
+      { skillSourceDir: cardSkillSourceDir(), guidePath: cardGuidePath() },
+      { cardsDir: customCardsDir(), enginesDir: await resolveMainBackendFolder(), platform: process.platform }
+    )
+    return r.success ? { success: true, dir: r.dir } : { success: false, error: r.error }
+  })
+  ipcMain.handle('remove-card-skill', () => { removeCardSkill(); return { success: true } })
+  // Runs the installed build of a fork with --help and reports the card's
+  // parameters it does not mention, so a flag the fork dropped or renamed shows.
+  ipcMain.handle('check-fork-card', async (_e, cardId: string): Promise<{ checked: number; missing: string[]; build?: string; error?: string }> => {
+    const fork = activeForkCards().find(f => f.id === cardId)
+    if (!fork) return { checked: 0, missing: [], error: 'Fork card not loaded' }
+    const s = await loadSettings()
+    const tracked = s.trackedBackends.find(t => t.fromCard === cardId)
+    const build = tracked ? (await listBackendsImpl()).find(b => b.backendKey === tracked.folderName) : undefined
+    if (!build) return { checked: 0, missing: [], error: 'No installed build of this fork yet. Install it in the Engine Tracker first.' }
+    const exe = join(build.path, build.exe)
+    const text = await new Promise<string>(resolve => {
+      execFile(exe, ['--help'], { cwd: build.path, env: { ...process.env, ...(engineRuntimeEnv(build.path) ?? {}) }, timeout: 30000, windowsHide: true, maxBuffer: 16 * 1024 * 1024 },
+        (_err, stdout, stderr) => resolve(`${stdout || ''}${stderr || ''}`))
+    })
+    if (!text.trim()) return { checked: 0, missing: [], build: build.name, error: `${build.exe} printed no help text.` }
+    const params = (fork.params?.categories ?? []).flatMap(c => c.commands)
+    return { checked: params.length, missing: missingFromHelp(params, text), build: build.name }
   })
   // Read a template's CURRENT name directly from disk, by id — used so
   // session tracking always reflects live renames rather than a name
@@ -3009,6 +3093,7 @@ export function registerIpcHandlers(): void {
   ipcMain.handle('remove-tracked-backend', async (_e, trackedId: string) => {
     const s = await loadSettings()
     const t = s.trackedBackends.find(x => x.id === trackedId)
+    if (t?.fromCard) return { success: false, error: 'This entry comes from an engine card. Remove the card to remove it.' }
     if (!t) return { success: false, error: 'Not found' }
     if (t.isDefault) return { success: false, error: 'Built-in backends cannot be removed' }
     s.trackedBackends = s.trackedBackends.filter(x => x.id !== trackedId)
@@ -3314,6 +3399,10 @@ export function registerIpcHandlers(): void {
     if (r.canceled || !r.filePaths.length) return null
     return { name: basename(r.filePaths[0]), path: r.filePaths[0] }
   })
+  ipcMain.handle('pick-folder', async () => {
+    const r = await dialog.showOpenDialog({ title: 'Select Folder', properties: ['openDirectory', 'createDirectory'] })
+    return r.canceled || !r.filePaths.length ? null : r.filePaths[0]
+  })
   ipcMain.handle('pick-any-file', async () => {
     const r = await dialog.showOpenDialog({ title: 'Select File', properties: ['openFile'] })
     if (r.canceled || !r.filePaths.length) return null
@@ -3362,6 +3451,25 @@ export function registerIpcHandlers(): void {
   })
 
   // ----- Run model -----
+  // What a card's expressions see at launch: the same hardware and model
+  // figures the editor shows, and the override values that apply to the engine.
+  async function buildLaunchCardContext(card: EngineCard, o: { modelPath: string; name: string; port: number; args: Record<string, unknown>; host?: string; apiKey?: string; settings: AppSettings }): Promise<{ ctx: CardContext; overrideArgs: Record<string, unknown> }> {
+    const [ram, vram, cpu] = await Promise.all([getSystemRamImpl().catch(() => null), getVramInfoImpl().catch(() => null), getCpuInfoImpl().catch(() => null)])
+    let meta: any = null
+    if (o.modelPath) { try { meta = await getGgufMetadataImpl(o.modelPath) } catch { /* the model reads as unknown */ } }
+    const fieldValues = o.settings.engineOverrides?.[card.id] ?? {}
+    const ctx: CardContext = {
+      ...emptyCardContext(process.platform),
+      system: buildSystemContext(process.platform, ram, vram as any, cpu),
+      model: buildModelContext(o.modelPath, meta),
+      args: o.args,
+      overrides: { port: o.port, host: o.host ?? null, apiKeySet: !!o.apiKey, engine: fieldValues },
+      template: { name: o.name, port: o.port }
+    }
+    const globals = globalOverrideValues(o.settings.modelDefaults, !!meta?.isMoe || (meta?.expertCount || 0) > 0, cpu)
+    return { ctx, overrideArgs: overrideArgsFor(card, fieldValues, globals, ctx) }
+  }
+
   async function runModelImpl(opts: { id: string; name: string; backendPath: string; exe: string; args: string[]; openBrowser: boolean; port: number; ignoreBaseUrlOverride?: boolean; skipCheckpoint?: boolean; checkpointMode?: CheckpointMode; engine?: EngineId; modelPath?: string; cardArgs?: Record<string, unknown> }) {
     const engineId = engineOf(opts.engine)
     const isStrata = engineId === 'strata'
@@ -3459,25 +3567,37 @@ export function registerIpcHandlers(): void {
     if (card) {
       // The card says where the port, host and key go, so the argument list
       // is built here, once the resolved port and the overrides are known.
-      const ovr = opts.ignoreBaseUrlOverride ? undefined : (await loadSettings()).baseUrlOverride
+      const cs = await loadSettings()
+      const ovr = opts.ignoreBaseUrlOverride ? undefined : cs.baseUrlOverride
       // Starts that do not come from the editor (MCP tools) pass no args, so
       // the saved Template is read.
       let cardArgs = opts.cardArgs
       if (!cardArgs) {
         try { cardArgs = JSON.parse(readFileSync(join(TEMPLATES_DIR, `${opts.id}.json`), 'utf-8')).args } catch { /* no saved Template */ }
       }
+      const host = ovr?.enabled && ovr.serveOnLocalNetwork ? '0.0.0.0' : undefined
+      const apiKey = ovr?.enabled && ovr.apiKeyEnabled && ovr.apiKey ? ovr.apiKey : undefined
+      const launchCtx = await buildLaunchCardContext(card, { modelPath: opts.modelPath ?? '', name: opts.name, port: finalPort, args: cardArgs ?? {}, host, apiKey, settings: cs })
       const input = {
         modelPath: opts.modelPath ?? '',
         port: finalPort,
-        host: ovr?.enabled && ovr.serveOnLocalNetwork ? '0.0.0.0' : undefined,
-        apiKey: ovr?.enabled && ovr.apiKeyEnabled && ovr.apiKey ? ovr.apiKey : undefined,
+        host,
+        apiKey,
         engineDir: opts.backendPath,
-        args: cardArgs ?? {}
+        args: cardArgs ?? {},
+        context: launchCtx.ctx,
+        overrideArgs: launchCtx.overrideArgs
       }
       const built = buildCardArgv(card, input)
       if ('error' in built) return { success: false, error: built.error }
       finalArgs = built.argv
       cardEnvVars = cardEnv(card, input)
+      // The engine needs to know where to keep checkpoints, when it has a flag for it.
+      if (!opts.skipCheckpoint && card.checkpoints && resolveCheckpointEnabled(!!cs.kvCacheCheckpoints?.enabled, opts.checkpointMode)) {
+        kvCheckpointsEnabled = true
+        const flag = card.checkpoints.enable
+        if (flag && !finalArgs.includes(flag.arg)) finalArgs.push(flag.arg, (flag.value ?? '{checkpointDir}').replace('{checkpointDir}', await resolveCheckpointFolder()))
+      }
     }
     // Apply "Serve on local network" (--host 0.0.0.0) and
     // "API Key" (--api-key <key>) from the Base URL Override settings.
@@ -3714,7 +3834,8 @@ export function registerIpcHandlers(): void {
         modelPath: (!isLlama ? opts.modelPath : extractArgValue(finalArgs, '--model', '-m')) || undefined,
         templateName: opts.name,
         checkpointsActive: kvCheckpointsEnabled,
-        apiKey: (isLlama && extractArgValue(finalArgs, '--api-key')) || undefined,
+        checkpoints: card?.checkpoints,
+        apiKey: ((isLlama || card) && extractArgValue(finalArgs, '--api-key')) || undefined,
         engine: isLlama ? undefined : engineId,
         cloneDir: isStrata ? opts.backendPath : undefined
       })
@@ -3742,14 +3863,15 @@ export function registerIpcHandlers(): void {
       // background -- it waits on the server's /health itself, so it never
       // delays this function's own return.
       if (!opts.skipCheckpoint && kvCheckpointsEnabled) {
-        const modelPathForCheckpoint = extractArgValue(finalArgs, '--model', '-m')
-        const ctxRaw = extractArgValue(finalArgs, '--ctx-size', '-c')
+        const modelPathForCheckpoint = card ? opts.modelPath ?? null : extractArgValue(finalArgs, '--model', '-m')
+        const ctxRaw = card ? null : extractArgValue(finalArgs, '--ctx-size', '-c')
         const ctxSize = ctxRaw !== null ? (parseInt(ctxRaw, 10) || 0) : 0
         if (modelPathForCheckpoint) {
           restoreCheckpointWhenReady({
             templateId: opts.id, port: finalPort, modelPath: modelPathForCheckpoint,
             templateName: opts.name, ctxSize, enabled: kvCheckpointsEnabled,
-            apiKey: extractArgValue(finalArgs, '--api-key') || undefined
+            apiKey: extractArgValue(finalArgs, '--api-key') || undefined,
+            spec: card?.checkpoints
           })
         }
       }
@@ -4011,7 +4133,7 @@ export function registerIpcHandlers(): void {
     if (!opts?.skipCheckpoint && entry.modelPath) {
       await saveSlotCheckpoint({
         port, modelPath: entry.modelPath, templateId: id, templateName: entry.templateName || id,
-        enabled: !!entry.checkpointsActive, apiKey: entry.apiKey
+        enabled: !!entry.checkpointsActive, apiKey: entry.apiKey, spec: entry.checkpoints
       })
     }
     // Kill the whole process tree (children included) and wait for the process
@@ -4331,6 +4453,32 @@ export function registerIpcHandlers(): void {
       invalidateBuildToolsCaches()
     }
   })
+
+  // ----- Engines installed from a card's source and install steps -----
+  const cardInstalls = new Map<string, AbortController>()
+  const sendAll = (channel: string, payload: unknown) => BrowserWindow.getAllWindows().forEach(w => { if (!w.isDestroyed()) w.webContents.send(channel, payload) })
+  ipcMain.handle('install-card-engine', async (_e, cardId: string) => {
+    const card = engineCardOf(cardId)
+    if (!card) return { success: false, error: `The engine card "${cardId}" is not loaded.` }
+    if (cardInstalls.has(cardId)) return { success: false, error: 'Already running' }
+    if (card.source && !(await gitAvailable())) return { success: false, error: 'git was not found. Install git and make sure it is on PATH.' }
+    const ac = new AbortController()
+    cardInstalls.set(cardId, ac)
+    sendAll('card-install-state', { id: cardId, busy: true })
+    try {
+      const r = await installCardEngine(card, await resolveMainBackendFolder(), {
+        log: (line, app) => sendAll('card-install-log', { id: cardId, line, app: !!app }),
+        killTree: (proc) => killProcessTree(proc),
+        signal: ac.signal
+      })
+      if (r.ok) sendAll('engine-cards-changed', null)
+      return r.ok ? { success: true, path: r.path } : { success: false, error: r.error }
+    } finally {
+      cardInstalls.delete(cardId)
+      sendAll('card-install-state', { id: cardId, busy: false })
+    }
+  })
+  ipcMain.handle('cancel-card-install', (_e, cardId: string) => { cardInstalls.get(cardId)?.abort(); return { success: true } })
 
   // ----- Git-installed engines (Strata) -----
   // The clone of a git engine for this OS: a folder under <root>/<folderName>/ that
@@ -6051,6 +6199,14 @@ export function registerIpcHandlers(): void {
   ipcMain.handle('pick-strata-data-folder', async () => {
     const r = await dialog.showOpenDialog({ title: 'Choose the Strata data folder', properties: ['openDirectory', 'createDirectory'] })
     return r.canceled || !r.filePaths.length ? null : r.filePaths[0]
+  })
+  ipcMain.handle('get-engine-overrides', async () => (await loadSettings()).engineOverrides ?? {})
+  ipcMain.handle('set-engine-overrides', async (_e, engine: string, values: Record<string, unknown>) => {
+    const s = await loadSettings()
+    s.engineOverrides = migrateEngineOverrides({ ...(s.engineOverrides ?? {}), [engine]: values })
+    await saveSettings(s)
+    BrowserWindow.getAllWindows().forEach(win => { if (!win.isDestroyed()) win.webContents.send('engine-overrides-changed', s.engineOverrides) })
+    return { success: true }
   })
   ipcMain.handle('get-global-engine-backends', async () => (await loadSettings()).globalEngineBackends || {})
   ipcMain.handle('set-global-engine-backend', async (_e, engine: string, backendKey: string | null) => {

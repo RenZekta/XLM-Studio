@@ -1,3 +1,4 @@
+import { ParamControl } from './paramParts'
 import React, { useEffect, useMemo, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
 import { Box, Cpu, Database, GitBranch, Image as ImageIcon, Lock, RotateCcw, Server, Wind, Wrench, Zap } from 'lucide-react'
@@ -351,7 +352,10 @@ export default function EngineParamsEditor({
               )}
             </>
           )}
-          {!isCtx && cmd.type === 'boolean' && (
+          {!isCtx && cmd.widget && (
+            <ParamControl cmd={cmd} view={{ label: cmd.label, description: cmd.description, min: cmd.min, max: cmd.max, default: cmd.default, options: cmd.options }} value={raw} disabled={rowDisabled} onChange={v => update(cmd.arg, v)} />
+          )}
+          {!isCtx && !cmd.widget && cmd.type === 'boolean' && (
             <div className="toggle-wrap">
               <label className="toggle" style={rowDisabled ? { opacity: 0.45, cursor: 'not-allowed' } : {}}>
                 <input type="checkbox" checked={!!val} onChange={e => update(cmd.arg, e.target.checked)} disabled={rowDisabled} />
@@ -359,21 +363,21 @@ export default function EngineParamsEditor({
               </label>
             </div>
           )}
-          {!isCtx && cmd.type === 'number' && (
+          {!isCtx && !cmd.widget && cmd.type === 'number' && (
             <input
               type="number" className="cmd-input" value={val} placeholder={cmd.placeholder}
               min={cmd.min} max={cmd.max} step="any" disabled={rowDisabled}
               onChange={e => update(cmd.arg, e.target.value === '' ? null : Number(e.target.value))}
             />
           )}
-          {!isCtx && cmd.type === 'string' && (
+          {!isCtx && !cmd.widget && cmd.type === 'string' && (
             <input
               type="text" className="cmd-input" style={{ flex: 1, minWidth: 0 }} value={val}
               placeholder={cmd.placeholder} disabled={rowDisabled}
               onChange={e => update(cmd.arg, e.target.value)}
             />
           )}
-          {!isCtx && cmd.type === 'select' && (
+          {!isCtx && !cmd.widget && cmd.type === 'select' && (
             <SelectMenu
               variant="compact"
               style={{ width: '100%' }}

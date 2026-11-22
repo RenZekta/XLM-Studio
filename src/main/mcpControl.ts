@@ -17,6 +17,10 @@ import { applySpecDraftKvDefaults } from '../shared/specDraftKv'
 import { resolvePinned } from '../shared/backendPin'
 import { engineOf, engineDef, type EngineId } from '../shared/engines'
 import { syncYarnAuto } from '../shared/yarnAuto'
+import { applyPreset } from '../shared/cardRules'
+import { buildModelContext, buildSystemContext, emptyCardContext, type CardContext } from '../shared/cardContext'
+import { applyCardChange, cardCatalog, findPreset } from './cardTools'
+import { engineCardOf } from './engineCards'
 import { buildStrataArgv, buildStrataQuickBaseline, strataGgufDir, strataInfoFor, strataIsCommon } from '../shared/strata'
 
 // Speculative-decoding tier table — mirrors src/main/ipc.ts's own
@@ -283,6 +287,8 @@ async function buildLaunchArgs(template: Template): Promise<{ args: string[]; ct
   for (const [key, value] of Object.entries(raw)) {
     if (key.startsWith('__')) continue  // synthetic UI-only keys (ignoreCtxOverride, autoCtxFill, ...)
     if (value === false || value === null || value === undefined || value === '') continue
+    // A list parameter (an engine card's list widget saved on the Template) is one flag per item.
+    if (Array.isArray(value)) { for (const item of value) if (String(item).trim() !== '') flags.push(key, String(item)); continue }
     flags.push(key)
     if (value !== true) flags.push(String(value))
   }
@@ -581,6 +587,21 @@ export async function toolTemplateCreate(args: { name: string; model: string; ba
 
 // Every changeable field EXCEPT model/backend of a currently-serving
 // template (would corrupt the live session) — see the guard below.
+// The hardware and model figures a card's expressions see, for the tools that
+// work on a card Template without going through the editor.
+async function cardContextFor(t: Template, args: Record<string, unknown>): Promise<CardContext> {
+  const [ram, vram, cpu] = await Promise.all([D().getSystemRam().catch(() => null), D().getVramInfo().catch(() => null), D().getCpuInfo().catch(() => null)])
+  let meta: any = null
+  if (t.modelPath) { try { meta = await D().getGgufMetadata(t.modelPath) } catch { /* the model reads as unknown */ } }
+  return {
+    ...emptyCardContext(process.platform),
+    system: buildSystemContext(process.platform, ram, vram, cpu),
+    model: buildModelContext(t.modelPath || '', meta),
+    args,
+    template: { name: t.name, port: t.serverPort || 8080 }
+  }
+}
+
 export async function toolTemplateEdit(args: { templates: string[]; changes: Record<string, any> }) {
   const targets = findTemplates(args.templates)
   const results: { template: string; success: boolean; error?: string; needsDecision?: Record<string, unknown>; customArgs?: Record<string, unknown> }[] = []
@@ -599,6 +620,7 @@ export async function toolTemplateEdit(args: { templates: string[]; changes: Rec
       const patch: Record<string, any> = { ...t, updatedAt: new Date().toISOString() }
       let newArgs: Record<string, any> = { ...(t.args || {}) }
       const { labelToFlag, shortToFlag } = await getSchemaLookup(t)
+      const editCard = engineCardOf(engineOf(t))
       // Whether this call explicitly set a type alongside a backend/version
       // change -- if not, it gets auto-resolved once every change has been
       // applied (see below), rather than unconditionally discarded.
@@ -623,6 +645,13 @@ export async function toolTemplateEdit(args: { templates: string[]; changes: Rec
         if (k === 'serverPort' || k === 'port') { patch.serverPort = Number(v); continue }
         if (k === 'name') { patch.name = String(v); continue }
         if (k === 'launchMode') continue  // vestigial field, no longer meaningful — Chat UI/API Only per-Template switch was removed; see settings.modelDefaults.autoOpenChatUI
+        // A card engine's parameters come from its card, not from llama.cpp's schema.
+        if (editCard) {
+          const changed = applyCardChange(editCard, newArgs, k, v)
+          if ('error' in changed) throw new ToolError(changed.error)
+          newArgs = changed.args
+          continue
+        }
         // The three composite toggles from display-parameters-*'s "toggles"
         // array — each accepts a plain boolean under either its label or
         // its short key, and (for the N-gram ones) applies the exact same
@@ -825,7 +854,7 @@ export async function toolTemplateEdit(args: { templates: string[]; changes: Rec
       // the editor keeps, so an edit made here never leaves them stale.
       let kvBackendKey: string | undefined
       try { kvBackendKey = (await resolveBackend({ ...t, ...patch } as Template))?.backendKey } catch { /* no backend installed: generic defaults */ }
-      newArgs = applySpecDraftKvDefaults(newArgs, kvBackendKey)
+      if (!editCard) newArgs = applySpecDraftKvDefaults(newArgs, kvBackendKey)
       patch.args = newArgs
       delete patch._file
       await D().saveTemplate(patch)
@@ -873,8 +902,20 @@ function normalizePreset(preset: string | number): 'clear' | 'quick' | 'full-aut
 export async function toolApplyParametersPreset(args: { preset: string | number; template: string }) {
   const t = findTemplate(args.template)
   await assertEditAllowed(t)
+  const card = engineCardOf(engineOf(t))
+  if (card) {
+    const named = findPreset(card, String(args.preset))
+    if (!named) {
+      const list = (card.params?.presets ?? []).map(p => p.name)
+      throw new ToolError(list.length > 0 ? `${card.label} has no preset \"${args.preset}\". Its presets: ${list.join(', ')}.` : `${card.label} has no presets.`)
+    }
+    const next = applyPreset(card, named, t.args || {}, await cardContextFor(t, t.args || {}))
+    const patch = { ...t, args: next, updatedAt: new Date().toISOString() }
+    delete (patch as any)._file
+    await D().saveTemplate(patch)
+    return { template: t.name, preset: named.name, applied: true }
+  }
   const preset = normalizePreset(args.preset)
-  if (engineDef(t).card) throw new ToolError(`${engineDef(t).label} has no presets.`)
   if (engineOf(t) !== 'llama.cpp') {
     // Other engines have their own, much smaller presets (see
     // EngineParamsEditor): Full Auto sends nothing and Quick is the shared
@@ -1073,6 +1114,20 @@ async function findDetectedSpeculation(t: Template): Promise<any[]> {
 
 async function paramsView(t: Template, view: 'common' | 'full') {
   const args = t.args || {}
+  const viewCard = engineCardOf(engineOf(t))
+  if (viewCard) {
+    // A card engine has no Common/Full split: every parameter that is set,
+    // with the card's label and type.
+    const info = new Map(cardCatalog().find(c => c.id === viewCard.id)?.parameters.map(p => [p.arg, p]))
+    return {
+      template: t.name, view, engine: viewCard.id,
+      parameters: Object.entries(args).filter(([k]) => !k.startsWith('__')).map(([flag, value]) => ({
+        flag, label: info.get(flag)?.label ?? flag, value, type: info.get(flag)?.type ?? null, options: info.get(flag)?.options
+      })),
+      toggles: [],
+      note: 'Stored values of this engine card Template. Use list-engine-parameters for every parameter the card offers and display-preview for the launch command.'
+    }
+  }
   let entries = Object.entries(args).filter(([k]) => !k.startsWith('__'))
   // "Common" returns the same curated flag subset the UI's Common
   // Parameters view shows (COMMON_PARAM_FLAGS, shared with
@@ -1571,6 +1626,14 @@ export async function toolSwitchTemplate(args: { steps: { action: 'start' | 'sto
 // generated SKILL.md, so the two are always in sync.
 // ---------------------------------------------------------------------------
 
+export async function toolListEngineParameters(args: { engine?: string }) {
+  const all = cardCatalog()
+  if (!args.engine) return { engines: all.map(c => ({ id: c.id, label: c.label, kind: c.kind, parameterCount: c.parameters.length, presets: c.presets.map(p => p.name) })), note: 'Pass "engine" with an id to list its parameters.' }
+  const hit = all.find(c => c.id.toLowerCase() === String(args.engine).toLowerCase() || c.label.toLowerCase() === String(args.engine).toLowerCase())
+  if (!hit) throw new ToolError(`No engine card "${args.engine}". Loaded: ${all.map(c => c.id).join(', ') || 'none'}.`)
+  return hit
+}
+
 export interface ToolDef {
   name: string
   description: string
@@ -1603,6 +1666,11 @@ export const TOOL_DEFS: ToolDef[] = [
     name: 'info-backends', handler: toolInfoBackends,
     description: 'List all detected installed backends.',
     params: []
+  },
+  {
+    name: 'list-engine-parameters', handler: toolListEngineParameters,
+    description: 'List the engines described by engine cards (custom engines and llama.cpp forks). With "engine" set to a card id: its parameters (flag, label, type, options, limits, default, category), presets, override fields and whether it has KV checkpoints and a memory estimate. For a fork card the parameters are the ones the fork adds to the llama.cpp list. Use the flags or labels with template-edit, and the preset names with apply-parameters-preset.',
+    params: [{ name: 'engine', type: 'string', required: false, description: 'Card id; omit to list every card' }]
   },
   {
     name: 'info-tracked-backends', handler: toolInfoTrackedBackends,
@@ -1647,9 +1715,9 @@ export const TOOL_DEFS: ToolDef[] = [
   },
   {
     name: 'apply-parameters-preset', handler: toolApplyParametersPreset,
-    description: 'Apply the Clean (0), Quick (1), or FULL AUTO (2) parameter preset to a Template.',
+    description: 'Apply a parameter preset to a Template: Clean (0), Quick (1) or FULL AUTO (2) for llama.cpp and Strata, or a preset of the Template\'s engine card by name or id (see list-engine-parameters).',
     params: [
-      { name: 'preset', type: '"Clean"|"Quick"|"FULL AUTO"|0|1|2', required: true, description: 'Which preset to apply' },
+      { name: 'preset', type: '"Clean"|"Quick"|"FULL AUTO"|0|1|2|string', required: true, description: 'Which preset to apply' },
       { name: 'template', type: 'string', required: true, description: 'Target template name' }
     ]
   },

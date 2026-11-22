@@ -1,3 +1,4 @@
+import { ParamControl } from './paramParts'
 import React, { useMemo, useState, useEffect, useRef } from 'react'
 import { createPortal } from 'react-dom'
 import { useStore } from '../store/useStore'
@@ -1597,7 +1598,7 @@ export default function CmdParamsEditor({ templateId, args, onChange, modelPathF
     const isHybrid = HYBRID_PARAMS.includes(cmd.arg)
     const rowDisabled = disabled || ctxDisabled
     return (
-      <div key={cmd.arg} className={`cmd-row ${changed ? 'changed-param' : ''} ${cmd.type === 'text' ? 'cmd-row-full' : ''} ${isHybrid ? 'cmd-row-hybrid' : ''}`}>
+      <div key={cmd.arg} className={`cmd-row ${changed ? 'changed-param' : ''} ${cmd.type === 'text' && !cmd.widget ? 'cmd-row-full' : ''} ${isHybrid ? 'cmd-row-hybrid' : ''}`}>
         {changed && <div className="changed-indicator" />}
         <div className="cmd-label-group">
           <div className="cmd-label tooltip-wrap">
@@ -1671,7 +1672,11 @@ export default function CmdParamsEditor({ templateId, args, onChange, modelPathF
               )}
             </>
           )}
-          {!isHybrid && cmd.type === 'boolean' && (
+          {/* Parameters a user added with a widget (Settings > Commands Editor) use the same controls as engine cards. */}
+          {!isHybrid && cmd.widget && (
+            <ParamControl cmd={cmd} view={{ label: cmd.label, description: cmd.description, min: cmd.min, max: cmd.max, default: cmd.default, options: cmd.options }} value={args[cmd.arg]} disabled={disabled} onChange={v => handleUpdate(cmd.arg, v === null ? '' : v)} />
+          )}
+          {!isHybrid && !cmd.widget && cmd.type === 'boolean' && (
             <div className="toggle-wrap">
               <label className="toggle" style={disabled ? { opacity: 0.45, cursor: 'not-allowed' } : {}}>
                 <input type="checkbox" checked={!!val} onChange={(e) => handleUpdate(cmd.arg, e.target.checked)} disabled={disabled} />
@@ -1679,19 +1684,19 @@ export default function CmdParamsEditor({ templateId, args, onChange, modelPathF
               </label>
             </div>
           )}
-          {!isHybrid && cmd.type === 'number' && (
+          {!isHybrid && !cmd.widget && cmd.type === 'number' && (
             <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
               <input type="number" className="cmd-input" value={val} placeholder={cmd.default?.toString()} min={cmd.min} max={cmd.max} step="any" onChange={(e) => handleUpdate(cmd.arg, e.target.value === '' ? '' : Number(e.target.value))} disabled={disabled} />
             </div>
           )}
-          {!isHybrid && cmd.type === 'string' && (
+          {!isHybrid && !cmd.widget && cmd.type === 'string' && (
             <div style={{ display: 'flex', gap: 4, alignItems: 'center', width: '100%' }}>
               <input type="text" className="cmd-input" style={{ flex: 1, minWidth: 0 }} value={val} placeholder={cmd.placeholder || cmd.default?.toString()} onChange={(e) => handleUpdate(cmd.arg, e.target.value)} disabled={disabled} />
               <button type="button" className="num-btn" style={{ width: 28, height: 30, borderRadius: 'var(--radius-sm)' }} onClick={() => navigator.clipboard.readText().then(t => { if (t) handleUpdate(cmd.arg, t.replace(/(^"|"$)/g, '')) })} disabled={disabled} title="Paste from clipboard"><Clipboard size={14} /></button>
               <button type="button" className="num-btn" style={{ width: 28, height: 30, borderRadius: 'var(--radius-sm)' }} onClick={async () => { const f = await window.api?.pickAnyFile?.(); if (f) handleUpdate(cmd.arg, f) }} disabled={disabled} title="Browse file"><FolderOpen size={14} /></button>
             </div>
           )}
-          {!isHybrid && cmd.type === 'select' && (
+          {!isHybrid && !cmd.widget && cmd.type === 'select' && (
             <SelectMenu
               variant="compact"
               style={{ width: '100%' }}
@@ -1725,7 +1730,7 @@ export default function CmdParamsEditor({ templateId, args, onChange, modelPathF
           </span>
         )}
         {changed && <button type="button" className="cmd-reset-btn" onClick={() => handleReset(cmd)} disabled={disabled} title="Reset to default"><RotateCcw size={12} /></button>}
-        {cmd.type === 'text' && <textarea className="cmd-textarea" value={val} placeholder={cmd.placeholder} onChange={(e) => handleUpdate(cmd.arg, e.target.value)} disabled={disabled} />}
+        {cmd.type === 'text' && !cmd.widget && <textarea className="cmd-textarea" value={val} placeholder={cmd.placeholder} onChange={(e) => handleUpdate(cmd.arg, e.target.value)} disabled={disabled} />}
       </div>
     )
   }

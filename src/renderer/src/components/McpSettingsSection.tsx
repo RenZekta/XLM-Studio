@@ -8,6 +8,7 @@ const TOOL_LABELS: Record<McpToolId, string> = {
   'info-models': 'info-models — list detected model files',
   'info-backends': 'info-backends — list installed backends',
   'info-tracked-backends': 'info-tracked-backends — tracked backend update status',
+  'list-engine-parameters': 'list-engine-parameters — engine card parameters and presets',
   'template-duplicate': 'template-duplicate — clone a Template',
   'template-create': 'template-create — create a new Template',
   'template-edit': 'template-edit — edit an existing Template',

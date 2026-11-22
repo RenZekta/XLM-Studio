@@ -150,6 +150,7 @@ export default function App() {
       try { setModelDefaults(await window.api?.getModelDefaults?.()) } catch {}
       try { setBaseUrlOverride(await window.api?.getBaseUrlOverride?.()) } catch {}
       try { setKvCacheCheckpoints(await window.api?.getKvCacheCheckpoints?.()) } catch {}
+      try { useStore.getState().setEngineOverrides(await window.api.getEngineOverrides()) } catch {}
       try { setSamplingPresets(await window.api?.listSamplingPresets?.()) } catch {}
       checkUpdates()
     }
@@ -182,6 +183,9 @@ export default function App() {
           useStore.getState().setBackends(await window.api.listBackends())
         } catch {}
       })
+    } catch {}
+    try {
+      window.api?.onEngineOverridesChanged?.(all => useStore.getState().setEngineOverrides(all))
     } catch {}
     try {
       window.api?.onTemplatesChanged?.(async () => {

@@ -1,0 +1,20 @@
+{
+  "cardVersion": 1,
+  "id": "example-fork",
+  "label": "Example llama.cpp fork",
+  "description": "A llama.cpp fork. List only the parameters the fork adds; llama.cpp's own are already there.",
+  "extends": "llama.cpp",
+  "source": { "repo": "example-org/llama.cpp-fork", "branch": "main" },
+  "params": {
+    "categories": [
+      {
+        "name": "Fork options",
+        "icon": "Zap",
+        "commands": [
+          { "arg": "--turbo-cache", "label": "Turbo cache", "description": "Keeps the prompt cache compressed.", "type": "boolean" },
+          { "arg": "--turbo-bits", "label": "Turbo cache bits", "description": "Bits per cached value.", "type": "select", "options": ["2", "3", "4"] }
+        ]
+      }
+    ]
+  }
+}

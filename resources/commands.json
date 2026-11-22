@@ -1,5 +1,5 @@
 {
-  "version": "2026.11.15-more-params",
+  "version": "2026.11.21-upstream-sync",
   "categories": [
     {
       "name": "Model",
@@ -7,14 +7,14 @@
       "commands": [
         { "arg": "--model", "short": "-m", "label": "Model Path", "description": "Model path to load", "type": "string", "placeholder": "/path/to/model.gguf", "env": "LLAMA_ARG_MODEL" },
         { "arg": "--model-url", "short": "-mu", "label": "Model URL", "description": "Model download URL", "type": "string", "placeholder": "https://...", "env": "LLAMA_ARG_MODEL_URL" },
-        { "arg": "--hf-repo", "short": "-hf", "label": "HuggingFace Repo", "description": "HuggingFace model repo (user/model[:quant])", "type": "string", "placeholder": "ggml-org/GLM-4.7-Flash-GGUF:Q4_K_M", "env": "LLAMA_ARG_HF_REPO" },
+        { "arg": "--hf-repo", "aliases": ["-hfr"], "short": "-hf", "label": "HuggingFace Repo", "description": "HuggingFace model repo (user/model[:quant])", "type": "string", "placeholder": "ggml-org/GLM-4.7-Flash-GGUF:Q4_K_M", "env": "LLAMA_ARG_HF_REPO" },
         { "arg": "--hf-file", "short": "-hff", "label": "HuggingFace File", "description": "HuggingFace model file override", "type": "string", "placeholder": "model.gguf", "env": "LLAMA_ARG_HF_FILE" },
         { "arg": "--hf-token", "short": "-hft", "label": "HuggingFace Token", "description": "HuggingFace access token", "type": "string", "placeholder": "hf_...", "env": "HF_TOKEN" },
         { "arg": "--ctx-size", "short": "-c", "label": "Context Size", "description": "Size of the prompt context (0 = from model)", "type": "number", "default": 0, "min": 0, "max": 131072, "env": "LLAMA_ARG_CTX_SIZE" },
-        { "arg": "--n-predict", "short": "-n", "label": "Max Tokens to Predict", "description": "Number of tokens to predict (-1 = infinity)", "type": "number", "default": -1, "min": -1, "max": 65536, "env": "LLAMA_ARG_N_PREDICT" },
+        { "arg": "--n-predict", "aliases": ["--predict"], "short": "-n", "label": "Max Tokens to Predict", "description": "Number of tokens to predict (-1 = infinity)", "type": "number", "default": -1, "min": -1, "max": 65536, "env": "LLAMA_ARG_N_PREDICT" },
         { "arg": "--lora", "label": "LoRA Adapter", "description": "Path to LoRA adapter", "type": "string", "placeholder": "/path/to/lora.gguf" },
         { "arg": "--mmproj", "short": "-mm", "label": "Multimodal Projector", "description": "Path to multimodal projector file", "type": "string", "placeholder": "/path/to/mmproj.gguf", "env": "LLAMA_ARG_MMPROJ" },
-        { "arg": "--mmproj-device", "label": "Projector Device", "description": "Device that runs the multimodal projector, as a name from --list-devices (needs the projector on the GPU, not in RAM)", "type": "string", "placeholder": "CUDA1" },
+        { "arg": "--mmproj-device", "aliases": ["-mmdev"], "label": "Projector Device", "description": "Device that runs the multimodal projector, as a name from --list-devices (needs the projector on the GPU, not in RAM)", "type": "string", "placeholder": "CUDA1" },
         { "arg": "--chat-template-file", "label": "Chat Template File", "description": "Path to a Jinja chat template file, read when the model starts (an alternative to typing the template)", "type": "string", "placeholder": "/path/to/template.jinja", "env": "LLAMA_ARG_CHAT_TEMPLATE_FILE" },
         { "arg": "--lora-scaled", "label": "LoRA Adapter (scaled)", "description": "LoRA adapters with their own scale, as FNAME:SCALE pairs separated by commas", "type": "string", "placeholder": "/path/a.gguf:0.5,/path/b.gguf:1.0" },
         { "arg": "--lora-init-without-apply", "label": "Load LoRA Without Applying", "description": "Load the LoRA adapters but leave them off until they are applied through POST /lora-adapters", "type": "boolean", "default": false },
@@ -25,7 +25,8 @@
         { "arg": "--mtmd-batch-max-tokens", "label": "Image Tokens Per Batch", "description": "Maximum image tokens per batch when encoding images", "type": "number", "default": 1024, "min": 1, "max": 65536, "env": "LLAMA_ARG_MTMD_BATCH_MAX_TOKENS" },
         { "arg": "--video-fps", "label": "Video Frame Rate", "description": "Frames per second sampled from videos", "type": "number", "default": 4, "min": 0.1, "max": 60, "env": "LLAMA_ARG_VIDEO_FPS" },
         { "arg": "--video-timestamp-interval", "label": "Video Timestamp Interval (ms)", "description": "Interval in milliseconds between the text timestamps added to video frames", "type": "number", "default": 5000, "min": 1, "max": 600000, "env": "LLAMA_ARG_VIDEO_TIMESTAMP_INTERVAL" },
-        { "arg": "--video-ffmpeg-dir", "label": "FFmpeg Folder", "description": "Folder holding ffmpeg and ffprobe for video input (default: search the PATH)", "type": "string", "placeholder": "/path/to/ffmpeg/bin", "env": "LLAMA_ARG_VIDEO_FFMPEG_DIR" }
+        { "arg": "--video-ffmpeg-dir", "label": "FFmpeg Folder", "description": "Folder holding ffmpeg and ffprobe for video input (default: search the PATH)", "type": "string", "placeholder": "/path/to/ffmpeg/bin", "env": "LLAMA_ARG_VIDEO_FFMPEG_DIR" },
+        { "arg": "--spm-infill", "label": "SPM Infill Pattern", "description": "Use the Suffix/Prefix/Middle pattern for infill instead of Prefix/Suffix/Middle, which some models prefer.", "type": "boolean", "default": false }
       ]
     },
     {
@@ -55,14 +56,19 @@
         { "arg": "--cpu-strict-batch", "label": "Strict CPU Placement (Batch)", "description": "Use strict CPU placement for batch and prompt processing (default: same as generation)", "type": "select", "options": ["0", "1"] },
         { "arg": "--prio-batch", "label": "Process Priority (Batch)", "description": "Priority of the batch threads: low(-1), normal(0), medium(1), high(2), realtime(3)", "type": "select", "options": ["-1", "0", "1", "2", "3"] },
         { "arg": "--poll-batch", "label": "Poll Level (Batch)", "description": "Polling level for batch threads (0-100, 0 = no polling; default: same as --poll)", "type": "number", "min": 0, "max": 100 },
-        { "arg": "--no-host", "label": "Bypass Host Buffer", "description": "Bypass the host buffer so extra device buffers can be used", "type": "boolean", "default": false, "env": "LLAMA_ARG_NO_HOST" }
+        { "arg": "--no-host", "label": "Bypass Host Buffer", "description": "Bypass the host buffer so extra device buffers can be used", "type": "boolean", "default": false, "env": "LLAMA_ARG_NO_HOST" },
+        { "arg": "--no-warmup", "label": "Skip Warmup", "description": "Skip the warmup run with an empty prompt at start.", "type": "boolean", "default": false },
+        { "arg": "--override-tensor", "short": "-ot", "label": "Override Tensor Buffers", "description": "Override where tensors live: tensor name pattern = buffer type, comma separated.", "type": "string", "placeholder": "blk\\.\\d+\\.ffn_.*_exps\\.=CPU", "env": "LLAMA_ARG_OVERRIDE_TENSOR" },
+        { "arg": "--override-kv", "label": "Override Model Metadata", "description": "Advanced: override model metadata by key as KEY=TYPE:VALUE, comma separated. Types: int, float, bool, str.", "type": "string", "placeholder": "tokenizer.ggml.add_bos_token=bool:false" },
+        { "arg": "--fit-target", "short": "-fitt", "label": "Fit Target Margin (MiB)", "description": "Memory margin per device that --fit leaves free, in MiB, comma separated for several devices.", "type": "string", "placeholder": "1024" },
+        { "arg": "--fit-ctx", "short": "-fitc", "label": "Fit Minimum Context", "description": "Smallest context size --fit may choose.", "type": "number", "min": 0, "env": "LLAMA_ARG_FIT_CTX" }
       ]
     },
     {
       "name": "GPU",
       "icon": "Zap",
       "commands": [
-        { "arg": "--gpu-layers", "short": "-ngl", "label": "GPU Layers", "description": "Max layers to store in VRAM ('auto', 'all', or number)", "type": "string", "default": "auto", "placeholder": "auto", "env": "LLAMA_ARG_N_GPU_LAYERS" },
+        { "arg": "--gpu-layers", "aliases": ["--n-gpu-layers"], "short": "-ngl", "label": "GPU Layers", "description": "Max layers to store in VRAM ('auto', 'all', or number)", "type": "string", "default": "auto", "placeholder": "auto", "env": "LLAMA_ARG_N_GPU_LAYERS" },
         { "arg": "--split-mode", "short": "-sm", "label": "Split Mode", "description": "How to split model across multiple GPUs", "type": "select", "options": ["layer", "none", "row", "tensor"], "default": "layer", "env": "LLAMA_ARG_SPLIT_MODE" },
         { "arg": "--main-gpu", "short": "-mg", "label": "Main GPU", "description": "Primary GPU index for the model", "type": "number", "default": 0, "min": 0, "max": 16, "env": "LLAMA_ARG_MAIN_GPU" },
         { "arg": "--device", "short": "-dev", "label": "Devices", "description": "Comma-separated list of devices for offloading", "type": "string", "placeholder": "CUDA0,CUDA1", "env": "LLAMA_ARG_DEVICE" },
@@ -80,14 +86,15 @@
       "commands": [
         { "arg": "--cache-type-k", "short": "-ctk", "label": "KV Cache Type (K)", "description": "KV cache data type for Keys", "type": "select", "options": ["f16", "f32", "bf16", "f8_e4m3", "q8_0", "q4_0", "q4_1", "iq4_nl", "q5_0", "q5_1"], "default": "f16", "requireValue": true, "env": "LLAMA_ARG_CACHE_TYPE_K" },
         { "arg": "--cache-type-v", "short": "-ctv", "label": "KV Cache Type (V)", "description": "KV cache data type for Values", "type": "select", "options": ["f16", "f32", "bf16", "f8_e4m3", "q8_0", "q4_0", "q4_1", "iq4_nl", "q5_0", "q5_1"], "default": "f16", "requireValue": true, "env": "LLAMA_ARG_CACHE_TYPE_V" },
-        { "arg": "--repack", "label": "Weight Repacking", "description": "Enable weight repacking for performance", "type": "boolean", "default": true, "env": "LLAMA_ARG_REPACK" }
+        { "arg": "--repack", "label": "Weight Repacking", "description": "Enable weight repacking for performance", "type": "boolean", "default": true, "env": "LLAMA_ARG_REPACK" },
+        { "arg": "--kv-unified-per-slot", "label": "Context per Slot (unified KV)", "description": "Context limit per parallel slot. When set without --ctx-size the shared KV pool is sized to parallel slots times this value.", "type": "number", "min": 0, "env": "LLAMA_ARG_KV_UNIFIED_PER_SLOT" }
       ]
     },
     {
       "name": "Sampling",
       "icon": "Sliders",
       "commands": [
-        { "arg": "--temperature", "label": "Temperature", "description": "Sampling temperature (higher = more creative)", "type": "number", "default": 0.8, "min": 0, "max": 2, "env": "" },
+        { "arg": "--temperature", "aliases": ["--temp"], "label": "Temperature", "description": "Sampling temperature (higher = more creative)", "type": "number", "default": 0.8, "min": 0, "max": 2, "env": "" },
         { "arg": "--top-k", "label": "Top-K", "description": "Top-K sampling (0 = disabled)", "type": "number", "default": 40, "min": 0, "max": 1000, "env": "LLAMA_ARG_TOP_K" },
         { "arg": "--top-p", "label": "Top-P", "description": "Top-P nucleus sampling (1.0 = disabled)", "type": "number", "default": 0.95, "min": 0, "max": 1 },
         { "arg": "--min-p", "label": "Min-P", "description": "Min-P sampling (0.0 = disabled)", "type": "number", "default": 0.05, "min": 0, "max": 1 },
@@ -168,7 +175,33 @@
         { "arg": "--tools-runtime", "label": "Tools Runtime", "description": "Experimental: run the tools in a separate runtime instead of on the host", "type": "string", "env": "LLAMA_ARG_TOOLS_RUNTIME" },
         { "arg": "--mcp-servers-config", "label": "MCP Servers File", "description": "Experimental: JSON file with MCP server definitions (Cursor format). Do not enable in untrusted environments", "type": "string", "placeholder": "/path/to/mcp.json", "env": "LLAMA_ARG_MCP_SERVERS_CONFIG" },
         { "arg": "--mcp-servers-json", "label": "MCP Servers (JSON)", "description": "Experimental: MCP server definitions as JSON (Cursor format). Do not enable in untrusted environments", "type": "text", "env": "LLAMA_ARG_MCP_SERVERS_JSON" },
-        { "arg": "--agent", "short": "-ag", "label": "Agent Mode", "description": "Enable the CORS proxy and all built-in tools. Do not enable in untrusted environments", "type": "boolean", "default": false, "env": "LLAMA_ARG_AGENT" }
+        { "arg": "--agent", "short": "-ag", "label": "Agent Mode", "description": "Enable the CORS proxy and all built-in tools. Do not enable in untrusted environments", "type": "boolean", "default": false, "env": "LLAMA_ARG_AGENT" },
+        { "arg": "--cache-reuse", "label": "Prompt Cache Reuse (min chunk)", "description": "Minimum chunk size, in tokens, to try to reuse from the prompt cache by KV shifting. Needs prompt caching on. 0 disables.", "type": "number", "default": 0, "min": 0, "env": "LLAMA_ARG_CACHE_REUSE" },
+        { "arg": "--cache-ram", "short": "-cram", "label": "Prompt Cache RAM (MiB)", "description": "Maximum size of the host-RAM prompt cache in MiB. -1 means no limit, 0 disables it.", "type": "number", "min": -1, "env": "LLAMA_ARG_CACHE_RAM" },
+        { "arg": "--no-cache-idle-slots", "label": "Do Not Cache Idle Slots", "description": "By default idle slots are saved to the prompt cache when a new task arrives (needs the RAM cache). Turn on to keep them out.", "type": "boolean", "default": false },
+        { "arg": "--no-cache-prompt", "label": "Disable Prompt Caching", "description": "Turn prompt caching off. It is on by default.", "type": "boolean", "default": false },
+        { "arg": "--ctx-checkpoints", "aliases": ["--swa-checkpoints"], "short": "-ctxcp", "label": "Context Checkpoints per Slot", "description": "Maximum number of context checkpoints created per slot.", "type": "number", "min": 0, "env": "LLAMA_ARG_CTX_CHECKPOINTS" },
+        { "arg": "--checkpoint-min-step", "short": "-cms", "label": "Checkpoint Minimum Spacing", "description": "Minimum spacing between context checkpoints, in tokens. 0 means no minimum.", "type": "number", "min": 0, "env": "LLAMA_ARG_CHECKPOINT_MIN_SPACING_NT" },
+        { "arg": "--slot-prompt-similarity", "short": "-sps", "label": "Slot Prompt Similarity", "description": "How closely a request prompt must match the prompt of a slot for that slot to be reused. 0 disables.", "type": "number", "min": 0, "max": 1 },
+        { "arg": "--sleep-idle-seconds", "label": "Sleep After Idle (seconds)", "description": "Seconds of idleness after which the server sleeps. -1 disables. 0 is not allowed.", "type": "number", "min": -1 },
+        { "arg": "--context-shift", "label": "Context Shift", "description": "Use context shift on infinite text generation.", "type": "boolean", "default": false, "env": "LLAMA_ARG_CONTEXT_SHIFT" },
+        { "arg": "--no-cont-batching", "short": "-nocb", "label": "Disable Continuous Batching", "description": "Turn continuous (dynamic) batching off. It is on by default.", "type": "boolean", "default": false },
+        { "arg": "--no-slots", "label": "Hide Slots Endpoint", "description": "Do not expose the slots monitoring endpoint.", "type": "boolean", "default": false },
+        { "arg": "--embedding", "aliases": ["--embeddings"], "label": "Embedding Only", "description": "Only support the embedding use case. For dedicated embedding models.", "type": "boolean", "default": false, "env": "LLAMA_ARG_EMBEDDINGS" },
+        { "arg": "--rerank", "aliases": ["--reranking"], "label": "Reranking Endpoint", "description": "Enable the reranking endpoint (sets embedding mode with rank pooling).", "type": "boolean", "default": false, "env": "LLAMA_ARG_RERANKING" },
+        { "arg": "--pooling", "label": "Pooling Type", "description": "Pooling type for embeddings. Left unset, the model default is used.", "type": "select", "default": "", "options": ["none", "mean", "cls", "last", "rank"], "emptyLabel": "Model default" },
+        { "arg": "--api-prefix", "label": "API Prefix", "description": "Path prefix the server serves from, without a trailing slash.", "type": "string", "placeholder": "/llama", "env": "LLAMA_ARG_API_PREFIX" },
+        { "arg": "--api-key-file", "label": "API Key File", "description": "File with API keys, one per line. Lines starting with # are comments.", "type": "string", "placeholder": "/path/to/keys.txt" },
+        { "arg": "--ssl-key-file", "label": "SSL Private Key File", "description": "PEM-encoded SSL private key.", "type": "string", "placeholder": "/path/to/key.pem", "env": "LLAMA_ARG_SSL_KEY_FILE" },
+        { "arg": "--ssl-cert-file", "label": "SSL Certificate File", "description": "PEM-encoded SSL certificate.", "type": "string", "placeholder": "/path/to/cert.pem", "env": "LLAMA_ARG_SSL_CERT_FILE" },
+        { "arg": "--media-path", "label": "Local Media Directory", "description": "Directory for loading local media files; they are reached through file:// URLs with relative paths.", "type": "string", "placeholder": "/path/to/media" },
+        { "arg": "--cors-credentials", "label": "Allow CORS Credentials", "description": "Allow credentials for CORS requests. With the default origin * the Origin header is echoed back.", "type": "boolean", "default": false },
+        { "arg": "--chat-template-kwargs", "label": "Chat Template Arguments", "description": "Extra parameters for the chat template parser, as a JSON object string.", "type": "string", "placeholder": "{\"key\":\"value\"}" },
+        { "arg": "--reasoning-effort", "label": "Reasoning Effort", "description": "Reasoning effort level given to the chat template: default to keep the template default, or a level such as minimal, low, medium, high, xhigh or max.", "type": "string", "placeholder": "default" },
+        { "arg": "--reasoning-budget-message", "label": "Reasoning Budget Message", "description": "Message injected before the end-of-thinking tag when the reasoning budget is used up.", "type": "string", "env": "LLAMA_ARG_THINK_BUDGET_MESSAGE" },
+        { "arg": "--skip-chat-parsing", "label": "Skip Chat Parsing", "description": "Force a pure content parser even when a Jinja template is set: the model output, including reasoning and tool calls, goes to the content.", "type": "boolean", "default": false },
+        { "arg": "--no-prefill-assistant", "label": "Do Not Prefill Assistant", "description": "Treat a last assistant message as a full message instead of prefilling the response with it.", "type": "boolean", "default": false },
+        { "arg": "--no-ui", "label": "Disable Built-in Chat UI", "description": "Turn the built-in Llama Chat web app off.", "type": "boolean", "default": false, "env": "LLAMA_ARG_UI" }
       ]
     },
     {
@@ -178,8 +211,8 @@
         { "arg": "--log-disable", "label": "Disable Logging", "description": "Disable log output entirely", "type": "boolean", "default": false },
         { "arg": "--log-file", "label": "Log File", "description": "Save log output to file", "type": "string", "placeholder": "/path/to/llama.log", "env": "LLAMA_LOG_FILE" },
         { "arg": "--log-colors", "label": "Log Colors", "description": "Colorize log output", "type": "select", "options": ["auto", "on", "off"], "default": "auto", "env": "LLAMA_LOG_COLORS" },
-        { "arg": "--verbose", "short": "-v", "label": "Verbose Mode", "description": "Log all messages (useful for debugging)", "type": "boolean", "default": false },
-        { "arg": "--log-verbosity", "short": "-lv", "label": "Verbosity Level", "description": "0=generic, 1=error, 2=warning, 3=info, 4=debug", "type": "select", "options": ["0", "1", "2", "3", "4"], "default": "3", "env": "LLAMA_LOG_VERBOSITY" },
+        { "arg": "--verbose", "aliases": ["--log-verbose"], "short": "-v", "label": "Verbose Mode", "description": "Log all messages (useful for debugging)", "type": "boolean", "default": false },
+        { "arg": "--log-verbosity", "aliases": ["--verbosity"], "short": "-lv", "label": "Verbosity Level", "description": "0=generic, 1=error, 2=warning, 3=info, 4=debug", "type": "select", "options": ["0", "1", "2", "3", "4"], "default": "3", "env": "LLAMA_LOG_VERBOSITY" },
         { "arg": "--log-prefix", "label": "Log Prefix", "description": "Enable prefix in log messages", "type": "boolean", "default": false, "env": "LLAMA_LOG_PREFIX" },
         { "arg": "--log-timestamps", "label": "Log Timestamps", "description": "Enable timestamps in log messages", "type": "boolean", "default": false, "env": "LLAMA_LOG_TIMESTAMPS" },
         { "arg": "--offline", "label": "Offline Mode", "description": "Force cache usage, prevent network access", "type": "boolean", "default": false, "env": "LLAMA_OFFLINE" },
@@ -191,14 +224,14 @@
       "icon": "GitBranch",
       "commands": [
         { "arg": "--spec-type", "label": "Speculative Type", "description": "Comma-separated speculative decoding types", "type": "string", "placeholder": "draft-simple", "env": "LLAMA_ARG_SPEC_TYPE" },
-        { "arg": "--spec-draft-model", "short": "-md", "label": "Draft Model", "description": "Draft model path for speculative decoding", "type": "string", "placeholder": "/path/to/draft.gguf", "env": "LLAMA_ARG_SPEC_DRAFT_MODEL" },
-        { "arg": "--spec-draft-ngl", "short": "-ngld", "label": "Draft GPU Layers", "description": "Max draft model layers in VRAM", "type": "string", "default": "auto", "placeholder": "auto", "env": "LLAMA_ARG_N_GPU_LAYERS_DRAFT" },
+        { "arg": "--spec-draft-model", "aliases": ["--model-draft"], "short": "-md", "label": "Draft Model", "description": "Draft model path for speculative decoding", "type": "string", "placeholder": "/path/to/draft.gguf", "env": "LLAMA_ARG_SPEC_DRAFT_MODEL" },
+        { "arg": "--spec-draft-ngl", "aliases": ["--gpu-layers-draft", "--n-gpu-layers-draft"], "short": "-ngld", "label": "Draft GPU Layers", "description": "Max draft model layers in VRAM", "type": "string", "default": "auto", "placeholder": "auto", "env": "LLAMA_ARG_N_GPU_LAYERS_DRAFT" },
         { "arg": "--spec-draft-type-k", "short": "-ctkd", "aliases": ["--cache-type-k-draft"], "label": "Draft Model KV Cache Type (K)", "description": "KV cache data type for Keys of the speculative-decoding draft model", "type": "select", "options": ["f16", "f32", "bf16", "f8_e4m3", "q8_0", "q4_0", "q4_1", "iq4_nl", "q5_0", "q5_1"], "default": "f16", "requireValue": true, "env": "LLAMA_ARG_SPEC_DRAFT_CACHE_TYPE_K" },
         { "arg": "--spec-draft-type-v", "short": "-ctvd", "aliases": ["--cache-type-v-draft"], "label": "Draft Model KV Cache Type (V)", "description": "KV cache data type for Values of the speculative-decoding draft model", "type": "select", "options": ["f16", "f32", "bf16", "f8_e4m3", "q8_0", "q4_0", "q4_1", "iq4_nl", "q5_0", "q5_1"], "default": "f16", "requireValue": true, "env": "LLAMA_ARG_SPEC_DRAFT_CACHE_TYPE_V" },
         { "arg": "--spec-draft-n-max", "label": "Draft Max Tokens", "description": "Tokens to draft for speculative decoding", "type": "number", "default": 16, "min": 1, "max": 128, "env": "LLAMA_ARG_SPEC_DRAFT_N_MAX" },
         { "arg": "--spec-draft-n-min", "label": "Draft Min Tokens", "description": "Minimum draft tokens for speculative decoding", "type": "number", "default": 0, "min": 0, "max": 128, "env": "LLAMA_ARG_SPEC_DRAFT_N_MIN" },
-        { "arg": "--spec-draft-p-min", "label": "Draft P-Min", "description": "Minimum speculative decoding probability (greedy)", "type": "number", "default": 0.75, "min": 0, "max": 1, "env": "LLAMA_ARG_SPEC_DRAFT_P_MIN" },
-        { "arg": "--spec-draft-p-split", "label": "Draft P-Split", "description": "Speculative decoding split probability", "type": "number", "default": 0.1, "min": 0, "max": 1, "env": "LLAMA_ARG_SPEC_DRAFT_P_SPLIT" },
+        { "arg": "--spec-draft-p-min", "aliases": ["--draft-p-min"], "label": "Draft P-Min", "description": "Minimum speculative decoding probability (greedy)", "type": "number", "default": 0.75, "min": 0, "max": 1, "env": "LLAMA_ARG_SPEC_DRAFT_P_MIN" },
+        { "arg": "--spec-draft-p-split", "aliases": ["--draft-p-split"], "label": "Draft P-Split", "description": "Speculative decoding split probability", "type": "number", "default": 0.1, "min": 0, "max": 1, "env": "LLAMA_ARG_SPEC_DRAFT_P_SPLIT" },
         { "arg": "--spec-ngram-map-k4v-size-n", "label": "N-gram Map (K4V) Match Window Size", "description": "N-gram map (k4v) match window size", "type": "number", "default": 12, "min": 0, "max": 256, "env": "LLAMA_ARG_SPEC_NGRAM_MAP_K4V_SIZE_N" },
         { "arg": "--spec-ngram-map-k4v-size-m", "label": "N-gram Map (K4V) Map Table Size", "description": "N-gram map (k4v) map table size", "type": "number", "default": 48, "min": 0, "max": 512, "env": "LLAMA_ARG_SPEC_NGRAM_MAP_K4V_SIZE_M" },
         { "arg": "--spec-ngram-map-k4v-min-hits", "label": "N-gram Map (K4V) Minimum Hits", "description": "N-gram map (k4v) minimum hits required", "type": "number", "default": 1, "min": 0, "max": 64, "env": "LLAMA_ARG_SPEC_NGRAM_MAP_K4V_MIN_HITS" },
@@ -217,7 +250,9 @@
         { "arg": "--spec-draft-prio-batch", "aliases": ["--prio-batch-draft"], "label": "Draft Process Priority (Batch)", "description": "Priority of the draft model's batch threads: low(-1), normal(0), medium(1), high(2), realtime(3)", "type": "select", "options": ["-1", "0", "1", "2", "3"] },
         { "arg": "--spec-draft-poll-batch", "aliases": ["--poll-batch-draft"], "label": "Draft Poll Level (Batch)", "description": "Polling level for the draft model's batch threads (0-100, 0 = no polling)", "type": "number", "min": 0, "max": 100 },
         { "arg": "--spec-draft-n-ubatch", "label": "Draft Micro-batch Size", "description": "Physical maximum batch size of the draft context. A smaller value spares VRAM (0 = same as --ubatch-size)", "type": "number", "min": 0, "max": 8192, "env": "LLAMA_ARG_SPEC_DRAFT_N_UBATCH" },
-        { "arg": "--spec-draft-sampling", "label": "Draft Sampling", "description": "How the draft is sampled: greedy takes its top token; probabilistic samples it and the target verifies by rejection sampling", "type": "select", "options": ["greedy", "probabilistic"], "env": "LLAMA_ARG_SPEC_DRAFT_SAMPLING" }
+        { "arg": "--spec-draft-sampling", "label": "Draft Sampling", "description": "How the draft is sampled: greedy takes its top token; probabilistic samples it and the target verifies by rejection sampling", "type": "select", "options": ["greedy", "probabilistic"], "env": "LLAMA_ARG_SPEC_DRAFT_SAMPLING" },
+        { "arg": "--lookup-cache-static", "short": "-lcs", "label": "Static Lookup Cache", "description": "Static lookup cache file used for lookup decoding. Generation does not update it.", "type": "string", "placeholder": "/path/to/cache" },
+        { "arg": "--lookup-cache-dynamic", "short": "-lcd", "label": "Dynamic Lookup Cache", "description": "Dynamic lookup cache file used for lookup decoding. Generation updates it.", "type": "string", "placeholder": "/path/to/cache" }
       ]
     }
   ]

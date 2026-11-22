@@ -9,9 +9,12 @@ files:
 extraResources:
   - from: resources/
     to: resources/
-  # The engine card guide, read by Settings > Engine Cards.
+  # The engine card guide, copied into the engine card skill.
   - from: docs/engine-cards.md
     to: resources/engine-cards.md
+  # The skill for agents that write engine cards: its instructions, the checker and the examples.
+  - from: docs/engine-card-skill
+    to: resources/engine-card-skill
   # The icon of the app's windows (resources/icon.png, see src/main/appIcon.ts).
   - from: assets/icon_256.png
     to: icon.png

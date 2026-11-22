@@ -414,6 +414,11 @@ export function buildStrataArgv(input: StrataLaunchInput): { argv: string[] } | 
     if (!key.startsWith('--') || STRATA_OWN_FLAGS.has(key) || STRATA_ACTION_FLAGS.has(key)) continue
     if (value === false || value === null || value === undefined) continue
     if (value === true) { argv.push(key); sent.add(key); continue }
+    if (Array.isArray(value)) {
+      for (const item of value) if (String(item).trim() !== '') argv.push(key, String(item).trim())
+      if (value.length > 0) sent.add(key)
+      continue
+    }
     const text = String(value).trim()
     if (!text) continue
     argv.push(key, text)

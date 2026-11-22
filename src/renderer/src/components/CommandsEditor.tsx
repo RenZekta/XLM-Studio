@@ -9,6 +9,14 @@ const iconMap: Record<string, React.ElementType> = {
 }
 
 const PARAM_TYPES = ['boolean', 'number', 'string', 'select', 'text']
+// How a value is edited. Only the widgets that fit the chosen type are offered.
+const WIDGETS_BY_TYPE: Record<string, { value: string; label: string }[]> = {
+  number: [{ value: '', label: 'Number box' }, { value: 'slider', label: 'Slider' }],
+  select: [{ value: '', label: 'Dropdown' }, { value: 'segmented', label: 'Segmented buttons (up to 4)' }],
+  string: [{ value: '', label: 'Text' }, { value: 'password', label: 'Password' }, { value: 'file', label: 'File picker' }, { value: 'folder', label: 'Folder picker' }, { value: 'list', label: 'List (one flag per item)' }],
+  text: [{ value: '', label: 'Text area' }, { value: 'keyvalue', label: 'Name = value pairs' }, { value: 'list', label: 'List (one flag per item)' }],
+  boolean: [{ value: '', label: 'Switch' }]
+}
 const ICONS = ['Box', 'Cpu', 'Zap', 'Database', 'Sliders', 'Wind', 'Server', 'FileText', 'GitBranch', 'Star', 'Settings']
 const emptyCmd = (): CommandParam => ({
   arg: '', label: '', description: '', type: 'string', placeholder: ''
@@ -53,6 +61,22 @@ function CmdForm({ cmd, onChange, onDelete }: CmdFormProps) {
               <input className="form-input" type="number" value={cmd.max ?? ''} onChange={e => set('max', e.target.value ? Number(e.target.value) : undefined)} />
             </div>
           </>
+        )}
+        {(WIDGETS_BY_TYPE[cmd.type]?.length ?? 0) > 1 && (
+          <div className="form-group" style={{ marginBottom: 8 }}>
+            <label className="form-label">Widget</label>
+            <SelectMenu variant="field" value={cmd.widget || ''} onChange={v => {
+              const next = { ...cmd, widget: (v || undefined) as CommandParam['widget'] }
+              if (!v || v !== 'slider') delete next.slider
+              onChange(next)
+            }} options={WIDGETS_BY_TYPE[cmd.type]} />
+          </div>
+        )}
+        {cmd.widget === 'slider' && (
+          <div className="form-group" style={{ marginBottom: 8 }}>
+            <label className="form-label">Slider step</label>
+            <input className="form-input" type="number" value={cmd.slider?.step ?? ''} placeholder="1" onChange={e => onChange({ ...cmd, slider: { ...cmd.slider, step: e.target.value ? Number(e.target.value) : undefined } })} />
+          </div>
         )}
         {cmd.type === 'select' && (
           <div className="form-group" style={{ marginBottom: 8, gridColumn: '1/-1' }}>

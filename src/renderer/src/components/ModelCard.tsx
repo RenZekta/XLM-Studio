@@ -211,6 +211,7 @@ export default function ModelCard({ card, selected, cut }: Props) {
           const val = tArgs[cmd.arg]
           if (val !== undefined && val !== null && val !== '') {
             if (cmd.type === 'boolean') { if (val === true) args.push(cmd.arg) }
+            else if (Array.isArray(val)) { for (const item of val) if (String(item).trim() !== '') args.push(cmd.arg, String(item)) }
             else args.push(cmd.arg, String(val))
           }
         }
@@ -227,12 +228,14 @@ export default function ModelCard({ card, selected, cut }: Props) {
       for (const [k, v] of Object.entries(tArgs)) {
         if (isInternal(k) || knownArgs.has(k)) continue
         if (v === true) args.push(k)
+        else if (Array.isArray(v)) { for (const item of v) if (String(item).trim() !== '') args.push(k, String(item)) }
         else if (v !== false && v !== null && v !== '') args.push(k, String(v))
       }
     } else {
       for (const [k, v] of Object.entries(tArgs)) {
         if (isInternal(k)) continue  // skip __-prefixed internal flags
         if (v === true) args.push(k)
+        else if (Array.isArray(v)) { for (const item of v) if (String(item).trim() !== '') args.push(k, String(item)) }
         else if (v !== false && v !== null && v !== '') args.push(k, String(v))
       }
     }

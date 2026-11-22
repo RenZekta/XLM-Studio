@@ -210,6 +210,7 @@ export default function SettingsView() {
 
   async function handleRemoveTrackedBackend(t: TrackedBackend) {
     if (t.isDefault) { alert('Built-in backends cannot be removed.'); return }
+    if (t.fromCard) { alert('This entry comes from an engine card. Remove the card to remove it.'); return }
     if (!confirm(`Stop tracking "${t.name}"? Already-downloaded versions are kept.`)) return
     const res = await window.api.removeTrackedBackend(t.id)
     if (res.success) setTrackedBackends(trackedBackends.filter(x => x.id !== t.id))
@@ -348,7 +349,7 @@ export default function SettingsView() {
             <ExternalLink size={14} />
           </button>
         )}
-        {!t.isDefault && (
+        {!t.isDefault && !t.fromCard && (
           <button
             className="btn btn-ghost btn-icon text-danger"
             onClick={() => handleRemoveTrackedBackend(t)}
