@@ -56,15 +56,20 @@ interface ExecResult { code: number; stdout: string; stderr: string }
 // (docker, podman) pass shell: false. Every argument is a fixed string, never
 // user input.
 function exec(cmd: string, args: string[], opts: { cwd?: string; timeout?: number; shell?: boolean } = {}): Promise<ExecResult> {
+  const limit = opts.timeout ?? 20000
   return new Promise(resolve => {
+    // On Windows the timeout kills the shell but can leave npm holding the output
+    // pipes, so the callback may never fire; this answers regardless.
+    const guard = setTimeout(() => resolve({ code: 1, stdout: '', stderr: 'timed out' }), limit + 3000)
     execFile(cmd, args, {
       cwd: opts.cwd,
-      timeout: opts.timeout ?? 20000,
+      timeout: limit,
       windowsHide: true,
       shell: opts.shell ?? process.platform === 'win32',
       maxBuffer: 16 * 1024 * 1024,
       env: { ...process.env, GIT_TERMINAL_PROMPT: '0', CI: '1' }
     }, (err, stdout, stderr) => {
+      clearTimeout(guard)
       const code = err ? (typeof (err as any).code === 'number' ? (err as any).code : 1) : 0
       resolve({ code, stdout: String(stdout ?? ''), stderr: String(stderr ?? '') })
     })
@@ -193,11 +198,26 @@ async function fetchJson(url: string): Promise<any> {
   return res.json()
 }
 
-async function npmLatest(pkg: string): Promise<string | null> {
+// npm is asked first: it honors the registry and proxy the user configured,
+// which is also where an update installs from. A plain request to npmjs.org
+// is the fallback. What went wrong on the way is added to `why`.
+async function npmLatest(pkg: string, why: string[]): Promise<string | null> {
+  const viewed = await exec('npm', ['view', pkg, 'dist-tags.latest'], { timeout: 30000 })
+  const version = viewed.code === 0 ? extractVersion(viewed.stdout) : null
+  if (version) return version
+  const detail = (viewed.stderr.trim() || viewed.stdout.trim()).split(/\r?\n/)
+    .map(l => l.replace(/^npm (error|warn) /, '').trim())
+    .filter(l => l && !/^A complete log|^Log files? /.test(l)).slice(0, 3).join(' | ')
+  why.push(`npm view: ${detail || 'no version printed'}`)
   try {
     const j = await fetchJson(`https://registry.npmjs.org/${pkg.replace('/', '%2f')}/latest`)
-    return typeof j?.version === 'string' ? j.version : null
-  } catch { return null }
+    if (typeof j?.version === 'string') return j.version
+    why.push('registry: no version in the answer')
+  } catch (err) {
+    const cause = (err as { cause?: Error }).cause
+    why.push(`registry: ${(err as Error).message}${cause?.message ? ` (${cause.message})` : ''}`)
+  }
+  return null
 }
 
 // ---------------------------------------------------------------------------
@@ -434,8 +454,8 @@ async function locate(id: HarnessId, s: HarnessSettings): Promise<Located> {
   if (id === 'dsh') {
     const bin = await findCommand('dsh')
     const profiles = join(dshHome(s), 'profiles')
-    // The desktop profile belongs to the Electron app while it runs.
-    const names = (await listDirs(profiles)).filter(n => n !== 'desktop')
+    // The desktop profile belongs to the Electron app while it runs; node_modules holds dependencies, not a profile.
+    const names = (await listDirs(profiles)).filter(n => n !== 'desktop' && n !== 'node_modules')
     return {
       installed: !!bin || names.length > 0,
       binPath: bin,
@@ -564,6 +584,15 @@ interface Latest { version: string | null; available: boolean }
 const latestCache = new Map<HarnessId, Latest>()
 let checkedAt: number | null = null
 
+// Pithagoras tracks commits behind main, so its flag is kept as found; every
+// other harness is compared with what is installed now, so an update made
+// outside the check (or by it) is reflected without another lookup.
+function updateAvailable(id: HarnessId, d: Detected, latest: Latest | undefined): boolean {
+  if (!latest || !d.installed) return false
+  if (id === 'pithagoras') return latest.available
+  return !!(latest.version && d.version && compareVersions(latest.version, d.version) > 0)
+}
+
 // The newest stable release of a GitHub project. The API is rate limited
 // without a token, so the "latest release" redirect is the fallback.
 async function githubLatest(repo: string): Promise<string | null> {
@@ -594,12 +623,26 @@ async function pithagorasLatest(dir: string): Promise<Latest> {
   return { version: version && n > 0 ? `${version} (${n} new commit${n === 1 ? '' : 's'})` : version, available: n > 0 }
 }
 
-async function fetchLatest(id: HarnessId, d: Detected): Promise<Latest> {
+async function fetchLatest(id: HarnessId, d: Detected, why: string[]): Promise<Latest> {
   if (!d.installed) return { version: null, available: false }
   if (id === 'pithagoras') return d.binPath && d.canUpdate ? pithagorasLatest(d.binPath) : { version: null, available: false }
   const def = HARNESSES[id]
-  const version = id === 'opencode' ? await githubLatest('anomalyco/opencode') : def.githubRepo ? await githubLatest(def.githubRepo) : await npmLatest(def.npmPackage!)
+  const version = id === 'opencode' ? await githubLatest('anomalyco/opencode') : def.githubRepo ? await githubLatest(def.githubRepo) : await npmLatest(def.npmPackage!, why)
   return { version, available: !!(version && d.version && compareVersions(version, d.version) > 0) }
+}
+
+// A failed lookup keeps the last version found rather than blanking the card.
+// `say` writes the outcome to the harness's log.
+async function refreshLatest(id: HarnessId, d: Detected, say: (line: string) => void): Promise<void> {
+  const why: string[] = []
+  const found = await fetchLatest(id, d, why)
+  if (d.installed && id !== 'pithagoras') {
+    say(found.version
+      ? `Newest version ${found.version}, installed ${d.version ?? 'unknown'}.`
+      : `Could not look up the newest version${why.length ? `: ${why.join('; ')}` : ''}.`)
+  }
+  if (!found.version && d.installed && latestCache.get(id)?.version) return
+  latestCache.set(id, found)
 }
 
 // What a Pithagoras build reports back besides success.
@@ -942,7 +985,9 @@ export function initHarnessManager(deps: HarnessDeps) {
           written.delete(id)
         }
       }
-      syncInfo.set(id, { at: Date.now(), changed, error })
+      // A pass that wrote nothing keeps the time of the last real write.
+      const prev = syncInfo.get(id)
+      syncInfo.set(id, !changed && !error && prev?.changed ? prev : { at: Date.now(), changed, error })
     }
     broadcast()
   }
@@ -982,7 +1027,7 @@ export function initHarnessManager(deps: HarnessDeps) {
       installed: d.installed,
       version: d.version,
       latest: latest?.version ?? null,
-      updateAvailable: !!latest?.available && d.installed,
+      updateAvailable: updateAvailable(id, d, latest),
       source: d.source,
       binPath: d.binPath,
       configFiles: d.files.map(f => f.path),
@@ -1011,14 +1056,30 @@ export function initHarnessManager(deps: HarnessDeps) {
     }
   }
 
-  async function checkUpdates(): Promise<void> {
+  // One line in the harness's Logs entry.
+  function say(id: HarnessId, line: string): void {
+    hasLog.add(id)
+    deps.log({ id: buildLogId(id, 'harness'), name: `Harness: ${HARNESSES[id].label}`, line, app: true })
+  }
+
+  async function checkUpdates(only: readonly HarnessId[] = HARNESS_ORDER): Promise<void> {
     const { h } = await settings()
-    await Promise.all(HARNESS_ORDER.map(async id => {
-      const d = await detectCached(id, h)
-      latestCache.set(id, await fetchLatest(id, d))
+    // One harness failing to answer must not hold back the others.
+    await Promise.all(only.map(async id => {
+      try { await refreshLatest(id, await detectCached(id, h), line => say(id, line)) } catch (err) { say(id, `Update check failed: ${(err as Error).message}`) }
     }))
     checkedAt = Date.now()
     broadcast()
+  }
+
+  // Installed harnesses whose newest version is still unknown.
+  async function unchecked(): Promise<HarnessId[]> {
+    const { h } = await settings()
+    const ids = await Promise.all(HARNESS_ORDER.map(async (id): Promise<HarnessId | null> => {
+      const d = await detectCached(id, h).catch(() => null)
+      return d?.installed && id !== 'pithagoras' && !latestCache.get(id)?.version ? id : null
+    }))
+    return ids.filter((id): id is HarnessId => !!id)
   }
 
   // Runs an install, update or removal with the card shown as busy, then
@@ -1057,8 +1118,7 @@ export function initHarnessManager(deps: HarnessDeps) {
         const dir = join(homedir(), 'Pithagoras')
         if (await pithagorasRoot(dir)) await deps.saveSettings({ ...all, harnesses: { ...h, pithagorasDir: dir } })
       }
-      latestCache.delete(id)
-      latestCache.set(id, await fetchLatest(id, await detectCached(id, (await settings()).h)))
+      await refreshLatest(id, await detectCached(id, (await settings()).h), line => log(line, true))
       // A fresh or restarted harness has no provider yet; write it again.
       written.clear()
       scheduleSync(kind === 'remove' ? 0 : 3000)
@@ -1074,9 +1134,10 @@ export function initHarnessManager(deps: HarnessDeps) {
   async function updateAll(): Promise<void> {
     const { h } = await settings()
     for (const id of HARNESS_ORDER) {
-      if (!latestCache.get(id)?.available) continue
-      const d = await detectCached(id, h)
-      if (d.installed && d.canUpdate) await updateOne(id)
+      try {
+        const d = await detectCached(id, h)
+        if (updateAvailable(id, d, latestCache.get(id)) && d.canUpdate) await updateOne(id)
+      } catch { /* the next harness is still updated */ }
     }
     // A new version may keep its config elsewhere.
     scheduleSync(0)
@@ -1086,6 +1147,13 @@ export function initHarnessManager(deps: HarnessDeps) {
   async function startup(): Promise<void> {
     await run(() => applySync(true))
     await checkUpdates()
+    // A lookup that failed (no network yet at login, say) is tried again a few times.
+    for (let attempt = 0; attempt < 3; attempt++) {
+      const missing = await unchecked()
+      if (!missing.length) break
+      await new Promise(resolve => setTimeout(resolve, 60000))
+      await checkUpdates(missing)
+    }
     const { h } = await settings()
     if (h.autoUpdate) await updateAll()
   }
