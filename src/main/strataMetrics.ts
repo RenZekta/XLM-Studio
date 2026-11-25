@@ -17,3 +17,27 @@ export function parseStrataMetrics(text: string): Record<string, number> | null 
     return null
   }
 }
+
+// What a request's progress and end look like in Strata's own log, which is
+// what Monitoring falls back on when /metrics cannot be read. Lines look like
+//   [strata] reading the prompt: 248,944 of 248,949 tokens, 1 s so far
+//   [strata] reading the prompt: 242,819 tokens, 32 s so far
+//   [strata] done: 1483 tokens in 39 s (44.9 tok/s) (stop, cancel=False), ...
+export type StrataLogEvent =
+  | { kind: 'prompt'; read: number | null; total: number; elapsed: number }
+  | { kind: 'done'; tokens: number; tps: number | null }
+
+const count = (s: string) => parseInt(s.replace(/,/g, ''), 10)
+
+export function parseStrataLogLine(line: string): StrataLogEvent | null {
+  const prompt = /^\[strata\] reading the prompt: ([\d,]+)(?: of ([\d,]+))? tokens, (\d+) s so far/.exec(line.trim())
+  if (prompt) {
+    // "A of B": A is the position reached (a reused prefix counts as read), B the prompt.
+    // Without "of" only the prompt's size is known.
+    return prompt[2]
+      ? { kind: 'prompt', read: count(prompt[1]), total: count(prompt[2]), elapsed: +prompt[3] }
+      : { kind: 'prompt', read: null, total: count(prompt[1]), elapsed: +prompt[3] }
+  }
+  const done = /^\[strata\] done: (\d+) tokens in \d+ s \((?:([\d.]+) tok\/s|no speed)\)/.exec(line.trim())
+  return done ? { kind: 'done', tokens: +done[1], tps: done[2] ? parseFloat(done[2]) : null } : null
+}

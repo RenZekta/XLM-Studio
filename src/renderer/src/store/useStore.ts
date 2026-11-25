@@ -33,8 +33,9 @@ function storeLayoutLibrary(lib: LayoutLibrary) {
   } catch {}
 }
 // Monotonic id handed to each log entry, so the Logs list can key rows on
-// something stable while the 10000-entry cap drops lines off the front.
+// something stable while the per-source cap drops lines off the front.
 let logSeq = 0
+const LOG_LINES_PER_SOURCE = 10000
 
 interface CardState {
   template: Template
@@ -416,14 +417,17 @@ export const useStore = create<AppStore>((set, get) => ({
   setParamViewMode: (mode) => set({ paramViewMode: mode }),
   setQuickBaselineActive: (active) => set({ quickBaselineActive: active }),
   setPresetMode: (mode) => set({ presetMode: mode, quickBaselineActive: mode !== 'clear' }),
-  // Cap at 10000 entries to avoid unbounded memory growth
-  // over a long-running session (LogsView still only shows the most recent
-  // ones by default via its own filter, but the cap lives here now since this
-  // is the single persistent source of truth for the whole app lifetime).
+  // Each source (a model or an engine build) keeps its own last LOG_LINES_PER_SOURCE
+  // lines, so a build writing thousands of lines cannot push a model's out.
   appendLogs: (entries) => set((s) => {
     if (entries.length === 0) return {}
     const next = s.logs.concat(entries.map(e => ({ ...e, seq: ++logSeq })))
-    return { logs: next.length > 10000 ? next.slice(-10000) : next }
+    const counts = new Map<string, number>()
+    for (const l of next) counts.set(l.id, (counts.get(l.id) ?? 0) + 1)
+    const excess = new Map<string, number>()
+    for (const [id, n] of counts) if (n > LOG_LINES_PER_SOURCE) excess.set(id, n - LOG_LINES_PER_SOURCE)
+    if (excess.size === 0) return { logs: next }
+    return { logs: next.filter(l => { const e = excess.get(l.id); if (!e) return true; excess.set(l.id, e - 1); return false }) }
   }),
   clearLogs: () => set({ logs: [] }),
   setLogsSource: (source) => set({ logsSource: source }),

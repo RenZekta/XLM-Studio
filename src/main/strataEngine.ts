@@ -9,9 +9,22 @@ import https from 'https'
 import type { EngineId, InstallKind } from '../shared/engines'
 import type { StrataDataSettings } from '../shared/types'
 import { cleanPathArg } from '../shared/strata'
-import { GIT_ENGINE_MARKERS, looksLikeStrataClone } from './strataLayout'
+import { GIT_ENGINE_MARKERS, looksLikeStrataClone, strataSourceDir } from './strataLayout'
 
 export { GIT_ENGINE_MARKERS, looksLikeStrataClone, strataSourceDir } from './strataLayout'
+
+// strata_control/<name>.py of an installed Strata. Only plain names (\w+) are read.
+export function strataModuleFile(cloneDir: string, name: string): string | null {
+  return /^\w+$/.test(name) ? join(strataSourceDir(cloneDir), 'strata_control', `${name}.py`) : null
+}
+
+// The reader the catalog and the family tags take for those modules' text.
+export function strataModuleReader(cloneDir: string): (name: string) => string | null {
+  return (name) => {
+    const file = strataModuleFile(cloneDir, name)
+    try { return file ? readFileSync(file, 'utf-8') : null } catch { return null }
+  }
+}
 
 export { cleanPathArg }
 

@@ -18,6 +18,8 @@ const strataClone = process.argv[2] || process.env.STRATA_DIR || ''
 // Strata 0.2.16 keeps its sources in terminal/; older clones keep them at the root.
 const strataDir = strataClone && fs.existsSync(path.join(strataClone, 'terminal', 'setup.py')) ? path.join(strataClone, 'terminal') : strataClone
 const hasStrata = strataDir && fs.existsSync(path.join(strataDir, 'setup.py'))
+// strata_control/<name>.py of the clone, as the catalog and the family tags read it.
+const readModule = (name) => { try { return fs.readFileSync(path.join(strataDir, 'strata_control', `${name}.py`), 'utf8') } catch { return null } }
 
 let failed = 0
 const tasks = []
@@ -39,6 +41,7 @@ const L = bundle('src/main/lineAssembler.ts', 'lines')
 const E = bundle('src/shared/engines.ts', 'engines')
 const C = bundle('src/main/strataCatalog.ts', 'catalog')
 const DM = bundle('src/main/strataDrafting.ts', 'drafting')
+const CL = bundle('src/main/strataCleanup.ts', 'cleanup')
 
 // -- engine registry ---------------------------------------------------------
 check('engineOf defaults legacy records to llama.cpp and keeps unknown ids', E.engineOf({}) === 'llama.cpp' && E.engineOf(undefined) === 'llama.cpp' && E.engineOf('bogus') === 'bogus')
@@ -82,6 +85,12 @@ const M = bundle('src/main/strataMetrics.ts', 'metrics')
     m['llamacpp:prompt_tokens_total'] === 600 && m['llamacpp:prompt_seconds_total'] === 2 && m['llamacpp:tokens_predicted_total'] === 50 && m['llamacpp:tokens_predicted_seconds_total'] === 5, JSON.stringify(m))
   check('metrics: junk and missing totals are rejected', M.parseStrataMetrics('not json') === null && M.parseStrataMetrics('{}') === null)
   check('metrics: reused above prompt never goes negative', M.parseStrataMetrics(JSON.stringify({ totals: { prompt_tokens: 1, reused: 5 } }))['llamacpp:prompt_tokens_total'] === 0)
+  const ev = l => JSON.stringify(M.parseStrataLogLine(l))
+  check('log: prompt progress with the position reached', ev('[strata] reading the prompt: 248,944 of 248,949 tokens, 1 s so far') === JSON.stringify({ kind: 'prompt', read: 248944, total: 248949, elapsed: 1 }))
+  check('log: prompt progress before any position is known', ev('[strata] reading the prompt: 242,819 tokens, 32 s so far') === JSON.stringify({ kind: 'prompt', read: null, total: 242819, elapsed: 32 }))
+  check('log: end of a request with its speed', ev('[strata] done: 1483 tokens in 39 s (44.9 tok/s) (stop, cancel=False), expert cache 68.8% hit (+15.2% of the routed experts over PCIe)') === JSON.stringify({ kind: 'done', tokens: 1483, tps: 44.9 }))
+  check('log: end of a request without a speed', ev('[strata] done: 1 tokens in 0 s (no speed) (length, cancel=False)') === JSON.stringify({ kind: 'done', tokens: 1, tps: null }))
+  check('log: other lines are ignored', M.parseStrataLogLine('[strata] thinking: 1003 of budget 24576 (max 32768) tokens, 44.8 tok/s, 28 s') === null && M.parseStrataLogLine('ready: http://127.0.0.1:8080/v1') === null)
 }
 
 // -- defaults and Common flags ------------------------------------------------
@@ -96,7 +105,7 @@ const M = bundle('src/main/strataMetrics.ts', 'metrics')
     S.strataDefaults({ variant: 'IQ3_S', vramTotalGb: 24, ramTotalGb: 64, context: 524288 })['--rope-scaling'] === 'yarn' &&
     S.strataDefaults({ variant: 'IQ3_S', vramTotalGb: 24, ramTotalGb: 64, context: 524288 })['--rope-scale'] === 2)
   check('image tokens default depends on where the encoder runs', S.strataDefaults({ vramTotalGb: 24, ramTotalGb: 64, vision: 'cpu' })['--vision-tokens'] === 300 && d['--vision-tokens'] === 1024)
-  check('the resident budget default exists only for the Unsloth variants', S.strataDefaults({ variant: 'UD-IQ4_XS', vramTotalGb: 24, ramTotalGb: 64 })['--resident-budget-gib'] === 40 && d['--resident-budget-gib'] === undefined)
+  check('the resident budget default exists only for the Unsloth variants', S.strataDefaults({ variant: 'UD-IQ4_XS', vramTotalGb: 24, ramTotalGb: 64 })['--resident-budget-gib'] === 47 && d['--resident-budget-gib'] === undefined)
   {
     const sch = JSON.parse(fs.readFileSync(path.join(root, 'resources', 'commands.strata.json'), 'utf8'))
     const spec = sch.categories.find(c => c.name === 'Speculative Decoding')
@@ -185,6 +194,14 @@ check('missing family is an error', 'error' in S.buildStrataArgv({ ...base, fami
   check('withDrafting changes nothing when the file already says so (so it is not rewritten each launch)', DM.withDrafting(w1.text, 'dflash2').changed === false && DM.withDrafting(cfg, 'auto').changed === false &&
     DM.withDrafting(JSON.stringify({ drafting: 'DFlash2' }), 'dflash2').changed === false)
   check('withDrafting puts a saved choice back to Auto, and reads a file with a BOM', DM.withDrafting(w1.text, 'auto').changed === true && JSON.parse(DM.withDrafting(w1.text, 'auto').text).drafting === 'auto' && DM.withDrafting('\uFEFF' + cfg, 'mtp').changed === true)
+  check('splitDrafter reads dfly2 and dspark and never sends them to setup', sp(['--x', '--drafter', 'dfly2', '--y']).mode === 'dfly2' && sp(['--x', '--drafter', 'dspark']).mode === 'dspark' &&
+    sp(['--x', '--drafter', 'dfly2', '--y']).argv.join(' ') === '--x --y' && sp(['--drafter', 'dspark']).argv.length === 0)
+  check('withDrafting saves dfly2, dspark and off for the Hy4 and Inkling configs', (() => {
+    const c = JSON.stringify({ drafting: 'dspark', parallel: 1 })
+    const off = DM.withDrafting(c, 'off')
+    return off.changed && off.previous === 'dspark' && JSON.parse(off.text).drafting === 'off' && DM.withDrafting(off.text, 'dspark').changed && DM.withDrafting(c, 'dspark').changed === false &&
+      JSON.parse(DM.withDrafting(JSON.stringify({ drafting: 'dfly2' }), 'off').text).drafting === 'off'
+  })())
   check('withDrafting gives up on a file that is not a JSON object', DM.withDrafting('not json', 'mtp') === null && DM.withDrafting('[1]', 'mtp') === null && DM.withDrafting('null', 'mtp') === null)
   const tg = { qwen: '', unsloth: 'unsloth-', gyro: 'gyro-' }
   check('the run config is strata-<family tag><model>.json, lower case, and unknown families have none',
@@ -196,6 +213,32 @@ check('missing family is an error', 'error' in S.buildStrataArgv({ ...base, fami
 const q = S.buildStrataQuickBaseline({ contextLength: 262144 })
 check('quick baseline caps context at 32768 and uses int8', q['--context'] === 32768 && q['--kv'] === 'int8')
 check('quick baseline leaves image input on Automatic, like Full Auto', q['--vision'] === undefined && !('--vision' in q) && !('--vision' in S.buildStrataQuickBaseline({ contextLength: 8192 })))
+
+// -- Hy4-Flash and Inkling-2-Mini ---------------------------------------------
+{
+  const shapeBase = { ggufDir: 'A:\\m', port: 1234, model: 'SQ-64', args: {} }
+  check('Hy4 and Inkling get none of the sticky Flash-Next resets, other families still do',
+    S.buildStrataArgv({ ...shapeBase, family: 'hy4-flash' }).argv.join(' ') === '--yes --no-browser --family hy4-flash --model SQ-64 --gguf-dir A:\\m --port 1234' &&
+    S.buildStrataArgv({ ...shapeBase, family: 'inkling-2-mini', args: { '--parallel': 4 } }).argv.join(' ').endsWith('--port 1234 --parallel 4') &&
+    S.buildStrataArgv({ ...shapeBase, family: 'coder' }).argv.join(' ').endsWith('--parallel 1 --draft-vocab cjk --mtp on') &&
+    S.buildStrataArgv({ ...shapeBase, family: '', args: { '--family': 'hy4-flash' } }).argv.join(' ').includes('--family hy4-flash') && !S.buildStrataArgv({ ...shapeBase, family: '', args: { '--family': 'hy4-flash' } }).argv.join(' ').includes('--mtp'))
+  const dh = S.strataDefaults({ family: 'hy4-flash', variant: 'SQ-64', vramTotalGb: 24, ramTotalGb: 64 })
+  const di = S.strataDefaults({ family: 'inkling-2-mini', variant: 'SQ-20', vramTotalGb: 24, ramTotalGb: 64 })
+  check('defaults of these families: their own context, none of the Flash-Next-only settings', dh['--context'] === 131072 && di['--context'] === 32768 &&
+    ['--kv', '--kv-streaming', '--rope-scaling', '--rope-scale', '--low-ram', '--mtp', '--draft-vocab', '--resident-budget-gib'].every(f => !(f in dh) && !(f in di)) && dh['--drafter'] === 'auto' && dh['--family'] === 'hy4-flash')
+  const qs = S.buildStrataQuickBaseline({ contextLength: 262144, family: 'hy4-flash' })
+  check('quick baseline of these families is context only', JSON.stringify(qs) === '{"--context":32768}' && S.buildStrataQuickBaseline({ contextLength: 8192, family: 'qwen' })['--kv'] === 'int8')
+  const W = (args, fam) => S.strataLaunchWarnings(args, fam)
+  check('drafter warnings: a drafter belongs to its family, MTP and DFlash2 mean Auto on these families',
+    W({ '--drafter': 'dfly2' }, 'hy4-flash').length === 0 && W({ '--drafter': 'dspark' }, 'inkling-2-mini').length === 0 && W({ '--drafter': 'dfly2' }, '').length === 0 &&
+    W({ '--drafter': 'dfly2' }, 'inkling-2-mini').some(w => w.includes('DFly2') && w.includes('Hy4-Flash')) && W({ '--drafter': 'dspark' }, 'qwen').some(w => w.includes('DSpark') && w.includes('Inkling-2-Mini')) &&
+    W({ '--drafter': 'dflash2' }, 'hy4-flash').some(w => w.includes('read as Auto')) && W({ '--drafter': 'mtp' }, 'inkling-2-mini').some(w => w.includes('read as Auto')) &&
+    W({ '--drafter': 'dflash2' }, 'qwen').length === 0 && W({ '--drafter': 'dflash2' }, 'coder').some(w => w.includes('supports only')))
+  check('KV warnings: Hy4 uses none, Inkling takes four, fp8 and k8v8 are Inkling only',
+    W({ '--kv': 'int8' }, 'hy4-flash').length === 1 && W({ '--low-ram': 'auto' }, 'hy4-flash').length === 0 && W({ '--low-ram': 'on' }, 'hy4-flash').length === 1 && W({}, 'hy4-flash').length === 0 &&
+    W({ '--kv': 'int8' }, 'inkling-2-mini').length === 1 && ['fp16', 'fp8', 'k8v8', 'k8v4'].every(k => W({ '--kv': k }, 'inkling-2-mini').length === 0) &&
+    W({ '--kv': 'fp8' }, 'coder').length === 1 && W({ '--kv': 'k8v8' }, 'qwen').length === 1 && W({ '--kv': 'fp8' }, '').length === 0 && W({ '--kv': 'int8' }, 'qwen').length === 0)
+}
 
 // -- memory estimator vs the reference formulas -------------------------------
 function ref(model, vram, ctx, kv) {
@@ -393,9 +436,10 @@ make(d+'/other.gguf','llama',[('blk.0.ffn_down.weight',[256,256],12,144*256*256/
   check('catalog: setup.py alone is enough, and a table alone', eq2(C.parseStrataCatalog(setup, null).families.qwen, ['Q1']) && eq2(C.parseStrataCatalog(null, tbl).families, { qwen: ['T1', 'T2'] }))
   check('catalog: nothing to read gives an empty catalog', eq2(C.parseStrataCatalog(null, null).families, {}) && eq2(C.parseStrataCatalog('garbage {', {}).families, {}))
   if (strataDir) {
-    const real = C.parseStrataCatalog(fs.readFileSync(path.join(strataDir, 'setup.py'), 'utf8'), JSON.parse(fs.readFileSync(path.join(strataDir, 'data', 'gguf_fingerprints.json'), 'utf8'))).families
-    check('catalog: the real Strata offers every family its --family takes', ['qwen', 'swift', 'coder', 'unsloth', 'gyro', 'qwen36'].every(f => f in real), Object.keys(real).join())
+    const real = C.parseStrataCatalog(fs.readFileSync(path.join(strataDir, 'setup.py'), 'utf8'), JSON.parse(fs.readFileSync(path.join(strataDir, 'data', 'gguf_fingerprints.json'), 'utf8')), readModule).families
+    check('catalog: the real Strata offers every family its --family takes', ['qwen', 'swift', 'coder', 'unsloth', 'gyro', 'qwen36', 'hy4-flash', 'inkling-2-mini'].every(f => f in real), Object.keys(real).join())
     check('catalog: own-path variants are listed', real.qwen36 && real.qwen36.includes('Q8_0'))
+    check('catalog: without the strata_control modules the Hy4 and Inkling families are left out, the rest stays', !('hy4-flash' in C.parseStrataCatalog(fs.readFileSync(path.join(strataDir, 'setup.py'), 'utf8'), null).families) && 'qwen36' in C.parseStrataCatalog(fs.readFileSync(path.join(strataDir, 'setup.py'), 'utf8'), null).families)
   } else {
     console.log('SKIP  catalog against the real setup.py (no Strata clone)')
   }
@@ -443,7 +487,8 @@ if (hasStrata) {
   check('KV cell bytes (q4_0, k8v4)', num(/KV_CELL_BYTES = \{"q4_0": (\d+)/) === S.STRATA_KV_CELL_BYTES.q4_0 && num(/"k8v4": (\d+)\}/) === S.STRATA_KV_CELL_BYTES.k8v4)
   check('13 KV cells per token and ~5 GB base VRAM', /kv_tok = 13 \* KV_CELL_BYTES/.test(setup) && /vram_gb - 5 - \(MTP_VRAM_GB if mtp else 0\.0\) - longer/.test(setup))
   check('MTP_VRAM_GB', num(/^MTP_VRAM_GB = ([0-9.]+)/m) === S.STRATA_MTP_VRAM_GB)
-  check('RAM left beside the resident budget and beside every expert', num(/^UNSLOTH_RAM_LEFT_GB = (\d+)/m) === 24 && num(/^UNSLOTH_RESIDENT_BESIDE_GB = (\d+)/m) === 16)
+  check('RAM left beside the resident budget and beside every expert', num(/^UNSLOTH_BUDGET_LEFT_GB = (\d+)/m) === 17 && num(/^UNSLOTH_RESIDENT_BESIDE_GB = (\d+)/m) === 16)
+  check('nominal RAM sizes and margin', /^NOMINAL_RAM_GB = \(16, 24, 32, 48, 64, 96, 128, 192, 256\)/m.test(setup) && num(/^NOMINAL_RAM_MARGIN = ([0-9.]+)/m) === 0.03)
   check('IQ3 RAM headroom of 24 GB', /ctx \* 13 \* 1056 \/ 1e9 \+ 24/.test(setup))
   const models = JSON.parse(execFileSync('python3', ['-c', `
 import sys, json
@@ -468,14 +513,15 @@ out = []
 for model, d in setup.MODELS.items():
     if not d.get("budget"):
         continue
-    for ram in range(16, 201, 4):
+    # Whole sizes, then readings a PC reports just under (or between) the sizes it is sold with.
+    for ram in list(range(16, 201, 4)) + [31.2, 47.0, 62.5, 62.1, 63.1, 63.9, 95.4, 127.5, 59.5, 40.5, 41.5]:
         for kv in (0.0, 1.7, 6.9):
             out.append([model, ram, kv, setup.resident_budget_gib(model, ram, kv) if setup.unsloth_budget(model, ram) else None])
 print(json.dumps(out))
 `]).toString())
   const budgetWrong = budgets.filter(([model, ram, kv, want]) => S.strataResidentBudgetGib(model, ram, kv) !== want)
   check(`resident budget agrees with setup.py (${budgets.length} cases)`, budgetWrong.length === 0, JSON.stringify(budgetWrong.slice(0, 3)))
-  check('only Unsloth-style files get a resident budget', S.strataResidentBudgetGib('IQ3_S', 64) === null && S.strataResidentBudgetGib('UD-IQ4_XS', 0) === null && S.strataResidentBudgetGib('UD-IQ4_XS', 32) === 8)
+  check('only Unsloth-style files get a resident budget', S.strataResidentBudgetGib('IQ3_S', 64) === null && S.strataResidentBudgetGib('UD-IQ4_XS', 0) === null && S.strataResidentBudgetGib('UD-IQ4_XS', 32) === 15 && S.strataResidentBudgetGib('UD-IQ4_XS', 24) === 8)
   // The recommended context against Strata's own ram_ctx / low_ram_wanted.
   const expected = JSON.parse(execFileSync('python3', ['-c', `
 import sys, json
@@ -550,20 +596,45 @@ print(json.dumps(out))
   const setupDrafter = [...drafterChoices.matchAll(/"(\w+)"/g)].map(m => m[1])
   const draftingSrc = fs.readFileSync(path.join(strataDir, 'strata_control', 'drafting.py'), 'utf8')
   const modes = [...(draftingSrc.match(/^MODES = \(([^)]*)\)/m) || [])[1].matchAll(/"(\w+)"/g)].map(m => m[1])
-  // XLM saves the choice itself (strata_control/drafting.py MODES) and sends setup the --drafter values it takes.
-  check('drafter choices are drafting.py MODES, and setup.py --drafter takes the ones XLM sends on', !!schemaDrafter && setupDrafter.length > 0 && modes.length > 0 &&
-    schemaDrafter.options.join() === modes.join() && setupDrafter.every(c => schemaDrafter.options.includes(c)) && DM.DRAFTING_MODES.join() === modes.join(), `${drafterChoices} | ${modes}`)
-  const realTags = JSON.parse(execFileSync('python3', ['-c', `
+  // The families with their own installer: what setup.py and their modules say, as Python reads it.
+  const real = JSON.parse(execFileSync('python3', ['-c', `
 import sys, json
 sys.path.insert(0, ${JSON.stringify(strataDir)})
 import setup
-t = {}
-for d in (setup.FAMILIES, setup.OWN_PATH_FAMILIES, getattr(setup, "MULTI_FILE_FAMILIES", {})):
-    t.update({k: v["tag"] for k, v in d.items()})
-print(json.dumps(t))
+from strata_control import hy4_family, inkling_family
+tags = {}
+for d in (setup.FAMILIES, setup.OWN_PATH_FAMILIES, getattr(setup, "MULTI_FILE_FAMILIES", {}), setup.HY4_FAMILIES, setup.INKLING_FAMILIES):
+    tags.update({k: v["tag"] for k, v in d.items()})
+shape = {}
+for d, mod in ((setup.HY4_FAMILIES, hy4_family), (setup.INKLING_FAMILIES, inkling_family)):
+    for k, v in d.items():
+        shape[k] = {"title": v["title"], "drafter": mod.DEFAULT_DRAFTER, "drafters": list(mod.DRAFTERS), "context": mod.DEFAULT_CONTEXT, "models": list(v["models"])}
+print(json.dumps({"tags": tags, "shape": shape}))
 `]).toString())
-  const readTags = C.parseFamilyTags(setup)
+  const realTags = real.tags
+  const shapeFams = Object.keys(real.shape)
+  // XLM saves the choice itself (strata_control/drafting.py MODES) and sends setup the --drafter values it takes.
+  // dfly2 (Hy4-Flash) and dspark (Inkling-2-Mini) are those families' drafters (their DRAFTERS), saved the same way.
+  const shapeDrafters = [...new Set(shapeFams.map(f => real.shape[f].drafter))]
+  check('drafter choices are drafting.py MODES plus the Hy4 and Inkling drafters, and setup.py --drafter takes only ones XLM offers', !!schemaDrafter && setupDrafter.length > 0 && modes.length > 0 &&
+    schemaDrafter.options.join() === [...modes.filter(m => m !== 'off'), ...shapeDrafters, 'off'].join() && setupDrafter.every(c => schemaDrafter.options.includes(c)) &&
+    DM.DRAFTING_MODES.join() === modes.join() && DM.SHAPE_DRAFTERS.join() === shapeDrafters.join(), `${drafterChoices} | ${modes} | ${shapeDrafters}`)
+  check('Hy4 and Inkling families mirror their modules: drafter, context, title, drafters', shapeFams.length > 0 && shapeFams.join() === Object.keys(S.STRATA_SHAPE_FAMILIES).join() && shapeFams.every(f => {
+    const r = real.shape[f], m = S.STRATA_SHAPE_FAMILIES[f]
+    return m && r.title.endsWith(m.title) && m.drafter === r.drafter && m.drafterLabel.toLowerCase() === r.drafter && m.context === r.context && r.drafters.join() === ['off', r.drafter].join()
+  }), JSON.stringify(real.shape))
+  check('catalog: Hy4 and Inkling variants are the ones setup.py lists, in its order', shapeFams.every(f => JSON.stringify(C.parseStrataCatalog(setup, null, readModule).families[f]) === JSON.stringify(real.shape[f].models)), JSON.stringify(C.parseStrataCatalog(setup, null, readModule).families))
+  const readTags = C.parseFamilyTags(setup, readModule)
   check('family tags read from setup.py are the ones it names run configs by', Object.keys(realTags).length > 0 && JSON.stringify(Object.entries(realTags).sort()) === JSON.stringify(Object.entries(readTags).sort()), JSON.stringify(readTags))
+  // The KV modes (and the schema's --kv choices) follow the newest Strata; a release older than fp8 and k8v8 lacks the file.
+  const kvFile = path.join(strataDir, 'strata_cli', 'launch', 'settings.py')
+  if (fs.existsSync(kvFile) && /^INKLING_KV_MODES_CUDA = /m.test(fs.readFileSync(kvFile, 'utf8'))) {
+    check('KV modes Inkling-2-Mini takes', (() => {
+      const m = fs.readFileSync(kvFile, 'utf8').match(/^INKLING_KV_MODES_CUDA = \(([^)]*)\)/m)
+      const modes = m ? [...m[1].matchAll(/"(\w+)"/g)].map(x => x[1]) : []
+      return modes.length > 0 && [...modes].sort().join() === [...S.STRATA_INKLING_KV].sort().join()
+    })())
+  } else console.log('SKIP  KV modes Inkling-2-Mini takes (this Strata predates them)')
   const drafting = draftingSrc
   const supported = ((drafting.match(/^SUPPORTED_FAMILIES = \(([^)]*)\)/m) || [])[1] || '').split(',').map(x => x.trim().replace(/"/g, '')).filter(Boolean)
   check('DFlash2 families match strata_control/drafting.py', supported.length > 0 && supported.join() === S.STRATA_DFLASH2_FAMILIES.join(), supported.join())
@@ -638,6 +709,66 @@ tasks.push((async () => {
   setFlavour(NATIVE); fs.writeFileSync(cfgPath, fs.readFileSync(cfgPath, 'utf8').replace(/^\s*filemode\s*=.*$/gm, ''))
   check('a clone that cannot be placed is taken as this OS\'s, and not copied from', (() => { const all = GE.gitEngineInstances(forkDir).filter(i => i.path === win); return all[0].os === null && GE.instanceForOs(all, NATIVE)?.path === win && GE.instanceToCopy(all, NATIVE) === undefined })())
 })())
+
+// -- the drafter of Hy4-Flash and Inkling-2-Mini ------------------------------
+// Their setup rewrites "drafting" on every run, so nothing is saved to the run config: Off for
+// Inkling goes to setup as --drafter off, and the other choices leave the family's own drafter on.
+tasks.push((async () => {
+  const clone = path.join(tmp, 'drafter-clone')
+  fs.mkdirSync(clone, { recursive: true })
+  const tags = { 'hy4-flash': 'hy4-flash-', 'inkling-2-mini': 'inkling-2-mini-', qwen: '' }
+  const run = async (family, model, mode) => {
+    let installs = 0
+    const lines = []
+    await DM.prepareDrafting({ cloneDir: clone, dataDir: tmp, family, model, mode, tags, env: {}, io: { log: l => lines.push(l) }, installOnly: async () => { installs++; return 0 } })
+    return { installs, lines }
+  }
+  const cfgFile = (family, model) => DM.runConfigPath(clone, tags, family, model)
+  fs.writeFileSync(cfgFile('inkling-2-mini', 'SQ-10'), JSON.stringify({ drafting: 'dspark' }, null, 1))
+  const results = []
+  for (const mode of ['auto', 'mtp', 'dflash2', 'dfly2', 'dspark', 'off']) results.push(await run('inkling-2-mini', 'SQ-10', mode), await run('hy4-flash', 'SQ-96', mode))
+  check('Inkling and Hy4: no install and no run config written for any drafter choice',
+    results.every(r => r.installs === 0) && JSON.parse(fs.readFileSync(cfgFile('inkling-2-mini', 'SQ-10'), 'utf8')).drafting === 'dspark' && !fs.existsSync(cfgFile('hy4-flash', 'SQ-96')))
+  const hy4Off = await run('hy4-flash', 'SQ-96', 'off')
+  check('Hy4: Off says it cannot be applied; Inkling and the other choices say nothing',
+    hy4Off.lines.length === 1 && /cannot be applied/.test(hy4Off.lines[0]) && results.filter((r, i) => !(i === 11)).every(r => r.lines.length === 0))
+  check('setup gets --drafter off for Inkling only', JSON.stringify(DM.setupDrafterArgs('inkling-2-mini', 'off')) === '["--drafter","off"]' &&
+    ['dspark', 'dfly2', 'auto', 'mtp', 'dflash2'].every(m => DM.setupDrafterArgs('inkling-2-mini', m).length === 0) &&
+    DM.setupDrafterArgs('hy4-flash', 'off').length === 0 && DM.setupDrafterArgs('coder', 'off').length === 0)
+  // other families are unchanged: Auto still goes back to Auto, a missing config still installs for a saved choice
+  fs.writeFileSync(cfgFile('qwen', 'IQ3_S'), JSON.stringify({ drafting: 'dflash2' }, null, 1))
+  await run('qwen', 'IQ3_S', 'auto')
+  check('Qwen family: Auto still puts a saved choice back', JSON.parse(fs.readFileSync(cfgFile('qwen', 'IQ3_S'), 'utf8')).drafting === 'auto' && (await run('qwen', 'NEW', 'mtp')).installs === 1)
+})())
+
+// -- run scripts of a deleted Template ---------------------------------------
+{
+  const cloneA = path.join(tmp, 'cl-a'), cloneB = path.join(tmp, 'cl-b')
+  const tags = { 'hy4-flash': 'hy4-flash-', qwen: '' }
+  for (const c of [cloneA, cloneB]) {
+    fs.mkdirSync(path.join(c, 'terminal'), { recursive: true })
+    fs.writeFileSync(path.join(c, 'terminal', 'setup.py'), '')
+  }
+  const touch = (c, n) => fs.writeFileSync(path.join(c, 'terminal', n), '')
+  const has = (c, n) => fs.existsSync(path.join(c, 'terminal', n))
+  const tpl = (family, model, key, extra = {}) => ({ engine: 'strata', backendKey: key, args: { '--family': family, '--model': model }, ...extra })
+  const input = (deleted, remaining) => ({ deleted, remaining, resolve: r => (r.backendKey === 'a' ? cloneA : r.backendKey === 'b' ? cloneB : null), tagsOf: () => tags })
+  for (const c of [cloneA, cloneB]) { touch(c, 'run-hy4-flash-sq-64.sh'); touch(c, 'run-hy4-flash-sq-64.bat'); touch(c, 'run-iq3_s.sh'); touch(c, 'strata-hy4-flash-sq-64.json') }
+
+  const gone = CL.removeStrataRunScripts(input(tpl('hy4-flash', 'SQ-64', 'a'), [tpl('hy4-flash', 'SQ-64', 'b'), { engine: 'llama.cpp', args: {} }]))
+  check('deleting a Template removes its run scripts on its own clone only', gone.length === 2 && !has(cloneA, 'run-hy4-flash-sq-64.sh') && !has(cloneA, 'run-hy4-flash-sq-64.bat') && has(cloneB, 'run-hy4-flash-sq-64.sh'))
+  check('the run config and other models\' scripts stay', has(cloneA, 'strata-hy4-flash-sq-64.json') && has(cloneA, 'run-iq3_s.sh'))
+  const kept = CL.removeStrataRunScripts(input(tpl('qwen', 'IQ3_S', 'a'), [tpl('qwen', 'iq3_s', 'a')]))
+  check('another Template with the same model on the same clone keeps the script', kept.length === 0 && has(cloneA, 'run-iq3_s.sh'))
+  const parked = CL.removeStrataRunScripts(input({ engine: 'llama.cpp', args: {}, engineValues: { strata: { args: { '--family': 'qwen', '--model': 'IQ3_S' }, backendKey: 'a' } } }, []))
+  check('values parked while another engine is chosen count too', parked.length === 1 && !has(cloneA, 'run-iq3_s.sh'))
+  check('no family, no model, an unknown family or an unresolved clone removes nothing',
+    CL.removeStrataRunScripts(input({ engine: 'strata', backendKey: 'a', args: {} }, [])).length === 0 &&
+    CL.removeStrataRunScripts(input(tpl('nope', 'X', 'a'), [])).length === 0 &&
+    CL.removeStrataRunScripts(input(tpl('hy4-flash', 'SQ-64', 'zzz'), [])).length === 0 && has(cloneB, 'run-hy4-flash-sq-64.sh'))
+  check('a llama.cpp Template removes nothing', CL.removeStrataRunScripts(input({ engine: 'llama.cpp', args: { '--family': 'qwen', '--model': 'IQ3_S' } }, [])).length === 0)
+  check('a failing delete does not throw', CL.removeStrataRunScripts({ ...input(tpl('hy4-flash', 'SQ-64', 'b'), []), remove: () => { throw new Error('locked') } }).length === 0)
+}
 
 function finish() {
   fs.rmSync(tmp, { recursive: true, force: true })

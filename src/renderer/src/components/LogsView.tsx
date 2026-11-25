@@ -151,7 +151,7 @@ export default function LogsView() {
         <div>
           <h1 className="page-title">Logs</h1>
           <p className="page-subtitle">
-            Live server and engine build output · {logs.length} lines {appLogCount > 0 ? `· ${appLogCount} events ` : ''}{paused ? '· Paused' : ''}
+            Live server and engine build output · {displayed.length} lines {appLogCount > 0 ? `· ${appLogCount} events ` : ''}{paused ? '· Paused' : ''}
           </p>
         </div>
         <div className="page-actions">

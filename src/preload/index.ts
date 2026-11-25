@@ -217,7 +217,7 @@ const api = {
   updateTrackedEngines: () => ipcRenderer.invoke('update-tracked-engines') as Promise<{ updated: string[]; errors: string[] }>,
   installGitEngine: (trackedId: string) => ipcRenderer.invoke('install-git-engine', trackedId) as Promise<{ success: boolean; error?: string; path?: string }>,
   updateGitEngine: (trackedId: string) => ipcRenderer.invoke('update-git-engine', trackedId) as Promise<{ success: boolean; error?: string; updated?: boolean; skipped?: string }>,
-  getEngineSettings: () => ipcRenderer.invoke('get-engine-settings') as Promise<{ autoUpdateTrackedEngines: boolean; engineInstallModes: Record<string, EngineInstallMode>; autoUpdateBuildTools: boolean; rocmChannel: 'stable' | 'nightly'; rocmSource: 'tarball' | 'pip'; strata: StrataSettings; strataDataDir: string; strataRememberedDataDir: string | null; gitAvailable: boolean }>,
+  getEngineSettings: () => ipcRenderer.invoke('get-engine-settings') as Promise<{ autoUpdateTrackedEngines: boolean; engineInstallModes: Record<string, EngineInstallMode>; autoUpdateBuildTools: boolean; buildToolsOnPath: boolean; rocmChannel: 'stable' | 'nightly'; rocmSource: 'tarball' | 'pip'; strata: StrataSettings; strataDataDir: string; strataRememberedDataDir: string | null; gitAvailable: boolean }>,
   setAutoUpdateTrackedEngines: (enabled: boolean) => ipcRenderer.invoke('set-auto-update-tracked-engines', enabled) as Promise<{ success: boolean }>,
   setEngineInstallMode: (trackedId: string, mode: EngineInstallMode) => ipcRenderer.invoke('set-engine-install-mode', trackedId, mode) as Promise<{ success: boolean }>,
   buildFromSource: (opts: { trackedId: string; type: string; extraArgs?: string; installTools?: boolean; gpuTarget?: string; pull?: boolean }) => ipcRenderer.invoke('build-from-source', opts) as Promise<{ success: boolean; path?: string; error?: string }>,
@@ -228,6 +228,7 @@ const api = {
   setRocmSource: (source: 'tarball' | 'pip') => ipcRenderer.invoke('set-rocm-source', source) as Promise<{ success: boolean }>,
   installBuildTools: (opts: { type: string; mode: 'install' | 'update'; gpuTarget?: string }) => ipcRenderer.invoke('install-build-tools', opts) as Promise<{ success: boolean; error?: string }>,
   setAutoUpdateBuildTools: (enabled: boolean) => ipcRenderer.invoke('set-auto-update-build-tools', enabled) as Promise<{ success: boolean }>,
+  setBuildToolsOnPath: (enabled: boolean) => ipcRenderer.invoke('set-build-tools-on-path', enabled) as Promise<{ success: boolean; error?: string }>,
   onEngineUpdateState: (cb: (data: { trackedId: string; busy: boolean }) => void) => {
     ipcRenderer.removeAllListeners('engine-update-state')
     ipcRenderer.on('engine-update-state', (_e, data) => cb(data))

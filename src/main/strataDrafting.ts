@@ -2,18 +2,25 @@ import { existsSync, readFileSync, writeFileSync, renameSync } from 'fs'
 import { join } from 'path'
 import { spawn, type SpawnOptions } from 'child_process'
 import { strataSourceDir } from './strataLayout'
+import { STRATA_SHAPE_FAMILIES } from '../shared/strata'
 
 // The drafter choice lives in the run config's "drafting" key, which the server
 // reads at every start. setup.py's --drafter only controls what setup downloads
 // and accepts mtp or dflash2, so the Template's --drafter is written to the run
 // config here and passed on to setup only as dflash2.
+// Hy4-Flash and Inkling-2-Mini are the exception: their setup rewrites "drafting"
+// on every run (on, unless the drafter is missing or Inkling is given --drafter off),
+// so a saved value would not survive the launch. See setupDrafterArgs.
 
+// strata_control/drafting.py MODES.
 export const DRAFTING_MODES = ['auto', 'mtp', 'dflash2', 'off'] as const
-export type DraftingMode = (typeof DRAFTING_MODES)[number]
+// The drafters of Hy4-Flash and Inkling-2-Mini (their families' DRAFTERS, besides off).
+export const SHAPE_DRAFTERS = ['dfly2', 'dspark'] as const
+export type DraftingMode = (typeof DRAFTING_MODES)[number] | (typeof SHAPE_DRAFTERS)[number]
 
 export function normalizeDrafting(v: unknown): DraftingMode {
   const t = String(v ?? '').trim().toLowerCase()
-  return (DRAFTING_MODES as readonly string[]).includes(t) ? (t as DraftingMode) : 'auto'
+  return (DRAFTING_MODES as readonly string[]).includes(t) || (SHAPE_DRAFTERS as readonly string[]).includes(t) ? (t as DraftingMode) : 'auto'
 }
 
 // Left out means auto.
@@ -25,6 +32,14 @@ export function splitDrafter(argv: string[]): { argv: string[]; mode: DraftingMo
   if (mode === 'dflash2') return { argv, mode }
   const rest = argv.slice(0, i).concat(argv.slice(i + (hasValue ? 2 : 1)))
   return { argv: rest, mode }
+}
+
+// Inkling-2-Mini's setup reads --drafter off and writes "drafting": "off". Hy4-Flash's setup has
+// no such option, so Off cannot be had there from outside; both default to their own drafter.
+const SETUP_DRAFTER_OFF = ['inkling-2-mini']
+
+export function setupDrafterArgs(family: string, mode: DraftingMode): string[] {
+  return mode === 'off' && SETUP_DRAFTER_OFF.includes(family.toLowerCase()) ? ['--drafter', 'off'] : []
 }
 
 // setup.py names it strata-<family tag><model>.json, lower case.
@@ -105,6 +120,14 @@ export interface PrepareInput {
 export async function prepareDrafting(p: PrepareInput): Promise<void> {
   const { io } = p
   try {
+    const shape = STRATA_SHAPE_FAMILIES[p.family.toLowerCase()]
+    if (shape) {
+      // Their setup writes the drafter again at this launch, so nothing is saved here.
+      if (p.mode === 'off' && !SETUP_DRAFTER_OFF.includes(p.family.toLowerCase())) {
+        io.log(`Drafter: ${shape.title} setup turns ${shape.drafterLabel} on at every start; Off cannot be applied from here.`)
+      }
+      return
+    }
     // setup.py, strata.py, .venv and the run configs share one folder.
     const src = strataSourceDir(p.cloneDir)
     const cfgPath = runConfigPath(src, p.tags, p.family, p.model)

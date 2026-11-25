@@ -183,7 +183,7 @@ interface LlamaCppApi {
   updateTrackedEngines: () => Promise<{ updated: string[]; errors: string[] }>
   installGitEngine: (trackedId: string) => Promise<{ success: boolean; error?: string; path?: string }>
   updateGitEngine: (trackedId: string) => Promise<{ success: boolean; error?: string; updated?: boolean; skipped?: string }>
-  getEngineSettings: () => Promise<{ autoUpdateTrackedEngines: boolean; engineInstallModes: Record<string, EngineInstallMode>; autoUpdateBuildTools: boolean; rocmChannel: 'stable' | 'nightly'; rocmSource: 'tarball' | 'pip'; strata: StrataSettings; strataDataDir: string; strataRememberedDataDir: string | null; gitAvailable: boolean }>
+  getEngineSettings: () => Promise<{ autoUpdateTrackedEngines: boolean; engineInstallModes: Record<string, EngineInstallMode>; autoUpdateBuildTools: boolean; buildToolsOnPath: boolean; rocmChannel: 'stable' | 'nightly'; rocmSource: 'tarball' | 'pip'; strata: StrataSettings; strataDataDir: string; strataRememberedDataDir: string | null; gitAvailable: boolean }>
   setAutoUpdateTrackedEngines: (enabled: boolean) => Promise<{ success: boolean }>
   setEngineInstallMode: (trackedId: string, mode: EngineInstallMode) => Promise<{ success: boolean }>
   buildFromSource: (opts: { trackedId: string; type: string; extraArgs?: string; installTools?: boolean; gpuTarget?: string; pull?: boolean }) => Promise<{ success: boolean; path?: string; error?: string }>
@@ -194,6 +194,7 @@ interface LlamaCppApi {
   setRocmSource: (source: 'tarball' | 'pip') => Promise<{ success: boolean }>
   installBuildTools: (opts: { type: string; mode: 'install' | 'update'; gpuTarget?: string }) => Promise<{ success: boolean; error?: string }>
   setAutoUpdateBuildTools: (enabled: boolean) => Promise<{ success: boolean }>
+  setBuildToolsOnPath: (enabled: boolean) => Promise<{ success: boolean; error?: string }>
   onEngineUpdateState: (cb: (data: { trackedId: string; busy: boolean }) => void) => void
   setStrataSettings: (patch: { pullBeforeLaunch?: boolean; parallelOverride?: number | null; data?: Partial<StrataSettings['data']> }) => Promise<{ success: boolean }>
   pickStrataDataFolder: () => Promise<string | null>

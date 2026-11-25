@@ -160,7 +160,7 @@ export default function EngineParamsEditor({
   // ----- Presets (same model as the llama.cpp editor) -----
   // A Template saved before Manual was removed (marker 'clear') is FULL AUTO.
   const preset: Preset = args.__lastPreset === 'quick' ? 'quick' : 'fullauto'
-  const quickArgs = buildStrataQuickBaseline({ contextLength: meta?.contextLength })
+  const quickArgs = buildStrataQuickBaseline({ contextLength: meta?.contextLength, family })
   // The value a field has in the SELECTED preset: its explicit value there,
   // else the engine default.
   const baselineOf = (arg: string) => (preset === 'quick' && quickArgs[arg] !== undefined ? quickArgs[arg] : defaults[arg])

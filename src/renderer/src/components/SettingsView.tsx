@@ -53,7 +53,7 @@ export default function SettingsView() {
   const [gitBusy, setGitBusy] = useState<Record<string, string>>({})
   const [gitError, setGitError] = useState<Record<string, string>>({})
   const [engineSettings, setEngineSettings] = useState<{
-    autoUpdateTrackedEngines: boolean; engineInstallModes: Record<string, EngineInstallMode>; autoUpdateBuildTools: boolean; rocmChannel: 'stable' | 'nightly'; rocmSource: 'tarball' | 'pip'; strata: StrataSettings; strataDataDir: string
+    autoUpdateTrackedEngines: boolean; engineInstallModes: Record<string, EngineInstallMode>; autoUpdateBuildTools: boolean; buildToolsOnPath: boolean; rocmChannel: 'stable' | 'nightly'; rocmSource: 'tarball' | 'pip'; strata: StrataSettings; strataDataDir: string
     strataRememberedDataDir: string | null; gitAvailable: boolean
   } | null>(null)
   const refreshEngineSettings = useCallback(async () => {
@@ -1206,11 +1206,32 @@ export default function SettingsView() {
         )}
 
         {anySourceMode && (
+          <div className="settings-row">
+            <div>
+              <div className="settings-row-label">Add build tools to PATH</div>
+              <div className="settings-row-sub">
+                Adds the ROCm SDK the app installs to your user PATH and sets HIP_PATH, so other terminals and programs find it too. Without this, only the app's builds see it. Takes effect in new terminals (on Linux, after signing in again).
+              </div>
+            </div>
+            <div className="toggle-wrap">
+              <label className="toggle">
+                <input type="checkbox" checked={engineSettings?.buildToolsOnPath === true} onChange={async (e) => {
+                  const res = await window.api.setBuildToolsOnPath(e.target.checked)
+                  if (!res.success) alert(res.error || 'The PATH could not be changed.')
+                  refreshEngineSettings()
+                }} />
+                <span className="toggle-track"></span><span className="toggle-thumb"></span>
+              </label>
+            </div>
+          </div>
+        )}
+
+        {anySourceMode && (
           <div className="settings-row" style={{ flexDirection: 'column', alignItems: 'flex-start', gap: 10 }}>
             <div>
               <div className="settings-row-label">ROCm SDK for AMD GPUs</div>
               <div className="settings-row-sub">
-                A ROCm build needs AMD's SDK for your GPU family, kept in the engines folder (no administrator rights, nothing added to the system PATH). Tarball downloads and unpacks AMD's archive: self-contained, no Python needed. pip installs AMD's Python wheels into a virtual environment (needs Python 3.11 to 3.14). If one gives you trouble, switch to the other; the SDK of the other kind is replaced.
+                A ROCm build needs AMD's SDK for your GPU family, kept in the engines folder (no administrator rights; the system PATH is left alone unless Add build tools to PATH is on). Tarball downloads and unpacks AMD's archive: self-contained, no Python needed. pip installs AMD's Python wheels into a virtual environment (needs Python 3.11 to 3.14). If one gives you trouble, switch to the other; the SDK of the other kind is replaced.
               </div>
             </div>
             <SegmentedToggle<'tarball' | 'pip'>

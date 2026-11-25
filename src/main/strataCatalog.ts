@@ -5,9 +5,14 @@ import type { StrataTable } from '../shared/strata'
 //   - the file table (data/gguf_fingerprints.json): "family/variant" keys, the
 //     authoritative pairing for every file the engine installs;
 //   - setup.py: the families it declares that the table does not list (the
-//     own-path ones, like Qwen3.6, carry their variants in a "models" dict).
+//     own-path ones, like Qwen3.6, carry their variants in a "models" dict;
+//     the Hy4 and Inkling ones name their key and variants through the
+//     strata_control modules, which `readModule` hands over as text).
 // Python is not run; setup.py is read as text, and anything that does not
 // parse leaves just what the table gave.
+
+// The text of strata_control/<name>.py, or null when there is none.
+export type ModuleReader = (name: string) => string | null
 
 export interface StrataCatalog {
   // Family -> its variants, in the order the engine lists them.
@@ -34,8 +39,9 @@ function skipString(src: string, i: number): number {
 
 // The entries of the dict literal whose '{' is at `open`: each top-level
 // string key with the source text of its value. Entries that are not
-// `"key": value` (a ** spread) are skipped.
-function dictEntries(src: string, open: number): DictEntry[] {
+// `"key": value` (a ** spread) are skipped. With `identifiers`, a key that is
+// a dotted name (`hy4_family.FAMILY`) is kept too, as that name.
+function dictEntries(src: string, open: number, identifiers = false): DictEntry[] {
   const entries: DictEntry[] = []
   let i = open + 1
   const skipSpace = () => {
@@ -55,6 +61,9 @@ function dictEntries(src: string, open: number): DictEntry[] {
       key = src.slice(i + 1, end - 1)
       i = end
       skipSpace()
+    } else if (identifiers) {
+      const id = /^[A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*/.exec(src.slice(i))
+      if (id) { key = id[0]; i += id[0].length; skipSpace() }
     }
     // The value (or an entry we do not understand) runs to the next comma at
     // depth 0 or the closing brace.
@@ -75,9 +84,55 @@ function dictEntries(src: string, open: number): DictEntry[] {
 }
 
 // The entries of a module-level `NAME = { ... }`.
-function topLevelDict(src: string, name: string): DictEntry[] {
+function topLevelDict(src: string, name: string, identifiers = false): DictEntry[] {
   const m = new RegExp(`^${name}\\s*=\\s*\\{`, 'm').exec(src)
-  return m ? dictEntries(src, m.index + m[0].length - 1) : []
+  return m ? dictEntries(src, m.index + m[0].length - 1, identifiers) : []
+}
+
+// The string a module-level `NAME = "text"` holds, for a `module.NAME` reference.
+function constOf(read: ModuleReader | undefined, ref: string): string | null {
+  const m = /^(\w+)\.(\w+)$/.exec(ref.trim())
+  const text = m && read ? read(m[1]) : null
+  return text && m ? new RegExp(`^${m[2]}\\s*=\\s*"([^"]*)"`, 'm').exec(text)?.[1] ?? null : null
+}
+
+// The quoted names of a module-level `NAME = ( ... )` tuple or list, with a
+// `*OTHER` spread replaced by that tuple's names. Comments are skipped.
+function tupleNames(module: string, name: string, depth = 0): string[] {
+  const m = new RegExp(`^${name}\\s*=\\s*[(\\[]`, 'm').exec(module)
+  if (!m || depth > 4) return []
+  const from = m.index + m[0].length
+  let i = from
+  let level = 1
+  while (i < module.length && level > 0) {
+    const c = module[i]
+    if (c === '"' || c === "'") { i = skipString(module, i); continue }
+    if (c === '#') { while (i < module.length && module[i] !== '\n') i++; continue }
+    if (c === '(' || c === '[') level++
+    else if (c === ')' || c === ']') level--
+    i++
+  }
+  const out: string[] = []
+  for (const t of module.slice(from, i - 1).matchAll(/#[^\n]*|["']([^"']+)["']|\*\s*(\w+)/g)) {
+    if (t[1]) out.push(t[1])
+    else if (t[2]) out.push(...tupleNames(module, t[2], depth + 1))
+  }
+  return out
+}
+
+// The Hy4 and Inkling tables: `module.FAMILY: {... "models": {b: {...} for b in
+// module.ORDER[::-1]} ...}`. The family is the key's constant, the variants the
+// order tuple the comprehension walks (reversed with [::-1]).
+const SHAPE_DICTS = ['HY4_FAMILIES', 'INKLING_FAMILIES']
+
+function shapeFamily(entry: DictEntry, read: ModuleReader | undefined): { family: string; models: string[] } | null {
+  const family = /^\w+\.\w+$/.test(entry.key) ? constOf(read, entry.key) : entry.key
+  if (!family) return null
+  const walk = /"models"\s*:[\s\S]*?\bfor\s+\w+\s+in\s+(\w+)\.(\w+)(\[::-1\])?/.exec(entry.value)
+  if (!walk) return { family, models: modelsOf(entry.value) }
+  const text = read ? read(walk[1]) : null
+  const list = text ? tupleNames(text, walk[2]) : []
+  return { family, models: walk[3] ? list.reverse() : list }
 }
 
 // The entries of the dict a `"models": {` key opens inside a value.
@@ -89,7 +144,7 @@ function modelsOf(value: string): string[] {
 // The quoted names in a tuple's text.
 const names = (tuple: string): string[] => [...tuple.matchAll(/["']([^"']+)["']/g)].map(m => m[1])
 
-export function parseStrataCatalog(setupPy: string | null, table: StrataTable | null): StrataCatalog {
+export function parseStrataCatalog(setupPy: string | null, table: StrataTable | null, readModule?: ModuleReader): StrataCatalog {
   const families: Record<string, string[]> = {}
   const add = (family: string, model?: string) => {
     const list = (families[family] ??= [])
@@ -120,6 +175,14 @@ export function parseStrataCatalog(setupPy: string | null, table: StrataTable | 
         add(f.key)
         for (const m of modelsOf(f.value)) add(f.key, m)
       }
+      for (const dict of SHAPE_DICTS) {
+        for (const e of topLevelDict(setupPy, dict, true)) {
+          const f = shapeFamily(e, readModule)
+          if (!f || fromTable.has(f.family)) continue
+          add(f.family)
+          for (const m of f.models) add(f.family, m)
+        }
+      }
     } catch {
       // Keep what the table gave.
     }
@@ -128,7 +191,7 @@ export function parseStrataCatalog(setupPy: string | null, table: StrataTable | 
 }
 
 // Each family's "tag", the prefix of its models' run config names. Families without one are left out.
-export function parseFamilyTags(setupPy: string | null): Record<string, string> {
+export function parseFamilyTags(setupPy: string | null, readModule?: ModuleReader): Record<string, string> {
   const tags: Record<string, string> = {}
   if (!setupPy) return tags
   try {
@@ -136,6 +199,14 @@ export function parseFamilyTags(setupPy: string | null): Record<string, string> 
       for (const f of topLevelDict(setupPy, dict)) {
         const m = /"tag"\s*:\s*"([^"]*)"/.exec(f.value)
         if (m) tags[f.key] = m[1]
+      }
+    }
+    for (const dict of SHAPE_DICTS) {
+      for (const e of topLevelDict(setupPy, dict, true)) {
+        const family = shapeFamily(e, readModule)?.family
+        const ref = /"tag"\s*:\s*(?:"([^"]*)"|([\w.]+))/.exec(e.value)
+        const tag = ref?.[1] ?? (ref?.[2] ? constOf(readModule, ref[2]) : null)
+        if (family && tag) tags[family] = tag
       }
     }
   } catch {

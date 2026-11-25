@@ -1127,7 +1127,8 @@ var STRATA_ACTION_FLAGS = /* @__PURE__ */ new Set([
   "--prepare-pack",
   "--browser",
   "--move-data",
-  "--set-default-data-dir"
+  "--set-default-data-dir",
+  "--output"
 ]);
 
 // src/shared/importCommand.ts

@@ -9,6 +9,9 @@
 // prefill (prompt-processing) speed from the deltas between polls, and
 // persists session history to disk with a configurable retention cap.
 //
+// A Strata session whose /metrics cannot be read is recorded from Strata's own
+// log lines instead (recordStrataLog), and the reason is reported to the Logs.
+//
 // Caveat (documented honestly, not hidden): llama-server's /metrics doesn't
 // directly expose whether a given prompt-processing burst hit the KV cache
 // (warm) or not (cold). We classify bursts as "cached (warm)" when their
@@ -23,7 +26,7 @@ import { randomUUID } from 'crypto'
 import * as http from 'http'
 import { BrowserWindow, ipcMain, dialog } from 'electron'
 import { engineDef, type EngineId } from '../shared/engines'
-import { parseStrataMetrics } from './strataMetrics'
+import { parseStrataMetrics, parseStrataLogLine } from './strataMetrics'
 
 export interface PerfGenPoint { ts: number; contextTokens: number; genTps: number }
 export interface PerfPrefillPoint { ts: number; promptSize: number; promptTps: number; cached: boolean }
@@ -40,11 +43,17 @@ export interface PerfSessionData extends PerfSessionMeta {
 }
 
 const POLL_INTERVAL_MS = 2000
+// A loaded server can take a while to answer while it reads a long prompt.
+const FETCH_TIMEOUT_MS = 10000
+// How long a request's log line waits for /metrics to record the same request.
+const LOG_GRACE_MS = 3500
 
 let SESSIONS_DIR = ''
 let INDEX_PATH = ''
 let getLiveTemplateName: (templateId: string) => string | undefined = () => undefined
 let getMaxSessions: () => number = () => 20
+let isServerReady: (templateId: string) => boolean = () => false
+let onNote: ((templateId: string, name: string, message: string) => void) | undefined
 let onSessionEnded: ((templateId: string, summary: { firstTps: number | null; avgTps: number | null; endedAt: number }) => void) | undefined
 
 // Active (currently running) sessions, keyed by templateId.
@@ -52,6 +61,7 @@ const active = new Map<string, {
   session: PerfSessionData
   port: number
   engine: EngineId
+  apiKey?: string
   timer: NodeJS.Timeout
   // Last raw counters read from /metrics, for delta computation.
   lastPromptTokens: number
@@ -61,6 +71,12 @@ const active = new Map<string, {
   // Rolling median of COLD prefill throughput (tok/s) observed this
   // session, used as the baseline for the cached-vs-cold heuristic above.
   coldThroughputSamples: number[]
+  polling: boolean
+  // Points /metrics has recorded. A Strata session that has none is recorded from its log.
+  httpPoints: number
+  problem: string | null
+  // The prompt read of the Strata request in flight, from its log lines.
+  logPrompt: { first: { pos: number; elapsed: number } | null; last: { pos: number; elapsed: number } | null; total: number } | null
 }>
 
 function broadcast(channel: string, payload: any) {
@@ -111,31 +127,59 @@ function parsePrometheusMetrics(text: string): Record<string, number> {
   return out
 }
 
-function fetchMetrics(port: number, engine: EngineId): Promise<Record<string, number> | null> {
+interface MetricsResult { metrics: Record<string, number> | null; problem?: string }
+
+function fetchMetrics(port: number, engine: EngineId, apiKey?: string): Promise<MetricsResult> {
   return new Promise((resolve) => {
     // Strata answers /metrics with Prometheus text when Accept mentions
     // text/plain, so asking for both would never return the JSON it parses.
     const accept = engine === 'strata' ? 'application/json' : 'text/plain'
-    const req = http.get({ host: '127.0.0.1', port, path: engineDef(engine).card?.launch.metrics?.path ?? '/metrics', timeout: 3000, headers: { Accept: accept } }, (res) => {
+    // /metrics sits behind --api-key on every engine that has one. A server
+    // given several keys takes any one of them, not the list.
+    const key = apiKey?.split(',')[0].trim()
+    const headers: Record<string, string> = { Accept: accept }
+    if (key) headers.Authorization = `Bearer ${key}`
+    const req = http.get({ host: '127.0.0.1', port, path: engineDef(engine).card?.launch.metrics?.path ?? '/metrics', timeout: FETCH_TIMEOUT_MS, headers }, (res) => {
       let data = ''
+      // Decoded as a stream: a multi-byte character (a GPU name with a trademark sign, say)
+      // split between two chunks would otherwise be damaged.
+      res.setEncoding('utf8')
       res.on('data', (chunk) => { data += chunk })
       res.on('end', () => {
-        if (res.statusCode !== 200) { resolve(null); return }
-        resolve(engine === 'strata' ? parseStrataMetrics(data) : parsePrometheusMetrics(data))
+        if (res.statusCode !== 200) { resolve({ metrics: null, problem: `answered ${res.statusCode}${res.statusCode === 401 ? ' (API key refused)' : ''}` }); return }
+        const metrics = engine === 'strata' ? parseStrataMetrics(data) : parsePrometheusMetrics(data)
+        resolve(metrics ? { metrics } : { metrics: null, problem: 'answered with something unreadable' })
       })
     })
-    req.on('error', () => resolve(null))
-    req.on('timeout', () => { req.destroy(); resolve(null) })
+    req.on('error', (err: NodeJS.ErrnoException) => resolve({ metrics: null, problem: `unreachable (${err.code ?? err.message})` }))
+    req.on('timeout', () => { req.destroy(); resolve({ metrics: null, problem: 'timed out' }) })
   })
+}
+
+function emitPoint(templateId: string, entry: { session: PerfSessionData }, type: 'gen' | 'prefill', point: PerfGenPoint | PerfPrefillPoint) {
+  if (type === 'gen') entry.session.genPoints.push(point as PerfGenPoint)
+  else entry.session.prefillPoints.push(point as PerfPrefillPoint)
+  broadcast('perf-data-point', { templateId, type, point })
 }
 
 function poll(templateId: string) {
   const entry = active.get(templateId)
-  if (!entry) return
-  fetchMetrics(entry.port, entry.engine).then((m) => {
-    if (!m) return
+  if (!entry || entry.polling) return
+  entry.polling = true
+  fetchMetrics(entry.port, entry.engine, entry.apiKey).then(({ metrics: m, problem }) => {
+    entry.polling = false
     const stillActive = active.get(templateId)
     if (!stillActive) return  // stopped mid-flight
+    if (!m) {
+      // A server that is not up yet refuses connections; that only matters once it says it is ready.
+      if (problem && problem !== stillActive.problem && (isServerReady(templateId) || !problem.startsWith('unreachable'))) {
+        stillActive.problem = problem
+        onNote?.(templateId, stillActive.session.templateNameSnapshot,
+          `Monitoring: /metrics on port ${stillActive.port} ${problem}.${stillActive.engine === 'strata' ? ` Speeds are read from this log instead.${problem.includes('401') ? ' Strata also enforces an API key saved in its own config or in STRATA_API_KEY: put the same key in the Template.' : ''}` : ''}`)
+      }
+      return
+    }
+    stillActive.problem = null
 
     const promptTokens = m['llamacpp:prompt_tokens_total'] ?? stillActive.lastPromptTokens
     const promptSeconds = m['llamacpp:prompt_seconds_total'] ?? stillActive.lastPromptSeconds
@@ -151,8 +195,8 @@ function poll(templateId: string) {
       const genTps = dPredTokens / dPredSeconds
       const contextTokens = Math.round(promptTokens + predTokens)
       const point: PerfGenPoint = { ts: now, contextTokens, genTps: Math.round(genTps * 100) / 100 }
-      stillActive.session.genPoints.push(point)
-      broadcast('perf-data-point', { templateId, type: 'gen', point })
+      stillActive.httpPoints++
+      emitPoint(templateId, stillActive, 'gen', point)
     }
 
     // Prefill-speed data point: fires whenever new prompt tokens were
@@ -193,8 +237,8 @@ function poll(templateId: string) {
         ts: now, promptSize: Math.round(dPromptTokens),
         promptTps: Math.round(promptTps * 100) / 100, cached
       }
-      stillActive.session.prefillPoints.push(point)
-      broadcast('perf-data-point', { templateId, type: 'prefill', point })
+      stillActive.httpPoints++
+      emitPoint(templateId, stillActive, 'prefill', point)
     }
 
     stillActive.lastPromptTokens = promptTokens
@@ -204,12 +248,15 @@ function poll(templateId: string) {
 
     // Periodically persist so a crash/force-quit doesn't lose the whole session.
     saveSessionToDisk(stillActive.session)
-  }).catch(() => {})
+  }).catch(() => { entry.polling = false })
 }
 
 export function initPerfMonitor(appRoot: string, opts: {
   getLiveTemplateName: (templateId: string) => string | undefined
   getMaxSessions: () => number
+  isServerReady?: (templateId: string) => boolean
+  // A problem worth telling the user about, for the Logs view.
+  onNote?: (templateId: string, name: string, message: string) => void
   // Called once a session ends, with the first-poll and mean generation
   // tok/s observed during it (or null for either if no generation data
   // point was ever recorded). Used to persist "last session" speed stats
@@ -221,10 +268,12 @@ export function initPerfMonitor(appRoot: string, opts: {
   getLiveTemplateName = opts.getLiveTemplateName
   getMaxSessions = opts.getMaxSessions
   onSessionEnded = opts.onSessionEnded
+  if (opts.isServerReady) isServerReady = opts.isServerReady
+  onNote = opts.onNote
   if (!existsSync(SESSIONS_DIR)) { try { mkdirSync(SESSIONS_DIR, { recursive: true }) } catch {} }
 }
 
-export function startTracking(templateId: string, port: number, templateName: string, engine: EngineId = 'llama.cpp') {
+export function startTracking(templateId: string, port: number, templateName: string, engine: EngineId = 'llama.cpp', apiKey?: string) {
   // A card engine is polled only when its card says it serves metrics.
   const cardMetrics = engineDef(engine).card?.launch.metrics
   if (engineDef(engine).card && cardMetrics?.format !== 'prometheus') return
@@ -240,11 +289,44 @@ export function startTracking(templateId: string, port: number, templateName: st
   }
   const timer = setInterval(() => poll(templateId), POLL_INTERVAL_MS)
   active.set(templateId, {
-    session, port, engine, timer,
+    session, port, engine, apiKey, timer,
     lastPromptTokens: 0, lastPromptSeconds: 0, lastPredTokens: 0, lastPredSeconds: 0,
-    coldThroughputSamples: []
+    coldThroughputSamples: [], polling: false, httpPoints: 0, problem: null, logPrompt: null
   })
   broadcast('perf-session-started', { templateId, sessionId: session.id, startedAt: session.startedAt })
+}
+
+// Strata's own log lines as a source of speeds for a session whose /metrics gives
+// none: the end of a request gives its generation speed, and the progress lines
+// of its prompt read give a prefill speed. It waits briefly for /metrics to
+// record the same request first, so a working endpoint is never doubled.
+export function recordStrataLog(templateId: string, line: string) {
+  const entry = active.get(templateId)
+  if (!entry || entry.engine !== 'strata') return
+  const ev = parseStrataLogLine(line)
+  if (!ev) return
+  if (ev.kind === 'prompt') {
+    const mark = ev.read === null ? null : { pos: ev.read, elapsed: ev.elapsed }
+    // The clock running backwards means a new request began without the last one ending.
+    const p = entry.logPrompt && ev.elapsed >= (entry.logPrompt.last?.elapsed ?? 0) ? entry.logPrompt : { first: null, last: null, total: 0 }
+    entry.logPrompt = { first: p.first ?? mark, last: mark ?? p.last, total: ev.total }
+    return
+  }
+  const prompt = entry.logPrompt
+  entry.logPrompt = null
+  setTimeout(() => {
+    if (active.get(templateId) !== entry || entry.httpPoints > 0) return
+    const now = Date.now()
+    if (ev.tps && ev.tokens >= 2) {
+      emitPoint(templateId, entry, 'gen', { ts: now, contextTokens: (prompt?.total ?? 0) + ev.tokens, genTps: ev.tps })
+    }
+    const f = prompt?.first, l = prompt?.last
+    if (f && l && l.pos > f.pos && l.elapsed > f.elapsed) {
+      const promptTps = (l.pos - f.pos) / (l.elapsed - f.elapsed)
+      emitPoint(templateId, entry, 'prefill', { ts: now, promptSize: l.pos - f.pos, promptTps: Math.round(promptTps * 100) / 100, cached: false })
+    }
+    saveSessionToDisk(entry.session)
+  }, LOG_GRACE_MS)
 }
 
 export function stopTracking(templateId: string) {

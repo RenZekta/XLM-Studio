@@ -63,19 +63,23 @@
         {
           "arg": "--kv",
           "label": "KV Cache Precision",
-          "description": "KV cache precision above 8K context (up to 8K it is fp16). int8 is Strata's name for the 8-bit KV cache that llama.cpp calls q8_0: the same thing, so the web UI may show \"q8_0\" for it. q4_0 is 4-bit (Hadamard-rotated, half the memory); k8v4 stores K as 8-bit and V as 4-bit. fp16 is 16-bit, twice the memory of int8.",
+          "description": "KV cache precision above 8K context (up to 8K it is fp16). int8 is Strata's name for the 8-bit KV cache that llama.cpp calls q8_0: the same thing, so the web UI may show \"q8_0\" for it. q4_0 is 4-bit (Hadamard-rotated, half the memory); k8v4 stores K as 8-bit and V as 4-bit. fp16 is 16-bit, twice the memory of int8. Inkling-2-Mini takes only fp16, fp8, k8v8 (K and V 8-bit) and k8v4; on ROCm, Metal and SYCL it supports only fp16 and fp8 and uses fp8 in place of k8v8 and k8v4. Hy4-Flash does not use this setting.",
           "type": "select",
           "options": [
             "int8",
             "q4_0",
             "k8v4",
-            "fp16"
+            "fp16",
+            "fp8",
+            "k8v8"
           ],
           "optionLabels": {
             "int8": "int8 (8-bit, = q8_0)",
             "q4_0": "q4_0 (4-bit)",
             "k8v4": "k8v4 (K 8-bit, V 4-bit)",
-            "fp16": "fp16 (16-bit, twice the memory)"
+            "fp16": "fp16 (16-bit, twice the memory)",
+            "fp8": "fp8 (Inkling-2-Mini)",
+            "k8v8": "k8v8 (K and V 8-bit, Inkling-2-Mini, CUDA)"
           }
         },
         {
@@ -264,31 +268,37 @@
         {
           "arg": "--drafter",
           "label": "Drafter",
-          "description": "The speculative decoding drafter. Auto: Strata chooses best for the model and GPU based on measured speed. Drafters are downloaded at runtime.",
+          "description": "The speculative decoding drafter. Auto: Strata chooses best for the model and GPU based on measured speed. Drafters are downloaded at runtime. DFly2 is Hy4-Flash's drafter and DSpark is Inkling-2-Mini's; both are on by default, so Auto already uses them. Off turns DSpark off; Hy4-Flash's setup turns DFly2 on at every start, so Off does not apply there.",
           "type": "select",
           "options": [
             "auto",
             "mtp",
             "dflash2",
+            "dfly2",
+            "dspark",
             "off"
           ],
           "optionLabels": {
             "auto": "Auto",
             "mtp": "MTP",
             "dflash2": "DFlash2",
+            "dfly2": "DFly2 (Hy4-Flash)",
+            "dspark": "DSpark (Inkling-2-Mini)",
             "off": "Off"
           }
         },
         {
           "arg": "--draft-vocab",
           "label": "Draft Vocabulary",
-          "description": "The draft layer's tokens. cjk is the default, en saves about 110 MiB of VRAM, cyrillic and fr add those scripts.",
+          "description": "The draft layer's tokens. cjk is the default, en saves about 110 MiB of VRAM, cyrillic, fr, latin and arabic add those scripts.",
           "type": "select",
           "options": [
             "cjk",
             "en",
             "cyrillic",
-            "fr"
+            "fr",
+            "latin",
+            "arabic"
           ]
         },
         {
@@ -391,6 +401,28 @@
           "arg": "--image-native",
           "label": "Native Image Runner (Experimental)",
           "description": "EXPERIMENTAL: Strata's own DiT runner on CUDA or HIP instead of stable-diffusion.cpp.",
+          "type": "select",
+          "options": [
+            "off",
+            "on"
+          ],
+          "default": "off"
+        },
+        {
+          "arg": "--image-noise",
+          "label": "Native Image Noise (Experimental)",
+          "description": "EXPERIMENTAL: builds Strata's own noise generator into the image program.",
+          "type": "select",
+          "options": [
+            "off",
+            "on"
+          ],
+          "default": "off"
+        },
+        {
+          "arg": "--image-vae",
+          "label": "Native Image Decoder (Experimental)",
+          "description": "EXPERIMENTAL: Strata's own picture decoder instead of stable-diffusion.cpp's. CUDA or ROCm only.",
           "type": "select",
           "options": [
             "off",

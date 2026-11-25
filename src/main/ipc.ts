@@ -22,7 +22,7 @@ import { MCP_TOOL_IDS } from '../shared/types'
 import { extractBackendTypeFromAssetName } from '../shared/backendType'
 import { compareBackendVersions, isComparableBackendVersion, selectLatestRelease } from '../shared/backendVersion'
 import { BEELLAMA_BACKEND_KEY, BEELLAMA_KV_TYPES, BEELLAMA_EXTRA_COMMANDS } from '../shared/backendForks'
-import { initPerfMonitor, registerPerfHandlers, startTracking, stopTracking, stopAllTracking } from './perfMonitor'
+import { initPerfMonitor, registerPerfHandlers, startTracking, stopTracking, stopAllTracking, recordStrataLog } from './perfMonitor'
 import { initMcpLayer, registerMcpHandlers } from './mcpServer'
 import { toolTemplateAction, launchCommandForId } from './mcpControl'
 import { randomBytes } from 'crypto'
@@ -54,16 +54,19 @@ import { fingerprintGguf, ggufPresentShards } from './ggufTensors'
 import { groupShardedModels, parseShardName, shardName } from '../shared/ggufShards'
 import { resolveAppIcon } from './appIcon'
 import { parseFamilyTags, parseStrataCatalog, type StrataCatalog } from './strataCatalog'
-import { prepareDrafting, runStep, splitDrafter } from './strataDrafting'
+import { removeStrataRunScripts, type StrataRef } from './strataCleanup'
+import { resolvePinned } from '../shared/backendPin'
+import { prepareDrafting, runStep, setupDrafterArgs, splitDrafter } from './strataDrafting'
 import { LineAssembler } from './lineAssembler'
 import {
   STRATA_DATA_DIRNAME, DEFAULT_STRATA_DATA, strataLauncherName, looksLikeStrataClone, strataSourceDir, gitAvailable,
   gitEngineVersionLabel, baseTagOf, compareTags, latestRemoteTag, updateGitEngine, githubCloneUrl, cloneGitEngine,
-  probeGitEngine, readRememberedDataDir, resolveStrataData, buildStrataSpawn,
+  probeGitEngine, readRememberedDataDir, resolveStrataData, buildStrataSpawn, strataModuleFile, strataModuleReader,
   gitEngineInstances, instanceForOs, instanceToCopy, instanceNameFor, cloneGitEngineFrom
 } from './strataEngine'
 import { prepareBuildTools, installBuildTools, initBuildToolsState, buildToolsStatus, invalidateBuildToolsCaches, type ToolsPlanStatus, type ToolsContext } from './buildTools'
-import { findInstalledRocm, type RocmChannel } from './rocmSdk'
+import { findInstalledRocm, rocmSdkDir, type RocmChannel } from './rocmSdk'
+import { syncManagedPath } from './toolEnv'
 import { ROCM_GPUS, gfxForGpuName, rocmGpu, type RocmSdkSource } from '../shared/rocm'
 import {
   buildFromSource, detectToolchain, repoBranches, remoteBranchCommit, scanSourceBuilds, installedBuildKinds, pruneSupersededBuilds, isSourceBuildDir, engineRuntimeEnv,
@@ -281,6 +284,8 @@ interface AppSettings {
   // Update the build tools (git, CMake, compiler, GPU SDK) before a build when
   // a newer version is available.
   autoUpdateBuildTools?: boolean
+  // Put the build tools the app installs into its own folders on the user's PATH.
+  buildToolsOnPath?: boolean
   // Git engines (Strata) whose instance for an OS was made from another OS's once ("<trackedId>:<os>"),
   // so one that is deleted afterwards is not made again.
   seededGitInstances?: string[]
@@ -383,6 +388,7 @@ const DEFAULT_SETTINGS: AppSettings = {
   autoUpdateTrackedEngines: false,
   engineInstallModes: {},
   autoUpdateBuildTools: true,
+  buildToolsOnPath: false,
   seededGitInstances: [],
   rocmChannel: 'stable',
   rocmSource: 'tarball',
@@ -551,6 +557,7 @@ async function loadSettings(): Promise<AppSettings> {
       autoUpdateTrackedEngines: !!data.autoUpdateTrackedEngines,
       engineInstallModes: migrateEngineInstallModes(data, dedupedTracked),
       autoUpdateBuildTools: data.autoUpdateBuildTools !== false,
+      buildToolsOnPath: data.buildToolsOnPath === true,
       seededGitInstances: Array.isArray(data.seededGitInstances) ? data.seededGitInstances.filter((x: unknown): x is string => typeof x === 'string') : [],
       rocmChannel: data.rocmChannel === 'nightly' ? 'nightly' : 'stable',
       rocmSource: data.rocmSource === 'pip' ? 'pip' : 'tarball',
@@ -601,6 +608,16 @@ async function resolveMainBackendFolder(): Promise<string> {
   const s = await loadSettings()
   if (s.mainBackendFolder && existsSync(s.mainBackendFolder)) return s.mainBackendFolder
   return BACKEND_DIR
+}
+// Makes the PATH match the "Add build tools to PATH" setting: the newest ROCm SDK
+// in the engines folder when it is on, nothing of the app's when it is off. With
+// the setting off it leaves the PATH alone unless `undo` says it was just turned off.
+async function syncBuildToolsPath(undo = false): Promise<string | null> {
+  const s = await loadSettings()
+  if (!s.buildToolsOnPath && !undo) return null
+  const rootDir = await resolveMainBackendFolder()
+  const sdk = s.buildToolsOnPath ? findInstalledRocm(rootDir) : null
+  return syncManagedPath(rocmSdkDir(rootDir), sdk ? { dirs: [join(sdk.root, 'bin')], vars: { HIP_PATH: sdk.root, ROCM_PATH: sdk.root } } : null)
 }
 // Resolve the effective checkpoint folder (starred external folder, else the
 // default CHECKPOINTS_DIR), creating it on first use the same way the
@@ -2560,8 +2577,11 @@ export function registerIpcHandlers(): void {
       return t?.name
     } catch { return undefined }
   }
+  void syncBuildToolsPath()
   initPerfMonitor(APP_ROOT, {
     getLiveTemplateName,
+    isServerReady: (id) => serverReadyFlags.get(id) === true,
+    onNote: (id, name, message) => emitAppLog(id, name, message),
     getMaxSessions: () => {
       try {
         const s = JSON.parse(readFileSync(SETTINGS_PATH, 'utf-8'))
@@ -3359,11 +3379,39 @@ export function registerIpcHandlers(): void {
   function deleteTemplateImpl(id: string): { success: boolean; error?: string } {
     const fp = join(TEMPLATES_DIR, `${id}.json`)
     if (!isSafePath(TEMPLATES_DIR, fp)) return { success: false, error: 'Access denied' }
-    if (existsSync(fp)) unlinkSync(fp)
+    let gone: Record<string, any> | null = null
+    if (existsSync(fp)) {
+      try { gone = JSON.parse(readFileSync(fp, 'utf-8')) } catch { gone = null }
+      unlinkSync(fp)
+    }
+    if (gone && (gone.engine === 'strata' || gone.engineValues?.strata)) void removeStrataScriptsOf(gone)
     BrowserWindow.getAllWindows().forEach(win => {
       if (!win.isDestroyed()) win.webContents.send('templates-changed')
     })
     return { success: true }
+  }
+  // The run-<model>.sh/.bat that Strata's setup wrote for a deleted Template; never throws.
+  async function removeStrataScriptsOf(deleted: Record<string, any>): Promise<void> {
+    try {
+      const builds = (await listBackendsImpl()).filter(b => engineOf(b) === 'strata')
+      const global = (await loadSettings()).globalEngineBackends?.strata
+      const resolve = (ref: StrataRef): string | null => {
+        const build = ref.backendKey
+          ? resolvePinned('strata', { backendKey: ref.backendKey, backendType: ref.backendType, backendVersion: ref.backendVersion }, builds).build
+          : builds.find(b => b.backendKey === global?.backendKey) ?? builds[0]
+        return build?.path ?? null
+      }
+      const remaining: Record<string, any>[] = []
+      for (const f of readdirSync(TEMPLATES_DIR).filter(f => f.endsWith('.json'))) {
+        try { remaining.push(JSON.parse(readFileSync(join(TEMPLATES_DIR, f), 'utf-8'))) } catch { /* unreadable: not counted */ }
+      }
+      const tagsOf = (clone: string) => {
+        let setupText: string | null = null
+        try { setupText = readFileSync(join(strataSourceDir(clone), 'setup.py'), 'utf8') } catch { /* no tags */ }
+        return parseFamilyTags(setupText, strataModuleReader(clone))
+      }
+      removeStrataRunScripts({ deleted, remaining, resolve, tagsOf })
+    } catch { /* leftover scripts are harmless */ }
   }
   ipcMain.handle('delete-template', (_e, id: string) => deleteTemplateImpl(id))
   ipcMain.handle('import-template', async () => {
@@ -3693,6 +3741,8 @@ export function registerIpcHandlers(): void {
         // --drafter is Strata's saved drafting choice; setup only accepts it as dflash2.
         const drafter = splitDrafter(finalArgs)
         finalArgs = drafter.argv
+        // Inkling-2-Mini's setup writes the drafting itself and honors --drafter off.
+        finalArgs.push(...setupDrafterArgs(finalArgs[finalArgs.indexOf('--family') + 1] ?? '', drafter.mode))
         strataSpawn = buildStrataSpawn(opts.backendPath, finalArgs, data.env)
         if ('error' in strataSpawn) return { success: false, error: strataSpawn.error }
         const valueAfter = (flag: string) => { const i = finalArgs.indexOf(flag); return i !== -1 ? finalArgs[i + 1] ?? '' : '' }
@@ -3703,7 +3753,7 @@ export function registerIpcHandlers(): void {
         })
         await prepareDrafting({
           cloneDir: opts.backendPath, dataDir: data.dataDir, family: valueAfter('--family'), model: valueAfter('--model'),
-          mode: drafter.mode, tags: parseFamilyTags(setupText), env: data.env,
+          mode: drafter.mode, tags: parseFamilyTags(setupText, strataModuleReader(opts.backendPath)), env: data.env,
           io: { log: (line: string) => { sendLine(line); if (line.startsWith('Drafter:')) emitAppLog(opts.id, opts.name, line) } },
           installOnly: () => {
             const dry = buildStrataSpawn(opts.backendPath, [...finalArgs, '--no-start'], data.env)
@@ -3732,6 +3782,7 @@ export function registerIpcHandlers(): void {
           BrowserWindow.getAllWindows().forEach(win => {
             if (!win.isDestroyed()) win.webContents.send('server-log', { id: opts.id, name: opts.name, stream, line: text, ts: Date.now() })
           })
+          if (isStrata) recordStrataLog(opts.id, text)
           if (!serverReadyFlags.get(opts.id) && readyLine?.test(text.trim())) {
             serverReadyFlags.set(opts.id, true)
             emitAppLog(opts.id, opts.name, `Server ready - listening on port ${finalPort}`)
@@ -3829,18 +3880,19 @@ export function registerIpcHandlers(): void {
           if (!win.isDestroyed()) win.webContents.send('model-error', { id: opts.id, error: msg })
         })
       })
+      const serverApiKey = extractArgValue(finalArgs, '--api-key') || undefined
       runningProcesses.set(opts.id, {
         proc, port: finalPort,
         modelPath: (!isLlama ? opts.modelPath : extractArgValue(finalArgs, '--model', '-m')) || undefined,
         templateName: opts.name,
         checkpointsActive: kvCheckpointsEnabled,
         checkpoints: card?.checkpoints,
-        apiKey: ((isLlama || card) && extractArgValue(finalArgs, '--api-key')) || undefined,
+        apiKey: serverApiKey,
         engine: isLlama ? undefined : engineId,
         cloneDir: isStrata ? opts.backendPath : undefined
       })
       // Begin polling this instance's /metrics endpoint.
-      startTracking(opts.id, finalPort, opts.name, engineId)
+      startTracking(opts.id, finalPort, opts.name, engineId, serverApiKey)
       const readyHttp = card ? card.launch.ready?.http ?? (card.launch.ready?.log ? null : DEFAULT_READY.http) : null
       if (readyHttp) {
         // Any answer below 500 means the server is listening; engines that
@@ -4325,6 +4377,7 @@ export function registerIpcHandlers(): void {
         )
         buildToolsCache.clear()
         invalidateBuildToolsCaches()
+        void syncBuildToolsPath()
         if (abort.signal.aborted) return q.resolve({ success: false, error: 'Cancelled' })
         if (toolsError) {
           log(`Build failed: ${toolsError}`, true)
@@ -4451,6 +4504,7 @@ export function registerIpcHandlers(): void {
       installingTools = false
       buildToolsCache.clear()
       invalidateBuildToolsCaches()
+      void syncBuildToolsPath()
     }
   })
 
@@ -5701,7 +5755,8 @@ export function registerIpcHandlers(): void {
 
   // The families and variants one installed engine offers (its Template's
   // Model Family and Variant dropdowns), from its own file table and setup.py.
-  const strataCatalogCache = new Map<string, { stamp: string; catalog: StrataCatalog }>()
+  // `modules` are the strata_control files the parse read; a change to one of them is a change to the catalog.
+  const strataCatalogCache = new Map<string, { stamp: string; modules: string[]; catalog: StrataCatalog }>()
   async function strataCatalogFor(backendKey: string): Promise<StrataCatalog> {
     const bundled = app.isPackaged
       ? join(process.resourcesPath, 'resources', 'strata-fingerprints.json')
@@ -5718,13 +5773,16 @@ export function registerIpcHandlers(): void {
     const tableFile = own && existsSync(own) ? own : (!clone || isDefault) ? bundled : null
     const setupFile = clone ? join(strataSourceDir(clone), 'setup.py') : null
     const mtime = (f: string | null) => { try { return f ? String(statSync(f).mtimeMs) : '-' } catch { return '-' } }
-    const stamp = `${clone}|${mtime(tableFile)}|${mtime(setupFile)}`
+    const stampOf = (modules: string[]) => `${clone}|${[tableFile, setupFile, ...modules].map(mtime).join('|')}`
     const hit = strataCatalogCache.get(backendKey)
-    if (hit && hit.stamp === stamp) return hit.catalog
+    if (hit && hit.stamp === stampOf(hit.modules)) return hit.catalog
     let setupPy: string | null = null
     try { if (setupFile) setupPy = readFileSync(setupFile, 'utf-8') } catch {}
-    const catalog = parseStrataCatalog(setupPy, tableFile ? readStrataTable(tableFile)?.table ?? null : null)
-    strataCatalogCache.set(backendKey, { stamp, catalog })
+    const modules: string[] = []
+    const read = clone ? strataModuleReader(clone) : undefined
+    const readModule = read ? (name: string) => { const f = strataModuleFile(clone!, name); if (f) modules.push(f); return read(name) } : undefined
+    const catalog = parseStrataCatalog(setupPy, tableFile ? readStrataTable(tableFile)?.table ?? null : null, readModule)
+    strataCatalogCache.set(backendKey, { stamp: stampOf(modules), modules, catalog })
     return catalog
   }
   ipcMain.handle('get-strata-catalog', async (_e, backendKey: string) => strataCatalogFor(backendKey || ''))
@@ -6141,6 +6199,7 @@ export function registerIpcHandlers(): void {
       autoUpdateTrackedEngines: !!s.autoUpdateTrackedEngines,
       engineInstallModes: s.engineInstallModes ?? {},
       autoUpdateBuildTools: s.autoUpdateBuildTools !== false,
+      buildToolsOnPath: s.buildToolsOnPath === true,
       rocmChannel: (s.rocmChannel === 'nightly' ? 'nightly' : 'stable') as RocmChannel,
       rocmSource: (s.rocmSource === 'pip' ? 'pip' : 'tarball') as RocmSdkSource,
       strata,
@@ -6184,6 +6243,13 @@ export function registerIpcHandlers(): void {
     s.autoUpdateBuildTools = !!enabled
     await saveSettings(s)
     return { success: true }
+  })
+  ipcMain.handle('set-build-tools-on-path', async (_e, enabled: boolean) => {
+    const s = await loadSettings()
+    s.buildToolsOnPath = !!enabled
+    await saveSettings(s)
+    const error = await syncBuildToolsPath(true)
+    return error ? { success: false, error } : { success: true }
   })
   ipcMain.handle('set-strata-settings', async (_e, patch: Partial<StrataSettings> & { data?: Partial<StrataSettings['data']> }) => {
     const s = await loadSettings()
