@@ -20,6 +20,13 @@ name: Build Installers and Release
 # Run it by hand any time: Actions -> Build Installers and Release -> Run
 # workflow (optionally forcing a rebuild). Logic lives in
 # .github/scripts/release.sh.
+#
+# Retry loop for unavailable hosted runners: a queued build job is cancelled by
+# GitHub after ~15 minutes without ever getting a runner, which fails the run
+# and leaves the release untouched. The schedule trigger re-runs this workflow
+# every 20 minutes until it succeeds; once the release matches main, plan
+# reports `none` and a run costs seconds. Scheduled workflows are disabled by
+# default on forks (Settings -> Actions -> General).
 
 on:
   push:
@@ -30,11 +37,17 @@ on:
         description: Rebuild and replace the installers even if nothing changed
         type: boolean
         default: false
+  schedule:
+    # Runs against the latest commit on main, the commit a pending release waits for.
+    - cron: '*/20 * * * *'
 
 permissions:
   contents: read
 
 concurrency:
+  # One release at a time. A run arriving while another runs waits as `pending`,
+  # and a newer pending run replaces an older one, so the schedule cannot pile up
+  # attempts and the next try starts as soon as the lock frees.
   group: release
   cancel-in-progress: false
 
@@ -42,6 +55,7 @@ jobs:
   plan:
     if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     outputs:
       action: ${{ steps.plan.outputs.action }}
     steps:
@@ -61,6 +75,11 @@ jobs:
     needs: plan
     if: needs.plan.outputs.action == 'create' || needs.plan.outputs.action == 'rebuild'
     runs-on: ${{ matrix.os }}
+    # timeout-minutes does not count the wait for a runner, so this only bounds a
+    # build that actually started. Set just above the slowest successful build
+    # (windows-latest ~6 min) so a stuck build frees the `release` lock instead
+    # of running to the 6-hour default.
+    timeout-minutes: 30
     strategy:
       fail-fast: false   # a failed platform can be re-run alone
       matrix:
@@ -95,7 +114,7 @@ jobs:
             dist/*.AppImage
             dist/*.dmg
           if-no-files-found: error
-          retention-days: 1
+          retention-days: 10
 
   publish:
     needs: [plan, build]
@@ -105,6 +124,7 @@ jobs:
       && needs.plan.outputs.action != 'none'
       && (needs.build.result == 'success' || needs.build.result == 'skipped') }}
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     permissions:
       contents: write
     steps:

@@ -20,12 +20,23 @@ SHA="${GITHUB_SHA:-$(git rev-parse HEAD)}"
 die() { echo "::error::$*" >&2; exit 1; }
 
 # Paths that never reach the installers; a push touching only these moves the
-# tag (so the source archive is current) without rebuilding.
+# tag (so the source archive is current) without rebuilding. Anything else is
+# assumed shipped, so the default is to rebuild.
+#
+# docs/** and assets/** ship despite their names (extraResources in
+# electron-builder.yml, plus the installer and desktop icons), and
+# .github/VERSION is the app version: all three are matched as packaged ahead
+# of the unpackaged list. `*` in a case pattern crosses `/`, so `.github/*`
+# matches at any depth.
 only_unpackaged() {
   local path
   while IFS= read -r path; do
     case "$path" in
-      *.md|LICENSE|.gitignore|.gitattributes|assets/github-banner.png|scripts/*-verify.js|scripts/brand-assets.py) ;;
+      # Before assets/*: the banner is README-only.
+      assets/github-banner.png) ;;
+      .github/VERSION|docs/*|assets/*) return 1 ;;
+      .github/*) ;;
+      *.md|LICENSE|.gitignore|.gitattributes|scripts/*-verify.js|scripts/brand-assets.py) ;;
       *) return 1 ;;
     esac
   done
